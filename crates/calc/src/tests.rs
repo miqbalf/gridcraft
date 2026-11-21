@@ -1,3 +1,4 @@
+use gridcraft_core::fmath;
 use gridcraft_core::{CellError, CellRef, Value};
 use gridcraft_model::{Cell, Formula, Workbook};
 
@@ -2052,8 +2053,8 @@ fn implicit_intersection_operator() {
     t.set("D1", "=@{7,8;9,10}");
     t.set("D2", "=@A2");
     t.set("D3", "=SUM(@A1:A3)");
-    assert_eq!(t.num("B2"), 2f64.tanh());
-    assert_eq!(t.num("B7"), 5f64.tanh());
+    assert_eq!(t.num("B2"), fmath::tanh(2f64));
+    assert_eq!(t.num("B7"), fmath::tanh(5f64));
     for at in ["B9", "E9"] {
         assert_eq!(t.get(at), Value::Error(CellError::Value), "{at}");
     }
@@ -2066,7 +2067,7 @@ fn implicit_intersection_operator() {
     }
     t.calc.recalc_all(&mut t.wb);
     let other = |at: &str| t.wb.sheet(1).unwrap().value(c(at));
-    assert_eq!(other("B2"), Value::Number(2f64.tanh())); // Sheet1!B2
+    assert_eq!(other("B2"), Value::Number(fmath::tanh(2f64))); // Sheet1!B2
     assert_eq!(other("C1"), Value::Number(0.0));
     assert_eq!(other("B9"), Value::Error(CellError::Value));
     assert_eq!(other("E2"), Value::Error(CellError::Value));
@@ -2080,7 +2081,7 @@ fn implicit_intersection_operator() {
     assert_eq!(t.get("E1"), Value::text("x"));
     // Without `@` (a dynamic-array formula) the same formula spills.
     t.set("F1", "=TANH(A1:A3)");
-    assert_eq!((t.num("F1"), t.num("F2"), t.num("F3")), (1f64.tanh(), 2f64.tanh(), 3f64.tanh()));
+    assert_eq!((t.num("F1"), t.num("F2"), t.num("F3")), (fmath::tanh(1f64), fmath::tanh(2f64), fmath::tanh(3f64)));
 }
 
 /// "Set precision as displayed": results are rounded to their cell's format before they are

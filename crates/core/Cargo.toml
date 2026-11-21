@@ -12,6 +12,7 @@ workspace = true
 serde = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
+libm = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"

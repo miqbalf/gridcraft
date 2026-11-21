@@ -1,3 +1,4 @@
+use gridcraft_core::fmath;
 use super::day_count::{basis_arg, date, year_frac};
 use super::{Arg, CellError, Ctx, R, Value, num, num_val, opt_bool, opt_num};
 
@@ -34,7 +35,7 @@ pub(super) fn db(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     if cost == 0.0 {
         return num_val(0.0);
     }
-    let rate = crate::util::round_half_away(1.0 - (salvage / cost).powf(1.0 / life), 3);
+    let rate = crate::util::round_half_away(1.0 - fmath::pow(salvage / cost, 1.0 / life), 3);
     let mut total = 0.0;
     let mut dep = 0.0;
     let mut p = 1.0;
@@ -64,9 +65,9 @@ pub(super) fn ddb(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
         rate = 1.0;
         old = if period == 1.0 { cost } else { 0.0 };
     } else {
-        old = cost * (1.0 - rate).powf(period - 1.0);
+        old = cost * fmath::pow(1.0 - rate, period - 1.0);
     }
-    let new = cost * (1.0 - rate).powf(period);
+    let new = cost * fmath::pow(1.0 - rate, period);
     let dep = if new < salvage { old - salvage } else { old - new };
     num_val(dep.max(0.0))
 }

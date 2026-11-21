@@ -6,6 +6,7 @@
 pub mod addr;
 pub mod color;
 pub mod date;
+pub mod fmath;
 pub mod parse;
 pub mod region;
 pub mod value;

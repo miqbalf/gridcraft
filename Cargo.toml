@@ -27,6 +27,8 @@ gridcraft-mcp = { path = "crates/mcp" }
 gridcraft-pdf = { path = "crates/pdf" }
 gridcraft-math = { path = "crates/math" }
 gridcraft-live = { path = "crates/live" }
+# Transcendental maths that gives the same bits on every target (`gridcraft_core::fmath`).
+libm = "0.2.16"
 # Live co-editing (collab-craft, miqbalf fork): departs from AGENTS.md rule 10 by owner decision
 # (as for WordCraft). All three come from one collab-craft revision.
 craft-collab = { git = "https://github.com/miqbalf/collab-craft", rev = "95eea9626ad619e2e4e2a3cf0fcb56d6fe6be048", version = "=0.1.0" }

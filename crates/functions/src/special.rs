@@ -2,6 +2,7 @@
 //! distribution and a generic monotone root finder. Written from the standard textbook
 //! formulations (Lanczos approximation, series / continued-fraction expansions).
 
+use gridcraft_core::fmath;
 use std::f64::consts::PI;
 
 const LANCZOS_G: f64 = 7.0;
@@ -27,8 +28,8 @@ pub(crate) fn ln_gamma(x: f64) -> f64 {
     }
     if x < 0.5 {
         // Reflection.
-        let s = (PI * x).sin().abs();
-        return (PI / s).ln() - ln_gamma(1.0 - x);
+        let s = fmath::sin(PI * x).abs();
+        return fmath::ln(PI / s) - ln_gamma(1.0 - x);
     }
     if x < 15.0 && x == x.floor() {
         // Exact for small integers.
@@ -38,7 +39,7 @@ pub(crate) fn ln_gamma(x: f64) -> f64 {
             f *= i;
             i += 1.0;
         }
-        return f.ln();
+        return fmath::ln(f);
     }
     let x = x - 1.0;
     let mut a = LANCZOS[0];
@@ -46,7 +47,7 @@ pub(crate) fn ln_gamma(x: f64) -> f64 {
     for (i, c) in LANCZOS.iter().enumerate().skip(1) {
         a += c / (x + i as f64);
     }
-    0.5 * (2.0 * PI).ln() + (x + 0.5) * t.ln() - t + a.ln()
+    0.5 * fmath::ln(2.0 * PI) + (x + 0.5) * fmath::ln(t) - t + fmath::ln(a)
 }
 
 /// Γ(x). NaN at non-positive integers, infinite on overflow.
@@ -64,12 +65,12 @@ pub(crate) fn gamma(x: f64) -> f64 {
         return f;
     }
     if x < 0.5 {
-        return PI / ((PI * x).sin() * gamma(1.0 - x));
+        return PI / (fmath::sin(PI * x) * gamma(1.0 - x));
     }
     if x > 171.7 {
         return f64::INFINITY;
     }
-    ln_gamma(x).exp()
+    fmath::exp(ln_gamma(x))
 }
 
 /// ln B(a, b).
@@ -93,7 +94,7 @@ pub(crate) fn reg_gamma_p(a: f64, x: f64) -> f64 {
 
 /// Regularised upper incomplete gamma Q(a, x) = 1 − P(a, x).
 pub(crate) fn reg_gamma_q(a: f64, x: f64) -> f64 {
-    let front = if a > 0.0 && x > 0.0 && x.is_finite() { (-x + a * x.ln() - ln_gamma(a)).exp() } else { 0.0 };
+    let front = if a > 0.0 && x > 0.0 && x.is_finite() { fmath::exp(-x + a * fmath::ln(x) - ln_gamma(a)) } else { 0.0 };
     reg_gamma_q_front(a, x, front)
 }
 
@@ -113,7 +114,7 @@ pub(crate) fn reg_gamma_q_front(a: f64, x: f64, front: f64) -> f64 {
 
 /// `e^-x x^a / Γ(a)`.
 fn front_of(a: f64, x: f64) -> f64 {
-    (-x + a * x.ln() - ln_gamma(a)).exp()
+    fmath::exp(-x + a * fmath::ln(x) - ln_gamma(a))
 }
 
 fn gamma_series(a: f64, x: f64, front: f64) -> f64 {
@@ -199,8 +200,8 @@ pub(crate) fn erfc(x: f64) -> f64 {
 /// Regularised incomplete beta I_x(a, b).
 pub(crate) fn reg_inc_beta(x: f64, a: f64, b: f64) -> f64 {
     if x > 0.0 && x < 1.0 && a > 0.0 && b > 0.0 {
-        let ln_bt = -ln_beta(a, b) + a * x.ln() + b * (1.0 - x).ln();
-        return reg_inc_beta_front(x, a, b, ln_bt.exp());
+        let ln_bt = -ln_beta(a, b) + a * fmath::ln(x) + b * fmath::ln(1.0 - x);
+        return reg_inc_beta_front(x, a, b, fmath::exp(ln_bt));
     }
     reg_inc_beta_front(x, a, b, 0.0)
 }
@@ -268,7 +269,7 @@ fn beta_cf(a: f64, b: f64, x: f64) -> f64 {
 
 /// Standard normal density.
 pub(crate) fn norm_pdf(z: f64) -> f64 {
-    (-0.5 * z * z).exp() / (2.0 * PI).sqrt()
+    fmath::exp(-0.5 * z * z) / (2.0 * PI).sqrt()
 }
 
 /// Standard normal cumulative distribution.
@@ -303,7 +304,7 @@ pub(crate) fn norm_inv(p: f64) -> f64 {
     const D: [f64; 4] = [7.784_695_709_041_462e-3, 3.224_671_290_700_398e-1, 2.445_134_137_142_996, 3.754_408_661_907_416];
     let plow = 0.02425;
     let x = if p < plow {
-        let q = (-2.0 * p.ln()).sqrt();
+        let q = (-2.0 * fmath::ln(p)).sqrt();
         (((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5]) / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
     } else if p <= 1.0 - plow {
         let q = p - 0.5;
@@ -311,13 +312,13 @@ pub(crate) fn norm_inv(p: f64) -> f64 {
         (((((A[0] * r + A[1]) * r + A[2]) * r + A[3]) * r + A[4]) * r + A[5]) * q
             / (((((B[0] * r + B[1]) * r + B[2]) * r + B[3]) * r + B[4]) * r + 1.0)
     } else {
-        let q = (-2.0 * (1.0 - p).ln()).sqrt();
+        let q = (-2.0 * fmath::ln(1.0 - p)).sqrt();
         -(((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5]) / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
     };
     let mut x = x;
     for _ in 0..2 {
         let e = norm_cdf(x) - p;
-        let u = e * (2.0 * PI).sqrt() * (x * x / 2.0).exp();
+        let u = e * (2.0 * PI).sqrt() * fmath::exp(x * x / 2.0);
         let nx = x - u / (1.0 + x * u / 2.0);
         if !nx.is_finite() {
             break;

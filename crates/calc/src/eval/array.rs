@@ -1,4 +1,5 @@
 use super::{Array, BinOp, CellError, MAX_CELLS, Value, compare};
+use gridcraft_core::fmath;
 
 /// The aggregates that can fold a reference without building an array.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -212,7 +213,7 @@ fn binary_scalar(op: BinOp, a: &Value, b: &Value, sys: gridcraft_core::DateSyste
             } else if x == 0.0 && y < 0.0 {
                 Value::Error(CellError::Div0)
             } else {
-                Value::number(x.powf(y))
+                Value::number(fmath::pow(x, y))
             }
         }),
         BinOp::Concat => match (a.to_text(), b.to_text()) {
