@@ -31,6 +31,10 @@ pub(super) struct PassHost<'a> {
     /// every row, so once per sheet rather than once per range read.
     used: HashMap<usize, Option<RangeRef>>,
     rng: &'a mut u64,
+    /// Where `RAND` gets its numbers when it is not this pass's own generator.
+    pub(super) volatile: Option<&'a dyn super::VolatileSource>,
+    /// The formula being evaluated and the random draws it has made so far (restarts per cell).
+    current: Option<(Key, u32)>,
     /// Who held a spill before the calculation; unset: every formula did (reading order decides).
     pub(super) standing: Option<&'a super::Standing>,
     now: f64,
@@ -101,6 +105,8 @@ impl<'a> PassHost<'a> {
             spill_index: SpillIndex::default(),
             used: HashMap::default(),
             rng,
+            volatile: None,
+            current: None,
             standing: None,
             now,
             cycle: false,
@@ -329,10 +335,12 @@ impl PassHost<'_> {
         }
         let expr = std::sync::Arc::clone(expr);
         let outer_out_of_stack = std::mem::replace(&mut self.out_of_stack, false);
+        let outer_cell = self.current.replace((k, 0));
         let v = {
             let mut ev = Evaluator::new(self, k.0, k.1);
             ev.value(&expr)
         };
+        self.current = outer_cell;
         let out_of_stack = std::mem::replace(&mut self.out_of_stack, outer_out_of_stack);
         if out_of_stack && self.depth > 1 && self.suspend.is_none() {
             // It ran out of the stack left below the formulas that read it: it is calculated
@@ -771,6 +779,11 @@ impl Host for PassHost<'_> {
         self.now
     }
     fn random(&mut self) -> f64 {
+        if let (Some(source), Some((k, draw))) = (self.volatile, self.current.as_mut()) {
+            let n = *draw;
+            *draw = draw.saturating_add(1);
+            return source.random(k.0, k.1, n);
+        }
         // xorshift64*
         let mut x = *self.rng;
         x ^= x >> 12;
