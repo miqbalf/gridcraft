@@ -26,6 +26,12 @@ gridcraft-ui-egui = { path = "crates/ui-egui" }
 gridcraft-mcp = { path = "crates/mcp" }
 gridcraft-pdf = { path = "crates/pdf" }
 gridcraft-math = { path = "crates/math" }
+gridcraft-live = { path = "crates/live" }
+# Live co-editing (collab-craft, miqbalf fork): departs from AGENTS.md rule 10 by owner decision
+# (as for WordCraft). All three come from one collab-craft revision.
+craft-collab = { git = "https://github.com/miqbalf/collab-craft", rev = "95eea9626ad619e2e4e2a3cf0fcb56d6fe6be048", version = "=0.1.0" }
+craft-live = { git = "https://github.com/miqbalf/collab-craft", rev = "95eea9626ad619e2e4e2a3cf0fcb56d6fe6be048", version = "=0.1.0" }
+craft-live-worker = { git = "https://github.com/miqbalf/collab-craft", rev = "95eea9626ad619e2e4e2a3cf0fcb56d6fe6be048", version = "=0.1.0" }
 # Every craft-libs crate (craft-update, craft-window and the file-format crates here, craft-ui in
 # ui-egui, craft-print in the app, craft-web-api and craft-web-host in the web app) comes from one
 # craft-libs revision.

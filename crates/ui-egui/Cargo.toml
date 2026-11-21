@@ -9,9 +9,10 @@ description = "GridCraft egui frontend (Excel-style UI); swappable — nothing b
 workspace = true
 
 [dependencies]
-# The shared capture slot (`craft_ui::capture`) comes from the one craft-libs revision every
-# craft-libs dependency uses (see the root Cargo.toml).
-craft-ui = { git = "https://github.com/storytold/craft-libs", rev = "aa84415bae3b765fef6b7ef42404f66ad1cff9d9" }
+# The shared capture slot (`craft_ui::capture`) and `craft_ui::presence`. This is the
+# miqbalf/craft-libs revision `craft-web-host` already uses; it departs from AGENTS.md rule 10 by
+# owner decision (as for WordCraft).
+craft-ui = { git = "https://github.com/miqbalf/craft-libs", rev = "71e6ef899f551665f690970d57a204afb433c5dd" }
 gridcraft-engine = { workspace = true }
 gridcraft-chart = { workspace = true }
 # `monochrome_emoji_fonts` restores the Noto Emoji and emoji-icon faces that 0.37 moved behind

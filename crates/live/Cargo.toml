@@ -1,0 +1,30 @@
+[package]
+name = "gridcraft-live"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "GridCraft live co-editing: the yrs schema, layout, mapping, gate, undo and presence over craft-live"
+
+[lints]
+workspace = true
+
+[features]
+# An in-memory relay so tests can join a real session with no server (dev use only).
+test-util = ["craft-live/test-util"]
+# The native socket hub, for the relay tests.
+native-hub = ["craft-collab/native-hub"]
+
+[dependencies]
+gridcraft-core = { workspace = true }
+gridcraft-formula = { workspace = true }
+gridcraft-model = { workspace = true }
+gridcraft-calc = { workspace = true }
+gridcraft-engine = { workspace = true }
+gridcraft-xlsx = { workspace = true }
+# From miqbalf/collab-craft, departing from AGENTS.md rule 10 by owner decision.
+craft-collab = { workspace = true }
+craft-live = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
