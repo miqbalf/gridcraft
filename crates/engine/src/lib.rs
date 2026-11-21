@@ -16,6 +16,7 @@ pub mod display;
 pub mod fill;
 pub mod io;
 pub mod links;
+pub mod live;
 pub mod macros;
 pub mod outline;
 pub mod paper;
@@ -43,6 +44,7 @@ pub use gridcraft_formula as formula;
 pub use gridcraft_math as math;
 pub use gridcraft_model as model;
 pub use gridcraft_numfmt as numfmt;
+pub use live::{EditObserver, EditReport, Unshared};
 pub use selection::Selection;
 pub use windows::{Target, TargetGuard, WindowState, WindowView};
 
@@ -225,6 +227,9 @@ pub struct DocState {
     /// The references `edit.goTo` with `record: true` went to in this document, newest first,
     /// without names, each area written with its sheet (`Sheet1!B14:C22,Sheet1!F19:G30`).
     pub go_to_recent: Vec<String>,
+    /// While an [`EditObserver`] is installed and a top-level command runs: the structural edits
+    /// it and the commands nested in it made. Apart from `edits`, which a macro step owns.
+    pub(crate) observed_edits: Option<Vec<(String, gridcraft_formula::adjust::Edit)>>,
 }
 
 static NEXT_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -362,6 +367,7 @@ impl DocState {
             touched: None,
             edits: None,
             go_to_recent: vec![],
+            observed_edits: None,
         }
     }
     pub fn is_dirty(&self) -> bool {
@@ -563,6 +569,8 @@ pub struct Session {
     /// Measures cell text for AutoFit Column Width. Without it (CLI, MCP) AutoFit uses
     /// [`cmd::format::approx_text_width`].
     pub text_width: Option<TextWidth>,
+    /// Hears each top-level command that changed a document ([`live::EditObserver`]).
+    observer: Option<Box<dyn EditObserver>>,
 }
 
 impl Session {
@@ -760,6 +768,12 @@ impl Session {
         let doc_uid = before.as_ref().map(|(uid, ..)| *uid);
         let requests_before = self.ui_requests.len();
         let marked = doc_uid.zip(start).map(|(uid, (_, len))| (uid, len));
+        // A top-level command on a document with an observer installed is reported when it ends.
+        let observed = doc_uid.filter(|_| self.depth == 0 && self.observing());
+        let observed_before = observed.and(before.as_ref()).map(|(_, wb, _)| wb.clone());
+        if let Some(uid) = observed {
+            self.observe_begin(uid);
+        }
         self.marks.extend(marked);
         self.depth = self.depth.saturating_add(1);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (spec.run)(self, &params)));
@@ -767,6 +781,7 @@ impl Session {
         if marked.is_some() {
             self.marks.pop();
         }
+        let observed_edits = observed.map(|uid| self.observe_take(uid));
         let result = match result {
             Ok(r) => r,
             Err(p) => {
@@ -914,6 +929,9 @@ impl Session {
             // Inside a group the redo history waits for the group: `group_end` clears it when the
             // group becomes a step, and `group_rollback` puts it back as it was.
             d.revision += 1;
+        }
+        if let (Some(uid), Some(wb), Some(edits)) = (observed, observed_before, observed_edits) {
+            self.observe_end(uid, id, &params, wb, edits);
         }
         // The history limit applies once the outermost command has collapsed its steps, so the
         // lengths it compared stay true. Meanwhile the steps made inside it are bounded on their own.
