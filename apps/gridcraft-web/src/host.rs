@@ -15,7 +15,16 @@
 //! - `gridcraft:save` (to the host): `{ name, saveAs, bytes, export }` for every file GridCraft
 //!   would otherwise download. With `export: false`, the host stores the XLSX workbook; with
 //!   `export: true`, it stores a separate file (such as a PDF) without replacing the workbook.
-//!   `saveAs` remains `false`; it does not distinguish Save from Save As here.
+//!   `saveAs` is `false`, except for a host that answers saves (below).
+//! - `gridcraft:host` with `saves: true` (from the host): the host stores saves and answers each.
+//!   `gridcraft:save` then carries an `id`, and `saveAs` is `true` for a workbook under another
+//!   name than the file the host opened. The workbook counts as saved only on
+//!   `gridcraft:saved { id, name? }` (a `name` is its name from then on: a conflict copy), and on
+//!   `gridcraft:save-failed { id, error }` it stays unsaved with "Couldn't save to Nextcloud:
+//!   {error}". Without `saves` nothing changes: a file handed over counts as saved at once.
+//! - `gridcraft:fonts` (from the host) is ignored: GridCraft has no user-font path on the web
+//!   (no system fonts, and a font file cannot be bound to a family there), so nothing is lost by
+//!   a host sending it.
 //! - `gridcraft:dirty` whenever unsaved changes appear or go away, `gridcraft:failed` when the
 //!   app couldn't start.
 //!
@@ -31,7 +40,7 @@ use craft_web_host::{Mode, Outgoing, file_name, message_type};
 use gridcraft_ui_egui::{Inbox, Services, SheetApp};
 use wasm_bindgen::JsValue;
 
-use crate::host_save::{SaveMessage, sync_saved};
+use crate::host_save::{Answer, Receipts, SaveMessage, sync_saved};
 use crate::hostmode::open_name;
 
 /// The app id in the host messages (`gridcraft:ready`).
@@ -47,8 +56,14 @@ const MAX_AUTHOR_CHARS: usize = 200;
 pub struct Bridge {
     host: Rc<Host>,
     save_target: Rc<SaveTarget>,
-    /// Names of the files handed to the host since the last frame.
+    /// Names of the files handed to the host since the last frame (a host that does not answer).
     saved: Rc<RefCell<Vec<String>>>,
+    /// The saves a host that answers each is yet to answer.
+    receipts: Rc<RefCell<Receipts>>,
+    /// What the host answered, for the next frame.
+    answers: Rc<RefCell<Vec<Answer>>>,
+    /// The name of the file the host sent: a save under another name is a new file.
+    opened: Rc<RefCell<Option<String>>>,
 }
 
 impl Bridge {
@@ -68,7 +83,14 @@ impl Bridge {
             }
             Mode::Page => SaveTarget::Page(canvas.clone()),
         };
-        Some(Self { host: Rc::new(host), save_target: Rc::new(save_target), saved: Rc::default() })
+        Some(Self {
+            host: Rc::new(host),
+            save_target: Rc::new(save_target),
+            saved: Rc::default(),
+            receipts: Rc::default(),
+            answers: Rc::default(),
+            opened: Rc::default(),
+        })
     }
 
     /// Send saved and exported files to the host instead of downloading them, and hear files
@@ -105,21 +127,60 @@ impl Bridge {
     pub fn sync(&self, app: &mut SheetApp) {
         let saved = std::mem::take(&mut *self.saved.borrow_mut());
         sync_saved(&saved, app);
+        let answers = std::mem::take(&mut *self.answers.borrow_mut());
+        {
+            let mut receipts = self.receipts.borrow_mut();
+            receipts.hold(app);
+            for answer in answers {
+                if let Some(name) = receipts.answer(app, answer) {
+                    *self.opened.borrow_mut() = Some(name);
+                }
+            }
+        }
         self.host.post_dirty(app.session.documents().iter().any(|d| d.is_dirty()));
     }
 
     fn post_save(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
         let name = file_name(Some(path), "document");
-        self.save_target.post(SaveMessage::new(&name, bytes)).map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")))?;
-        self.saved.borrow_mut().push(name);
+        let confirms = self.receipts.borrow().confirms();
+        let id = confirms.then(|| self.receipts.borrow_mut().start(&name));
+        let mut message = SaveMessage::new(&name, bytes);
+        if let Some(id) = &id {
+            message = message.answered(id, self.opened.borrow().as_deref());
+        }
+        if let Err(e) = self.save_target.post(message) {
+            let error = e.as_string().unwrap_or_else(|| format!("{e:?}"));
+            if let Some(id) = id {
+                // No answer will come: say so now.
+                self.receipts.borrow_mut().cancel(&id);
+                self.answers.borrow_mut().push(Answer::Failed { id, error: error.clone() });
+            }
+            return Err(error);
+        }
+        if id.is_none() {
+            self.saved.borrow_mut().push(name);
+        }
         Ok(())
     }
 
     fn listen(&self, inbox: Inbox, ctx: egui::Context) {
-        self.host.listen(move |message| {
-            if let Message::Open { name, data } = message {
-                deliver_open(&inbox, &ctx, &name, &data);
+        let bridge = self.clone();
+        self.host.listen(move |message| match message {
+            Message::Open { name, data } => {
+                if deliver_open(&inbox, &ctx, &name, &data) {
+                    *bridge.opened.borrow_mut() = Some(open_name(&name));
+                }
             }
+            Message::Host { saves: true, .. } => bridge.receipts.borrow_mut().set_confirms(),
+            Message::Saved { id, name } => {
+                bridge.answers.borrow_mut().push(Answer::Saved { id, name });
+                ctx.request_repaint();
+            }
+            Message::SaveFailed { id, error } => {
+                bridge.answers.borrow_mut().push(Answer::Failed { id, error });
+                ctx.request_repaint();
+            }
+            _ => {}
         });
     }
 }
@@ -139,8 +200,11 @@ impl SaveTarget {
         let set = |key, value: JsValue| js_sys::Reflect::set(&payload, &JsValue::from_str(key), &value);
         set("name", save.name.into())?;
         set("bytes", buffer.clone().into())?;
-        set("saveAs", JsValue::FALSE)?;
+        set("saveAs", JsValue::from_bool(save.save_as))?;
         set("export", JsValue::from_bool(save.export))?;
+        if let Some(id) = save.id {
+            set("id", id.into())?;
+        }
         match self {
             Self::Parent { parent, origin } => {
                 set("type", kind.as_str().into())?;
@@ -159,15 +223,16 @@ impl SaveTarget {
 /// The file an open message carries, pushed onto the inbox for the next frame, like a dropped
 /// file. A host's file is untrusted input: an oversized one is refused before it is copied into
 /// the app's memory (the data's own length, not the host's claim).
-fn deliver_open(inbox: &Inbox, ctx: &egui::Context, name: &str, data: &FileData) {
+fn deliver_open(inbox: &Inbox, ctx: &egui::Context, name: &str, data: &FileData) -> bool {
     let FileData::Bytes(array) = data else {
         log::warn!("host file {name} came as a File; GridCraft reads bytes only; not opened");
-        return;
+        return false;
     };
     if data.size() > MAX_OPEN_BYTES as f64 {
         log::warn!("host file is {} bytes, over the {} MiB host open limit; not opened", data.size(), MAX_OPEN_BYTES >> 20);
-        return;
+        return false;
     }
     inbox.lock().unwrap_or_else(|e| e.into_inner()).push((open_name(name), array.to_vec()));
     ctx.request_repaint();
+    true
 }

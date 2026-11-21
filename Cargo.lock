@@ -1167,9 +1167,11 @@ dependencies = [
 [[package]]
 name = "craft-web-host"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=aa84415bae3b765fef6b7ef42404f66ad1cff9d9#aa84415bae3b765fef6b7ef42404f66ad1cff9d9"
+source = "git+https://github.com/miqbalf/craft-libs?rev=71e6ef899f551665f690970d57a204afb433c5dd#71e6ef899f551665f690970d57a204afb433c5dd"
 dependencies = [
+ "serde_json",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 
@@ -2482,6 +2484,7 @@ dependencies = [
  "eframe",
  "egui",
  "gridcraft-engine",
+ "gridcraft-model",
  "gridcraft-ui-egui",
  "js-sys",
  "log",
