@@ -19,6 +19,8 @@ use serde_json::Value as Json;
 pub struct SpyHub {
     inner: MemHub,
     pub sizes: Rc<RefCell<Vec<usize>>>,
+    /// For every submit, whether it carried a fence.
+    pub fenced: Rc<RefCell<Vec<bool>>>,
     /// How many lock requests this hub sent.
     pub locks: Rc<RefCell<usize>>,
 }
@@ -32,8 +34,9 @@ impl SpyHub {
 
 impl Hub for SpyHub {
     fn send(&mut self, msg: ClientMsg) -> craft_collab::Result<()> {
-        if let ClientMsg::Submit { params, .. } = &msg {
+        if let ClientMsg::Submit { params, fence, .. } = &msg {
             self.sizes.borrow_mut().push(serde_json::to_string(params).map_or(0, |s| s.len()));
+            self.fenced.borrow_mut().push(fence.is_some());
         }
         if matches!(msg, ClientMsg::Lock { .. }) {
             *self.locks.borrow_mut() += 1;
@@ -55,6 +58,7 @@ pub struct Peer {
     pub session: Session,
     pub live: GridLive<SpyHub>,
     pub sizes: Rc<RefCell<Vec<usize>>>,
+    pub fenced: Rc<RefCell<Vec<bool>>>,
     pub locks: Rc<RefCell<usize>>,
     pub notices: Vec<String>,
 }
@@ -113,15 +117,16 @@ impl Room {
         let uid = name.to_lowercase();
         let hub = self.relay.connect(&uid, name, access == Access::Edit);
         let sizes = Rc::new(RefCell::new(Vec::new()));
+        let fenced = Rc::new(RefCell::new(Vec::new()));
         let locks = Rc::new(RefCell::new(0));
-        let hub = SpyHub { inner: hub, sizes: sizes.clone(), locks: locks.clone() };
+        let hub = SpyHub { inner: hub, sizes: sizes.clone(), fenced: fenced.clone(), locks: locks.clone() };
         let mut session = Session::new();
         let base = BaseFile { bytes: &self.bytes, name: FILE, expected_sha256: None };
         let live = match hash {
             Some(h) => GridLive::start_with(hub, ROOM, &base, access, &uid, &mut session, h),
             None => GridLive::start(hub, ROOM, &base, access, &uid, &mut session),
         };
-        self.peers.push(Peer { session, live: live.unwrap(), sizes, locks, notices: Vec::new() });
+        self.peers.push(Peer { session, live: live.unwrap(), sizes, fenced, locks, notices: Vec::new() });
         self.peers.len() - 1
     }
 

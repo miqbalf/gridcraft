@@ -398,15 +398,15 @@ fn until_ran(room: &mut Room, i: usize) {
 }
 
 #[test]
-fn a_rejoin_after_the_edit_ran_is_told_and_the_edit_lands_once() {
+fn a_rejoin_after_the_edit_ran_keeps_the_edit_once_and_tells_nothing() {
     let mut room = Room::new(2);
     room.run(0, "home.insertRows", json!({"rows": "3:3"})).unwrap();
     until_ran(&mut room, 0);
     room.relay.drop_link(room.peers[0].live.core().hub().inner().mem());
     room.relay.restore_link(room.peers[0].live.core().hub().inner().mem());
     room.settle();
-    let told = room.notices_of(0).iter().any(|n| n.contains("connection dropped") && n.contains("sent again") && !n.contains("not kept"));
-    assert!(told, "{:?}", room.notices_of(0));
+    // The edit went out under its fence and the relay ordered it: the rejoin alone loses nothing.
+    assert!(room.notices_of(0).is_empty(), "{:?}", room.notices_of(0));
     let want = reference(&room.bytes, &[("home.insertRows", json!({"rows": "3:3"}))]);
     for i in 0..2 {
         assert_eq!(room.finger(i), want, "peer {i}: one insert");
@@ -417,6 +417,85 @@ fn a_rejoin_after_the_edit_ran_is_told_and_the_edit_lands_once() {
     room.run(1, "home.deleteRows", json!({"rows": "2:2"})).unwrap();
     room.settle();
     same_everywhere(&room, "after the rejoin");
+}
+
+#[test]
+fn a_rejoin_before_the_run_asks_again_and_the_edit_lands_once() {
+    let mut room = Room::new(2);
+    room.run(0, "home.insertRows", json!({"rows": "3:3"})).unwrap();
+    room.pump(0); // the lock request is out and granted; the grant is not read yet
+    room.relay.drop_link(room.peers[0].live.core().hub().inner().mem());
+    room.relay.restore_link(room.peers[0].live.core().hub().inner().mem());
+    room.settle();
+    let want = reference(&room.bytes, &[("home.insertRows", json!({"rows": "3:3"}))]);
+    for i in 0..2 {
+        assert_eq!(room.finger(i), want, "peer {i}: one insert");
+    }
+    assert_eq!(room.relay.holder("grid/struct"), None, "the scope was given back");
+    same_everywhere(&room, "rejoin before the run");
+}
+
+#[test]
+fn a_lease_lost_before_the_run_is_refused_taken_back_and_reaches_nobody() {
+    let mut room = Room::new(2);
+    let before = room.finger(0);
+    room.run(0, "home.insertRows", json!({"rows": "3:3"})).unwrap();
+    // The request is granted at the relay when it is sent; Alice has not read the grant yet.
+    room.relay.lapse("grid/struct");
+    let mut bob = room.relay.connect("bob-raw", "Bob", true);
+    bob.send(ClientMsg::Lock { doc: ROOM.into(), scope: "grid/struct".into() }).unwrap();
+    let ops_before = room.relay.seq();
+    room.settle();
+    // Alice ran under a token that is not the lock's any more: refused, rolled back.
+    let notices = room.notices_of(0);
+    assert!(notices.iter().any(|n| n.contains("was not kept") && n.contains("Nothing of it was shared")), "{notices:?}");
+    assert!(!notices.iter().any(|n| n.starts_with("another editor took ")), "one notice for the one loss: {notices:?}");
+    assert_eq!(room.relay.seq(), ops_before, "nothing ordered reached the room");
+    for i in 0..2 {
+        assert_eq!(room.finger(i), before, "peer {i}");
+    }
+    assert_eq!(room.peers[0].live.replica().unwrap().ops_len(), 0);
+    assert_eq!(room.peers[0].live.applied_ops(), 0);
+    same_everywhere(&room, "after the loss");
+    // Bob gives the lock back; Alice's next try goes through.
+    bob.send(ClientMsg::Unlock { doc: ROOM.into(), scope: "grid/struct".into(), token: None }).unwrap();
+    room.settle();
+    room.run(0, "home.insertRows", json!({"rows": "3:3"})).unwrap();
+    room.settle();
+    let want = reference(&room.bytes, &[("home.insertRows", json!({"rows": "3:3"}))]);
+    for i in 0..2 {
+        assert_eq!(room.finger(i), want, "peer {i}: the retry");
+    }
+    same_everywhere(&room, "retry after the loss");
+}
+
+#[test]
+fn every_update_of_an_ordered_edit_is_fenced_and_only_one_is_in_flight() {
+    let mut room = Room::new(2);
+    let from = room.peers[0].sizes.borrow().len();
+    room.run(0, "home.insertRows", json!({"rows": "150000:150000"})).unwrap();
+    // Pump Alice alone: the relay answers into her inbox, so a second fenced submit may only
+    // follow a pump that read the answer to the one before.
+    let mut last = from;
+    let mut bursts = Vec::new();
+    for _ in 0..200 {
+        room.pump(0);
+        let now = room.peers[0].sizes.borrow().len();
+        if now > last {
+            bursts.push(now - last);
+            last = now;
+        }
+    }
+    let fenced = room.peers[0].fenced.borrow()[from..].to_vec();
+    assert!(fenced.len() > 1, "the edit went in parts: {fenced:?}");
+    assert!(fenced.iter().all(|f| *f), "fill-only and multi-chunk updates carry the fence: {fenced:?}");
+    assert!(bursts.iter().all(|b| *b == 1), "one fenced submit per answer: {bursts:?}");
+    room.settle();
+    let want = reference(&room.bytes, &[("home.insertRows", json!({"rows": "150000:150000"}))]);
+    for i in 0..2 {
+        assert_eq!(room.finger(i), want, "peer {i}");
+    }
+    same_everywhere(&room, "fenced far insert");
 }
 
 #[test]
@@ -441,7 +520,7 @@ fn an_edit_that_waits_for_an_open_undo_group_runs_once_it_closes() {
 }
 
 #[test]
-fn a_deferred_edit_does_not_run_after_a_rejoin_took_its_lock() {
+fn a_deferred_edit_that_runs_after_a_rejoin_is_refused_and_taken_back() {
     let mut room = Room::new(2);
     let token = room.peers[1].session.group_begin("macro").unwrap();
     room.run(0, "cell.set", json!({"cell": "D5", "input": "from alice"})).unwrap();
@@ -456,11 +535,13 @@ fn a_deferred_edit_does_not_run_after_a_rejoin_took_its_lock() {
     room.pump(1);
     room.peers[1].session.group_end(token).unwrap();
     room.settle();
-    let told = room.notices_of(1).iter().any(|n| n.contains("connection dropped") && n.contains("Nothing was changed"));
+    // The relay dropped the grant with the old link, so the edit that ran late under it is
+    // refused and taken back: the user is told, and nobody else ever saw it.
+    let told = room.notices_of(1).iter().any(|n| n.contains("was not kept") && n.contains("Nothing of it was shared"));
     assert!(told, "{:?}", room.notices_of(1));
     let want = reference(&room.bytes, &[("cell.set", json!({"cell": "D5", "input": "from alice"}))]);
     for i in 0..2 {
-        assert_eq!(room.finger(i), want, "peer {i}: the insert never ran");
+        assert_eq!(room.finger(i), want, "peer {i}: the insert is out again");
     }
     assert_eq!(room.peers[0].live.replica().unwrap().ops_len(), 0);
     // The scope is free: Alice's own insert is granted and lands.
@@ -508,7 +589,7 @@ fn far_insert_after(earlier: &[(&str, Json)], what: &str) {
         room.run(0, id, p.clone()).unwrap();
         room.settle();
     }
-    let from = room.peers[0].sizes.borrow().len();
+    let from = room.peers[1].sizes.borrow().len();
     room.run(1, "home.insertRows", json!({"rows": "150000:150000"})).unwrap();
     room.settle();
     assert!(sent_since(&room, 1, from).len() > 1, "{what}: the fill went in parts");
@@ -556,4 +637,11 @@ fn a_broken_link_after_the_edit_ran_does_not_claim_it_will_be_sent_again() {
     let told = notices.iter().any(|n| n.contains("link to the room broke") && n.contains("may not have reached"));
     assert!(told, "{notices:?}");
     assert!(!notices.iter().any(|n| n.contains("sent again")), "{notices:?}");
+}
+
+#[test]
+fn the_schema_the_host_joins_with_is_gridcraft_one_plus_the_build() {
+    let s = gridcraft_live::schema();
+    assert!(s.starts_with("gridcraft/1_") && s.len() > "gridcraft/1_".len(), "{s}");
+    assert!(s.chars().all(|c| c.is_ascii_alphanumeric() || c == '/' || c == '_' || c == '.' || c == '-'), "{s}");
 }
