@@ -99,6 +99,9 @@ pub struct Bridge {
     opened: Rc<RefCell<Option<String>>>,
     /// The window edits a room: its document service saves the workbook, this window does not.
     live_on: Rc<Cell<bool>>,
+    /// The page sent a `live` message: this window is a room's, joined or not. Never cleared, so a
+    /// failed join cannot turn into a save over the room's file.
+    live_asked: Rc<Cell<bool>>,
 }
 
 impl Bridge {
@@ -126,6 +129,7 @@ impl Bridge {
             answers: Rc::default(),
             opened: Rc::default(),
             live_on: Rc::default(),
+            live_asked: Rc::default(),
         })
     }
 
@@ -183,8 +187,8 @@ impl Bridge {
 
     fn post_save(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
         let name = file_name(Some(path), "document");
-        if self.live_on.get() && crate::host_save::is_workbook(&name) {
-            return Err("the document service saves this file while it is edited live".into());
+        if let Some(why) = crate::live_ticket::save_refusal(self.live_on.get(), self.live_asked.get(), &name) {
+            return Err(why.into());
         }
         let confirms = self.receipts.borrow().confirms();
         let id = confirms.then(|| self.receipts.borrow_mut().start(&name));
@@ -289,6 +293,10 @@ const NEWER_TEXT: &str = "This file is being edited with a newer GridCraft. Upda
 /// Longest wait for a base file that is not there yet, and how often it is asked for.
 const BASE_RETRIES: u32 = 4;
 const BASE_RETRY_MS: i32 = 500;
+/// Told when the base file did not arrive in time; the local document stays usable.
+const BASE_TIMEOUT: &str = "The file did not arrive within 30 seconds.";
+/// The whole base fetch gives up after this.
+const BASE_TIMEOUT_MS: i32 = 30_000;
 /// The least time between two `live-state` posts that only differ in the peers or the save.
 const REPORT_EVERY_MS: f64 = 1000.0;
 
@@ -296,14 +304,17 @@ impl Bridge {
     /// Hear the parent's `live` messages: the first fetches the file and joins, later ones are
     /// ticket refreshes. They wait in `events` for the next frame ([`Live::frame`]).
     pub fn listen_live(&self, events: LiveEvents, joining: Rc<RefCell<Joining>>, ctx: egui::Context) {
+        let asked = self.live_asked.clone();
         self.host.listen_live(move |message| match message {
             Err(LiveError::UnsupportedProto(_)) => {
+                asked.set(true);
                 events.borrow_mut().push(LiveEvent::Newer);
                 ctx.request_repaint();
             }
             // The error never quotes the message, so no ticket reaches the log.
             Err(e) => log::warn!("live message refused: {e}"),
             Ok(message) => {
+                asked.set(true);
                 let access = crate::live_ticket::ticket_access(message.ticket());
                 let next = joining.borrow_mut().message(&message.room, access);
                 match next {
@@ -396,6 +407,8 @@ impl Live {
                 }
                 LiveEvent::Failed(e) => {
                     log::error!("live file not fetched: {e}");
+                    // A ticket that came during the fetch is older than the next join's.
+                    self.pending = None;
                     not_opened(app, &e);
                 }
                 LiveEvent::Open(message, bytes, hash) => self.open(app, bridge, &message, &bytes, hash),
@@ -496,7 +509,9 @@ fn tell(app: &mut SheetApp, text: &str) {
 }
 
 fn not_opened(app: &mut SheetApp, error: &str) {
-    let text = app.ui.language.tr_fill("Couldn't open the file for live editing: {error}", &[("error", error)]);
+    let lang = app.ui.language;
+    let text = lang.tr_fill("Couldn't open the file for live editing: {error}", &[("error", error)]);
+    let text = format!("{text} {}", lang.tr(crate::live_ticket::SAVE_OFF_AFTER_FAILED_JOIN));
     app.notice = Some(Notice { text, kind: NoticeKind::Warning, action: None });
 }
 
@@ -541,13 +556,31 @@ async fn fetch_file(file_url: &str) -> Result<Vec<u8>, String> {
     if !crate::live_ticket::same_origin(&url.protocol(), &url.origin(), &page_origin) {
         return Err("the file is not on this site".into());
     }
+    // One deadline for the whole fetch, retries and body included: aborting settles a hung fetch.
+    let abort = web_sys::AbortController::new().map_err(|_| "the file could not be fetched")?;
+    let signal = abort.signal();
+    let timer = abort.clone();
+    let on_timeout = wasm_bindgen::closure::Closure::once_into_js(move || timer.abort());
+    let timeout = window.set_timeout_with_callback_and_timeout_and_arguments_0(on_timeout.unchecked_ref(), BASE_TIMEOUT_MS).ok();
+    let fetched = fetch_bytes(&window, &url.href(), &signal).await;
+    if let Some(id) = timeout {
+        window.clear_timeout_with_handle(id);
+    }
+    match fetched {
+        Err(_) if signal.aborted() => Err(BASE_TIMEOUT.to_owned()),
+        other => other,
+    }
+}
+
+async fn fetch_bytes(window: &web_sys::Window, href: &str, signal: &web_sys::AbortSignal) -> Result<Vec<u8>, String> {
     let mut tries = 0;
     let response = loop {
         let init = web_sys::RequestInit::new();
+        init.set_signal(Some(signal));
         init.set_method("GET");
         init.set_mode(web_sys::RequestMode::SameOrigin);
         init.set_credentials(web_sys::RequestCredentials::SameOrigin);
-        let response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str_and_init(&url.href(), &init))
+        let response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str_and_init(href, &init))
             .await
             .map_err(|_| "the file could not be fetched")?;
         let response: web_sys::Response = response.dyn_into().map_err(|_| "the fetch gave no response")?;

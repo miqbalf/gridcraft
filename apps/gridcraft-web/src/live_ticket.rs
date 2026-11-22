@@ -19,6 +19,11 @@ pub const NO_BASE_HASH: &str = "The file address carries no checksum, so the fil
 /// Told when the fetched file is not the one the room was opened on.
 pub const BASE_CHANGED: &str = "The file changed since the room was opened. Reopen the file.";
 
+/// Added to the notice of a live open that failed.
+pub const SAVE_OFF_AFTER_FAILED_JOIN: &str = "Saving is off in this window; reopen the file to edit it live.";
+/// Why a workbook save is refused while the window belongs to a room.
+const SAVE_BY_SERVICE: &str = "the document service saves this file while it is edited live";
+
 /// The relay's permission bit for changing the file (OCS numbering: read 1, update 2).
 const PERMISSION_UPDATE: u64 = 2;
 
@@ -153,6 +158,17 @@ impl Joining {
     }
 }
 
+/// Why a save of `name` must not go to the host, or `None` when it may. A window the page made a
+/// room's (`asked`) never saves a workbook itself: joined, the document service saves the room;
+/// not joined (the fetch, the check or the join failed), a save would replace the room's file with
+/// a document that never was it. Exports are copies and always go.
+pub fn save_refusal(joined: bool, asked: bool, name: &str) -> Option<&'static str> {
+    if !(joined || asked) || !crate::host_save::is_workbook(name) {
+        return None;
+    }
+    Some(if joined { SAVE_BY_SERVICE } else { SAVE_OFF_AFTER_FAILED_JOIN })
+}
+
 /// The `live-state` state and reason for the session's status.
 pub fn host_status(status: &LiveStatus) -> (HostStatus, Option<String>) {
     match status {
@@ -220,6 +236,15 @@ mod tests {
         assert_eq!(base_sha256("/f?sha256=abcd"), None, "not 64 digits");
         assert_eq!(base_sha256(&format!("/f?sha256={}", "zz".repeat(32))), None, "not hex");
         assert_eq!(base_sha256(&format!("/f?sha256={}", hex(hash).to_uppercase())), Some(hash), "hex digits in either case");
+    }
+
+    #[test]
+    fn a_failed_join_never_saves_over_the_rooms_file() {
+        // The page sent `live`, the join failed: joined is false but the window is the room's.
+        assert!(save_refusal(false, true, "Budget.xlsx").is_some(), "no workbook save after a failed join");
+        assert!(save_refusal(true, true, "Budget.xlsx").is_some(), "the service saves a joined room");
+        assert!(save_refusal(false, true, "Budget.pdf").is_none(), "an export is a copy");
+        assert!(save_refusal(false, false, "Budget.xlsx").is_none(), "a window that was never asked to go live saves as before");
     }
 
     #[test]
