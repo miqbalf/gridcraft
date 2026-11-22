@@ -24,6 +24,7 @@ gridcraft-xlsx = { workspace = true }
 # From miqbalf/collab-craft, departing from AGENTS.md rule 10 by owner decision.
 craft-collab = { workspace = true }
 craft-live = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
