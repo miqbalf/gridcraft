@@ -661,6 +661,9 @@ impl Session {
         if i < self.docs.len() {
             let d = self.docs.remove(i);
             self.groups.retain(|g| g.doc != d.uid);
+            if self.live_undo.as_ref().is_some_and(|l| l.doc == d.uid) {
+                self.live_undo = None;
+            }
             // A macro being debugged in this workbook ends with it; its group just went.
             if self.macro_debug.as_ref().is_some_and(|m| m.doc == d.uid) {
                 self.macro_debug = None;
