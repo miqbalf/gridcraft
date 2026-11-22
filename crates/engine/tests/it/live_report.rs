@@ -222,7 +222,7 @@ fn every_registered_command_change_is_reported_or_unshared() {
         "insert.picture",
         "pageLayout.background",
     ];
-    let (mut ran, mut changed_any, mut checked) = (0usize, 0usize, 0usize);
+    let (mut ran, mut changed_any, mut checked, mut replayed_reports) = (0usize, 0usize, 0usize, 0usize);
     let mut failures: Vec<String> = Vec::new();
     let mut local_used: std::collections::BTreeSet<&str> = Default::default();
     for name in ["sales", "budget", "grades"] {
@@ -286,6 +286,7 @@ fn every_registered_command_change_is_reported_or_unshared() {
             let what = if report.edits.is_empty() {
                 what
             } else {
+                replayed_reports += 1;
                 let Some(replayed) = replay_json(report) else {
                     failures.push(format!("{name} {id}: the line edits of the report cannot be replayed remotely"));
                     continue;
@@ -307,6 +308,7 @@ fn every_registered_command_change_is_reported_or_unshared() {
     let unused: Vec<_> = LOCAL.iter().filter(|id| !local_used.contains(*id)).collect();
     assert!(unused.is_empty(), "named as local but never seen changing only the view: {unused:?}");
     // The run must have exercised something: relations, not counts of our choosing.
+    assert!(replayed_reports > 0, "no report with line edits went through the replay check");
     assert!(changed_any > 10, "only {changed_any} of {ran} commands changed a workbook");
     assert!(checked * 2 > changed_any, "{checked} of {changed_any} changes were checked against a report");
 }

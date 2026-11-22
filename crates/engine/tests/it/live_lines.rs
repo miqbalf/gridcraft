@@ -210,9 +210,9 @@ fn structural_report_replays_to_after() {
     assert!(r.unshared.is_empty(), "{:?}", r.unshared);
     assert!(r.cells.is_empty() && r.lines.is_empty(), "{:?} {:?}", r.cells, r.lines);
     assert_eq!(r.edits.len(), 2, "one edit per area");
-    let (mut c, cuid) = (Session::new(), 0);
+    let mut c = Session::new();
     run(&mut c, "file.new", json!({}));
-    let cuid = c.documents()[0].uid + cuid;
+    let cuid = c.documents()[0].uid;
     c.replace_workbook_quiet(cuid, r.before.clone()).unwrap();
     c.apply_remote(cuid, |cx| {
         for (sheet, e) in &r.edits {
