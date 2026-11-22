@@ -12,6 +12,7 @@
 //! gridcraft-cli mcp [--connect PORT] [--in FILE | --sample NAME]
 //! gridcraft-cli send <port> <method> [json]
 //! gridcraft-cli sandbox-check [--read PATH]... [--exec PATH]... [-- PROGRAM ARGS...]
+//! gridcraft-cli live-worker --listen ADDR --relay URL --nextcloud URL [--insecure-dev]
 //! gridcraft-cli version | --version
 //! ```
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
@@ -31,6 +32,7 @@ macro_rules! outln {
 }
 
 mod check;
+mod live_worker;
 mod sandbox_check;
 
 use gridcraft_engine::Session;
@@ -53,6 +55,9 @@ const USAGE: &str = "usage:
   gridcraft-cli send <port> <method> [json]
   gridcraft-cli sandbox-check [--read PATH]... [--exec PATH]... [-- PROGRAM ARGS...]
                      whether this system confines programs (no program: a confined self-test)
+  gridcraft-cli live-worker --listen ADDR --relay URL --nextcloud URL [--insecure-dev]
+                     the live co-editing document service for the Nextcloud app; secrets come
+                     from CRAFT_RELAY_SECRET and CRAFT_WORKER_SECRET, rooms from CRAFT_WORKER_MAX_ROOMS
   gridcraft-cli version";
 
 /// stdout went away. A reader that stopped early (a closed pipe) ends the program quietly; any
@@ -93,6 +98,7 @@ fn main() -> ExitCode {
         Some("functions") => functions(rest),
         Some("mcp") => mcp(rest),
         Some("send") => send(rest),
+        Some("live-worker") => live_worker_cmd(rest),
         Some(other) => Err(format!("unknown subcommand `{other}`\n{USAGE}")),
         None => Err(USAGE.to_string()),
     };
@@ -158,6 +164,26 @@ impl Args {
             None => Ok(()),
         }
     }
+}
+
+// ---------------------------------------------------------------- live-worker
+
+fn live_worker_cmd(args: &[String]) -> Result<(), String> {
+    let a = Args::parse(args, &["listen", "relay", "nextcloud"], &["insecure-dev"])?;
+    a.no_extra(0)?;
+    let need = |name: &str| a.opt(name).ok_or_else(|| format!("live-worker needs --{name}\n{USAGE}"));
+    let relay_secret = std::env::var("CRAFT_RELAY_SECRET").ok();
+    let worker_secret = std::env::var("CRAFT_WORKER_SECRET").ok();
+    let cfg = craft_live_worker::Config::new(
+        need("listen")?,
+        need("relay")?,
+        need("nextcloud")?,
+        a.has("insecure-dev"),
+        relay_secret.as_deref(),
+        worker_secret.as_deref(),
+    )?
+    .with_max_rooms(std::env::var("CRAFT_WORKER_MAX_ROOMS").ok().as_deref())?;
+    craft_live_worker::serve(cfg, live_worker::GridService)
 }
 
 // ---------------------------------------------------------------- helpers

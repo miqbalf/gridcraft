@@ -28,6 +28,7 @@ pub mod session;
 pub mod split;
 pub mod styles;
 pub mod volatile;
+mod worker;
 
 pub use app::SentCommand;
 pub use axis::{Axis, AxisKind, Insertion};
@@ -41,6 +42,7 @@ pub use ops::{LINES_MAX, TOO_MANY_TEXT};
 pub use ordered::Tracked;
 pub use session::{BaseFile, GridLive, LiveFail, Peer, Ran, schema, volatile_for, workbook_from_state};
 pub use volatile::LiveVolatile;
+pub use worker::GridWorkerLive;
 
 /// Rows, for callers that name an axis without importing the formula crate.
 #[must_use]

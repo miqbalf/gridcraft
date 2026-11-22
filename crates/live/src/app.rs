@@ -126,6 +126,40 @@ pub(crate) fn keep_view(mut fresh: Workbook, cur: &Workbook) -> Workbook {
 }
 
 impl Mapping {
+    /// A mapping for a freshly seeded replica: `layout` is revision `layout_rev` of `vol`.
+    pub(crate) fn new(doc: u64, base: Arc<Workbook>, layout: Layout, layout_rev: u64, uid: &str, hash: StyleHash, vol: Arc<LiveVolatile>) -> Mapping {
+        Mapping {
+            doc,
+            has_random: crate::local::has_random(&base),
+            base,
+            layout,
+            layout_rev,
+            uid: uid.to_owned(),
+            space: 0,
+            hash,
+            keys: HashMap::new(),
+            minted: 0,
+            vol,
+            notices: Vec::new(),
+            pending: Vec::new(),
+            restore: None,
+            recalc: false,
+            resync_wanted: false,
+            skipped: 0,
+            unresolved: BTreeSet::new(),
+            mine: HashMap::new(),
+            lost: Vec::new(),
+            editor: None,
+            applied_ops: 0,
+            index: crate::reprint::RefIndex::default(),
+            recent: BTreeMap::new(),
+            lines_minted: 0,
+            removed: Vec::new(),
+            sent: Vec::new(),
+            group: 0,
+        }
+    }
+
     /// The one place the layout changes: the mapping's copy and the random source's copy move
     /// together. G9 calls this (through [`GridApp::set_layout`]) after every ordered op, local or
     /// remote, before anything recalculates.

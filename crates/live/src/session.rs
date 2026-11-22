@@ -2,7 +2,7 @@
 //! between the engine and the room's document, and the command gate; the host owns the engine
 //! [`Session`] and passes it to each call.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
@@ -23,7 +23,6 @@ use crate::gate::{Class, NOT_YET_TEXT, class};
 use crate::ids::Id;
 use crate::kind::{Grid, GridEdit, GridPos};
 use crate::layout::Layout;
-use crate::local::has_random;
 use crate::ordered::{BUSY_TEXT, LOCK_LOST_TEXT, LOCK_LOST_UNRUN_TEXT, Pending, SCOPE, Tracked, request, resolve, send_actions};
 use crate::remote::build;
 use crate::styles::{StyleHash, fnv1a64};
@@ -167,36 +166,7 @@ impl<H: Hub> GridLive<H> {
         let vol = LiveVolatile::new(&replica, &wb);
         let layout = Layout::from_doc(&replica, &wb);
         let layout_rev = vol.update_layout(layout.clone());
-        let map = Mapping {
-            doc,
-            has_random: has_random(&wb),
-            base: wb,
-            layout,
-            layout_rev,
-            uid: uid.to_owned(),
-            space: 0,
-            hash,
-            keys: HashMap::new(),
-            minted: 0,
-            vol,
-            notices: Vec::new(),
-            pending: Vec::new(),
-            restore: None,
-            recalc: false,
-            resync_wanted: false,
-            skipped: 0,
-            unresolved: BTreeSet::new(),
-            mine: HashMap::new(),
-            lost: Vec::new(),
-            editor: None,
-            applied_ops: 0,
-            index: crate::reprint::RefIndex::default(),
-            recent: std::collections::BTreeMap::new(),
-            lines_minted: 0,
-            removed: Vec::new(),
-            sent: Vec::new(),
-            group: 0,
-        };
+        let map = Mapping::new(doc, wb, layout, layout_rev, uid, hash, vol);
         let observed = Arc::new(std::sync::atomic::AtomicU64::new(doc));
         let mut live = GridLive {
             core,
