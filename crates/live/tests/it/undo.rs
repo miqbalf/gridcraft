@@ -358,6 +358,8 @@ fn a_replaced_replica_clears_the_undo_history() {
     for i in 0..2 {
         assert_eq!(room.finger(i), before, "peer {i}: nothing from before the swap is undone");
     }
+    let told = room.notices_of(0).iter().filter(|n| n.contains("Your undo history was cleared")).count();
+    assert_eq!(told, 1, "told once: {:?}", room.notices_of(0));
     same_everywhere(&room, "after the swap");
 }
 
@@ -401,6 +403,7 @@ fn an_ordered_undo_whose_lease_is_lost_is_taken_back_and_reaches_nobody() {
     let seq = room.relay.seq();
     room.settle();
     assert!(room.notices_of(0).iter().any(|n| n.contains("was not kept")), "{:?}", room.notices_of(0));
+    assert!(room.notices_of(0).iter().any(|n| n.contains("Your undo history was cleared")), "{:?}", room.notices_of(0));
     assert_eq!(room.relay.seq(), seq, "nothing of the undo reached the room");
     for i in 0..2 {
         assert_eq!(room.finger(i), inserted, "peer {i}: the undo was taken back");

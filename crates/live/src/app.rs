@@ -882,6 +882,9 @@ impl LiveApp<Grid> for GridApp<'_> {
         m.sent.clear();
         m.removed.clear();
         // The undo steps name keys and ops of the replica that was replaced: none can be trusted.
+        if !m.undo.is_empty() || !m.replays.is_empty() || m.replay.is_some() || !m.held.is_empty() || m.replay_busy {
+            m.notices.push(undo::UNDO_RESET_TEXT.to_owned());
+        }
         m.undo = UndoLog::default();
         m.replays.clear();
         m.replay = None;

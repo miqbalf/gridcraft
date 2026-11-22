@@ -31,6 +31,9 @@ pub const UNDO_MAX: usize = 100;
 pub const UNDO_BYTES_MAX: usize = 48 * 1024 * 1024;
 /// Told when older steps had to go to keep the history within [`UNDO_BYTES_MAX`].
 pub const UNDO_TRIMMED_TEXT: &str = "The undo history is full: your oldest changes can no longer be undone.";
+/// Told when the replica was replaced (a lost fenced run taken back, or the room's checkpoint) and
+/// this window's undo history had to go with it.
+pub const UNDO_RESET_TEXT: &str = "Your undo history was cleared because the sheet was reloaded from the room.";
 /// Told when a change cannot be undone as one step, so the history before it was cleared.
 pub const UNDO_CLEARED_TEXT: &str = "That change cannot be undone, so your earlier changes can no longer be undone either.";
 
@@ -111,6 +114,12 @@ impl UndoLog {
     /// Puts a step back where [`take`](Self::take) found it.
     pub fn put_back(&mut self, step: Step, redo: bool) {
         self.push(redo, step);
+    }
+
+    /// Whether neither stack holds a step.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.undo.is_empty() && self.redo.is_empty()
     }
 
     /// Whether steps were dropped for the byte budget since the last call.
