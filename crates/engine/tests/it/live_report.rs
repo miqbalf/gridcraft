@@ -152,7 +152,10 @@ const LOCAL: &[&str] = &[
 /// Commands run with parameters on every sample, besides every command with none.
 fn extra() -> Vec<(&'static str, Json)> {
     vec![
-        ("home.conditionalFormat", json!({"range": "B20:B22", "rule": {"type": "cellIs", "operator": "greater", "value": 1, "preset": "lightRedFillDarkRedText"}})),
+        (
+            "home.conditionalFormat",
+            json!({"range": "B20:B22", "rule": {"type": "cellIs", "operator": "greater", "value": 1, "preset": "lightRedFillDarkRedText"}}),
+        ),
         ("home.mergeCells", json!({"range": "B30:C30"})),
         ("view.freezePanes", json!({"cell": "B3"})),
         ("home.wrapText", json!({"range": "B2:B2", "on": true})),
@@ -273,10 +276,10 @@ fn every_registered_command_change_is_reported_or_unshared() {
                 if report.unshared.iter().any(|u| matches!(u, Unshared::Structure(_))) {
                     continue;
                 }
-                if let Some(is) = category(field) {
-                    if !report.unshared.iter().any(is) {
-                        failures.push(format!("{name} {}: `{key}` changed and the report has no matching Unshared: {:?}", id, report.unshared));
-                    }
+                if let Some(is) = category(field)
+                    && !report.unshared.iter().any(is)
+                {
+                    failures.push(format!("{name} {id}: `{key}` changed and the report has no matching Unshared: {:?}", report.unshared));
                 }
             }
         }
