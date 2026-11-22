@@ -227,8 +227,10 @@ fn diff(doc: u64, command: &str, params: &Json, before: Arc<Workbook>, after: Ar
 fn authored(b: Option<&gridcraft_model::Cell>, a: Option<&gridcraft_model::Cell>) -> bool {
     match (b, a) {
         (Some(b), Some(a)) => {
+            // Every field is named, so a new `Cell` field has to be classified here.
+            let gridcraft_model::Cell { value, formula, style, py } = b;
             let computed = a.formula.is_some() || a.py.is_some();
-            b.formula != a.formula || b.py != a.py || b.style != a.style || (!computed && b.value != a.value)
+            *formula != a.formula || *py != a.py || *style != a.style || (!computed && *value != a.value)
         }
         _ => true,
     }
@@ -236,7 +238,12 @@ fn authored(b: Option<&gridcraft_model::Cell>, a: Option<&gridcraft_model::Cell>
 
 /// Controls compared without the value a linked cell gives a slider (it follows the cell).
 fn same_controls(b: &[gridcraft_model::FormControl], a: &[gridcraft_model::FormControl]) -> bool {
-    b.len() == a.len() && b.iter().zip(a).all(|(x, y)| gridcraft_model::FormControl { value: y.value, ..x.clone() } == *y)
+    // Only a linked control's value follows a cell; an unlinked one holds what a person set.
+    b.len() == a.len()
+        && b.iter().zip(a).all(|(x, y)| {
+            let follows_cell = x.link.is_some() && y.link.is_some();
+            gridcraft_model::FormControl { value: if follows_cell { y.value } else { x.value }, ..x.clone() } == *y
+        })
 }
 
 fn push_once(v: &mut Vec<Unshared>, u: Unshared) {

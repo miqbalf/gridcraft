@@ -781,6 +781,9 @@ impl Session {
         if let Some(uid) = observed {
             self.observe_begin(uid);
         }
+        // How many structural edits the document's observed command had logged before this one
+        // runs: a panic takes this command's edits back with its workbook.
+        let edits_before = doc_uid.and_then(|uid| self.docs.iter().find(|d| d.uid == uid)).and_then(|d| d.observed.as_ref()).map(|o| o.edits.len());
         self.marks.extend(marked);
         self.depth = self.depth.saturating_add(1);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (spec.run)(self, &params)));
@@ -806,6 +809,9 @@ impl Session {
                 {
                     d.wb = wb.clone();
                     d.selection = sel.clone();
+                    if let (Some(o), Some(len)) = (d.observed.as_mut(), edits_before) {
+                        o.edits.truncate(len);
+                    }
                     if let Some((undo, redo)) = history_before {
                         d.undo = undo;
                         d.redo = redo;

@@ -13,7 +13,9 @@ pub(super) fn filter_menu(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_
     let _ = geo;
     // Tables get an autofilter on demand.
     let table_range = filter_table_range(sh, col, row);
-    if sh.autofilter.is_none()
+    // Only when the menu opens: once is enough, and a later frame must not undo a refusal.
+    if !was_open
+        && sh.autofilter.is_none()
         && let Some(r) = table_range
     {
         // A command, so the change is undoable, journaled and seen by an edit observer.

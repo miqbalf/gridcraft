@@ -487,3 +487,33 @@ fn a_row_the_engine_fits_by_itself_is_not_a_line_edit() {
     assert!(r.lines.is_empty(), "every peer fits its own rows: {:?}", r.lines);
     assert!(r.cells.contains(&(0, at("B30"))));
 }
+
+#[test]
+fn an_unlinked_control_value_set_by_hand_is_an_object_change() {
+    let (mut s, tap) = sample("budget");
+    let made = s.execute("insert.slider", json!({"at": "J30", "min": 0, "max": 100})).unwrap();
+    let id = made["control"].clone();
+    tap.take();
+    let r = one(&mut s, &tap, "control.setValue", json!({"id": id, "value": 30}));
+    assert!(r.unshared.contains(&Unshared::Objects(0)), "{:?}", r.unshared);
+    let r = one(&mut s, &tap, "control.format", json!({"id": id, "value": 60}));
+    assert!(r.unshared.contains(&Unshared::Objects(0)), "{:?}", r.unshared);
+}
+
+#[test]
+fn a_nested_panic_takes_its_logged_edits_back() {
+    gridcraft_engine::register_test_command("test.g3InsertThenPanic", |s, _| {
+        s.execute("home.insertRows", json!({"rows": "3:3"}))?;
+        std::panic::resume_unwind(Box::new("boom"))
+    });
+    gridcraft_engine::register_test_command("test.g3Outer", |s, _| {
+        // The inner command inserts a row, then panics; `execute` restores the workbook.
+        let inner = s.execute("test.g3InsertThenPanic", json!({}));
+        assert!(inner.is_err());
+        s.execute("cell.set", json!({"cell": "Z1", "input": "1"}))
+    });
+    let (mut s, tap) = sample("budget");
+    let r = one(&mut s, &tap, "test.g3Outer", json!({}));
+    assert!(r.edits.is_empty(), "the insert was undone by the panic, so it is not an edit: {:?}", r.edits);
+    assert!(r.cells.contains(&(0, at("Z1"))));
+}
