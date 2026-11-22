@@ -149,6 +149,16 @@ const LOCAL: &[&str] = &[
     "view.pageBreakPreview",
 ];
 
+/// Commands run with parameters on every sample, besides every command with none.
+fn extra() -> Vec<(&'static str, Json)> {
+    vec![
+        ("home.conditionalFormat", json!({"range": "B20:B22", "rule": {"type": "cellIs", "operator": "greater", "value": 1, "preset": "lightRedFillDarkRedText"}})),
+        ("home.mergeCells", json!({"range": "B30:C30"})),
+        ("view.freezePanes", json!({"cell": "B3"})),
+        ("home.wrapText", json!({"range": "B2:B2", "on": true})),
+    ]
+}
+
 /// Workbook JSON keys (and sheet keys) that are each person's own view: a change there is not an edit.
 const LOCAL_KEYS: &[&str] = &[
     "zoom",
@@ -208,19 +218,23 @@ fn every_registered_command_change_is_reported_or_unshared() {
     let mut local_used: std::collections::BTreeSet<&str> = Default::default();
     for name in ["sales", "budget", "grades"] {
         let (mut s, tap) = sample(name);
-        for spec in command_specs() {
-            if SKIPPED.contains(&spec.id) {
+        // Every registered command with empty parameters, then commands that only change
+        // something given parameters (so the checks of each kind of change are reached).
+        let mut cases: Vec<(&str, Json)> = command_specs().iter().map(|c| (c.id, json!({}))).collect();
+        cases.extend(extra());
+        for (id, params) in cases {
+            if SKIPPED.contains(&id) {
                 continue;
             }
             let json_of = |s: &Session| s.active().and_then(|d| serde_json::to_value(&*d.wb).ok());
             let uid = s.active().map(|d| d.uid);
             let was = json_of(&s);
             tap.take();
-            let _ = s.execute(spec.id, json!({}));
+            let _ = s.execute(id, params);
             ran += 1;
             let heard = tap.take();
             if heard.len() > 1 {
-                failures.push(format!("{name} {}: {} reports for one command", spec.id, heard.len()));
+                failures.push(format!("{name} {}: {} reports for one command", id, heard.len()));
             }
             if s.active().map(|d| d.uid) != uid {
                 continue;
@@ -240,17 +254,17 @@ fn every_registered_command_change_is_reported_or_unshared() {
             let Some(report) = heard.first() else {
                 // Nothing was reported: only a command named as local may change the workbook that way,
                 // and then only its view.
-                if LOCAL.contains(&spec.id) {
-                    local_used.insert(spec.id);
+                if LOCAL.contains(&id) {
+                    local_used.insert(id);
                 }
-                if !(LOCAL.contains(&spec.id) && was == now) {
-                    failures.push(format!("{name} {}: the workbook changed ({what}) and the report is empty", spec.id));
+                if !(LOCAL.contains(&id) && was == now) {
+                    failures.push(format!("{name} {}: the workbook changed ({what}) and the report is empty", id));
                 }
                 continue;
             };
             checked += 1;
             if report.is_empty() {
-                failures.push(format!("{name} {}: the workbook changed ({what}) and the report names nothing", spec.id));
+                failures.push(format!("{name} {}: the workbook changed ({what}) and the report names nothing", id));
             }
             // A change to a field with its own category must produce that category.
             for key in what.split(", ").filter(|k| !k.is_empty()) {
@@ -261,7 +275,7 @@ fn every_registered_command_change_is_reported_or_unshared() {
                 }
                 if let Some(is) = category(field) {
                     if !report.unshared.iter().any(is) {
-                        failures.push(format!("{name} {}: `{key}` changed and the report has no matching Unshared: {:?}", spec.id, report.unshared));
+                        failures.push(format!("{name} {}: `{key}` changed and the report has no matching Unshared: {:?}", id, report.unshared));
                     }
                 }
             }
@@ -457,4 +471,16 @@ fn a_panicking_observer_does_not_skip_the_commands_cleanup() {
     // The observer is gone; commands go on as for a single user.
     s.execute("cell.set", json!({"cell": "C6", "input": "9"})).unwrap();
     s.execute("edit.undo", json!({})).unwrap();
+}
+
+#[test]
+fn a_row_the_engine_fits_by_itself_is_not_a_line_edit() {
+    let (mut s, tap) = sample("budget");
+    s.execute("cell.set", json!({"cell": "B30", "input": "a long text that wraps over several lines of a narrow column"})).unwrap();
+    s.execute("home.columnWidth", json!({"cols": "B:B", "width": 40})).unwrap();
+    let r = one(&mut s, &tap, "home.wrapText", json!({"range": "B30", "on": true}));
+    let (b, a) = (r.before.sheets[0].rows.get(&29).and_then(|l| l.size), r.after.sheets[0].rows.get(&29).and_then(|l| l.size));
+    assert_ne!(b, a, "the row grew to fit the wrapped text");
+    assert!(r.lines.is_empty(), "every peer fits its own rows: {:?}", r.lines);
+    assert!(r.cells.contains(&(0, at("B30"))));
 }
