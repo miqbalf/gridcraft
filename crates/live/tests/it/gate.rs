@@ -53,12 +53,16 @@ fn every_catalog_command_is_classified_once() {
 }
 
 #[test]
-fn ordered_commands_are_refused_until_the_lock_arrives() {
+fn ordered_commands_wait_for_the_lock_and_are_not_refused() {
     let mut room = Room::new(2);
     let before = room.finger(0);
-    assert_eq!(room.run(0, "home.insertRows", json!({"rows": "3:3"})), Err(NOT_YET_TEXT.to_owned()));
+    assert_eq!(room.run(0, "home.insertRows", json!({"rows": "3:3"})), Ok(Ran::Queued));
+    // Nothing runs before the relay grants the lock.
     assert_eq!(room.finger(0), before);
-    assert!(!room.peers[0].live.allows("home.insertRows"));
+    room.settle();
+    assert_ne!(room.finger(0), before);
+    assert_eq!(room.finger(0), room.finger(1));
+    assert!(room.peers[0].live.allows("home.insertRows"));
     assert!(room.peers[0].live.allows("home.bold") && room.peers[0].live.allows("selection.set"));
 }
 

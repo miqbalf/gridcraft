@@ -2,8 +2,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use craft_collab::Replica;
+use craft_collab::{ClientMsg, Hub, Replica};
 use craft_live::Access;
+use craft_live::testing::ROOM;
 use gridcraft_core::Value;
 use gridcraft_engine::{Session, io};
 use gridcraft_live::{Id, axis_kind_rows, workbook_from_state};
@@ -100,6 +101,7 @@ fn second_insert_waits_and_lands_where_its_selection_now_is() {
 
 #[test]
 fn receiver_engine_equals_rebuild_from_state_after_each_op() {
+    let mut total_ops = 0u32;
     for seed in seeds() {
         let mut rng = Rng(seed ^ 0xA5A5);
         let mut room = Room::new(3);
@@ -135,8 +137,10 @@ fn receiver_engine_equals_rebuild_from_state_after_each_op() {
             }
         }
         room.settle();
+        total_ops += room.peers[0].live.replica().unwrap().ops_len();
         same_everywhere(&room, &format!("seed {seed}"));
     }
+    assert!(total_ops > 0, "the seeds ran ordered edits");
 }
 
 fn base_with_ref() -> Vec<u8> {
@@ -182,11 +186,13 @@ fn typing_into_a_deleted_row_tells_the_typist_with_the_value() {
 
 #[test]
 fn a_held_lock_shows_the_holders_name_and_gives_up_after_10s() {
-    let mut room = Room::new(2);
+    let mut room = Room::new(1);
     let now = Arc::new(Mutex::new(0.0f64));
     let clock = now.clone();
     room.peers[0].live.set_clock(Box::new(move || *clock.lock().unwrap()));
-    room.peers[1].live.core_mut().lock("grid/struct").unwrap();
+    // Bob's window holds the structure lock and never lets it go (it never even polls).
+    let mut bob = room.relay.connect("bob", "Bob", true);
+    bob.send(ClientMsg::Lock { doc: ROOM.into(), scope: "grid/struct".into() }).unwrap();
     room.settle();
     let before = room.finger(0);
     room.run(0, "home.insertRows", json!({"rows": "2:2"})).unwrap();
@@ -227,4 +233,63 @@ fn a_checkpoint_joiner_does_not_replay_ops() {
     assert!(ops >= 2);
     assert_eq!(room.peers[j].live.applied_ops(), ops);
     assert_eq!(room.finger(j), room.finger(0));
+}
+
+#[test]
+fn delete_then_insert_at_range_top_matches_excel() {
+    let mut room = Room::new(2);
+    let cmds = [
+        ("cell.set", json!({"cell": "E1", "input": "=SUM(A2:A6)"})),
+        ("home.deleteRows", json!({"rows": "2:2"})),
+        ("home.insertRows", json!({"rows": "2:2"})),
+    ];
+    room.run(0, cmds[0].0, cmds[0].1.clone()).unwrap();
+    room.settle();
+    room.run(1, cmds[1].0, cmds[1].1.clone()).unwrap();
+    room.settle();
+    // The delete shrank the range to A2:A5 on every peer.
+    for i in 0..2 {
+        assert!(formula_at(&room, i, "E1").unwrap().contains("A2:A5"), "peer {i}: {:?}", formula_at(&room, i, "E1"));
+    }
+    room.run(0, cmds[2].0, cmds[2].1.clone()).unwrap();
+    room.settle();
+    let want = reference(&room.bytes, &cmds);
+    for i in 0..2 {
+        assert_eq!(room.finger(i), want, "peer {i}");
+        assert!(formula_at(&room, i, "E1").unwrap().contains("A3:A6"), "peer {i}: {:?}", formula_at(&room, i, "E1"));
+    }
+    same_everywhere(&room, "delete then insert");
+}
+
+#[test]
+fn random_numbers_agree_after_a_row_insert_above_a_rand_cell() {
+    let mut room = Room::new(3);
+    room.run(0, "cell.set", json!({"cell": "E5", "input": "=RAND()"})).unwrap();
+    room.settle();
+    let before = value_at(&room, 1, "E5");
+    assert!(matches!(before, Value::Number(_)));
+    room.run(2, "home.insertRows", json!({"rows": "2:3"})).unwrap();
+    room.settle();
+    // An edit counts the room's epoch up when a formula draws random numbers, so the number is
+    // a new one: what matters is that every peer has the same one in the cell's new place.
+    let after = value_at(&room, 0, "E7");
+    assert!(matches!(after, Value::Number(_)));
+    for i in 0..3 {
+        assert_eq!(value_at(&room, i, "E7"), after, "peer {i}");
+        assert_eq!(value_at(&room, i, "E5"), Value::Empty, "peer {i}");
+    }
+    same_everywhere(&room, "rand after insert");
+}
+
+#[test]
+fn ordered_ops_reach_the_op_log_and_every_peer_applies_each_once() {
+    let mut room = Room::new(3);
+    room.run(0, "home.insertRows", json!({"rows": "2:2"})).unwrap();
+    room.run(1, "home.deleteColumns", json!({"cols": "C:C"})).unwrap();
+    room.settle();
+    let n = room.peers[0].live.replica().unwrap().ops_len();
+    assert_eq!(n, 2);
+    for i in 0..3 {
+        assert_eq!(room.peers[i].live.applied_ops(), n, "peer {i}");
+    }
 }
