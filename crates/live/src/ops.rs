@@ -200,7 +200,15 @@ pub(crate) fn reprint(cx: &mut RemoteCtx, ctx: &Ctx, doc: &GridDoc, cells: &BTre
 }
 
 /// The content an author writes for a formula whose id-form text became `text`.
-pub(crate) fn rewritten_content(base: &Workbook, doc: &GridDoc, layout: &Layout, host: (usize, Id), key: &str, text: String, by: &str) -> Option<CellContent> {
+pub(crate) fn rewritten_content(
+    base: &Workbook,
+    doc: &GridDoc,
+    layout: &Layout,
+    host: (usize, Id),
+    key: &str,
+    text: String,
+    by: &str,
+) -> Option<CellContent> {
     let (i, sheet) = host;
     let home = Home { layout, sheet: sheet.0 };
     let mut c = match doc.cell(sheet, key) {
