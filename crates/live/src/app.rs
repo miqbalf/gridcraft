@@ -598,14 +598,14 @@ impl LiveApp<Grid> for GridApp<'_> {
 
     fn caret(&self, payload: &Value) -> Option<GridCaret> {
         let mut c = crate::presence::parse(payload)?;
-        crate::presence::resolve(&self.map.layout, &mut c);
+        crate::presence::resolve_at(&self.map.layout, self.map.layout_rev, &mut c);
         Some(c)
     }
 
     fn follow(&self, carets: &mut HashMap<String, GridCaret>) {
         // A caret on an id not known yet stays (hidden) and shows when the id arrives.
         for c in carets.values_mut() {
-            crate::presence::resolve(&self.map.layout, c);
+            crate::presence::resolve_at(&self.map.layout, self.map.layout_rev, c);
         }
     }
 }
