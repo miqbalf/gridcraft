@@ -19,6 +19,9 @@ pub use gridcraft_formula::adjust::Axis as AxisKind;
 
 /// The first id of space 1: every base id is below it.
 const SPACE_ONE: u64 = 1 << 32;
+/// The furthest into the implicit tail an op's `prev` may reach (more than the sheet has lines):
+/// a junk id past it is treated as unknown instead of materialising billions of ids.
+const TAIL_REACH: u64 = 2_100_000;
 
 /// One axis as ids. See the [module documentation](self).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -196,7 +199,7 @@ impl Axis {
             None => 0,
             Some(p) => match self.index.get(&p) {
                 Some((i, _)) => i + 1,
-                None if p.space() == 0 && p.0 >= self.next_base => {
+                None if p.space() == 0 && p.0 >= self.next_base && p.0 - self.next_base <= TAIL_REACH => {
                     let upto = p.0;
                     let from = self.next_base;
                     self.explicit.extend((from..=upto).map(Id));

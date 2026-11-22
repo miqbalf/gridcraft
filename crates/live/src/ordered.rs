@@ -82,7 +82,9 @@ pub(crate) fn request(session: &Session, layout: &Layout, command: &str, params:
     let text = params.get(key).or_else(|| params.get("range")).and_then(Json::as_str);
     let count_param = params.get("count").and_then(Json::as_u64).and_then(|c| u32::try_from(c).ok());
     let spans: Vec<(u32, u32)> = match text {
-        Some(t) if !insert => t.split(',').map(|p| parse_span(p).map(|r| span_of(r, axis)).ok_or_else(|| format!("not a range: {p}"))).collect::<Result<_, _>>()?,
+        Some(t) if !insert => {
+            t.split(',').map(|p| parse_span(p).map(|r| span_of(r, axis)).ok_or_else(|| format!("not a range: {p}"))).collect::<Result<_, _>>()?
+        }
         Some(t) => vec![parse_span(t).map(|r| span_of(r, axis)).ok_or_else(|| format!("not a range: {t}"))?],
         None if insert => vec![span_of(doc.selection.current(), axis)],
         None => doc.selection.ranges.iter().map(|r| span_of(*r, axis)).collect(),

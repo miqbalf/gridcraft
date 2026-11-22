@@ -187,11 +187,16 @@ pub fn shrink_ends(text: &str, host: u64, sheet: Id, axis: AxisKind, after: &Axi
     Some(out)
 }
 
+/// `(sheet id, columns?, line id)`.
+type LineKey = (u64, bool, u64);
+/// `(host sheet id, cell key)`.
+type CellKey = (u64, String);
+
 /// Which formula cells name each line: `(sheet id, axis, line id)` to `(host sheet id, cell key)`.
 #[derive(Debug, Default)]
 pub struct RefIndex {
-    by_line: HashMap<(u64, bool, u64), BTreeSet<(u64, String)>>,
-    by_cell: HashMap<(u64, String), Vec<(u64, bool, u64)>>,
+    by_line: HashMap<LineKey, BTreeSet<CellKey>>,
+    by_cell: HashMap<CellKey, Vec<LineKey>>,
     /// Built from the base and the written formulas.
     pub built: bool,
 }

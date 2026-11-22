@@ -290,7 +290,7 @@ fn ordered_ops_reach_the_op_log_and_every_peer_applies_each_once() {
     room.settle();
     let n = room.peers[0].live.replica().unwrap().ops_len();
     assert_eq!(n, 2);
-    for i in 0..3 {
-        assert_eq!(room.peers[i].live.applied_ops(), n, "peer {i}");
+    for (i, p) in room.peers.iter().enumerate() {
+        assert_eq!(p.live.applied_ops(), n, "peer {i}");
     }
 }

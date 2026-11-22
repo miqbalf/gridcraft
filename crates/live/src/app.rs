@@ -18,9 +18,9 @@ use crate::local::Planner;
 use crate::op::Op;
 use crate::ops::{Author, Step, apply_ops, ensure_index, formula_source, replay_before, reprint, undeleted_targets};
 use crate::remote::{Ctx, Targets, apply, build};
+use crate::reprint::RefIndex;
 use crate::split::{Plan, Put};
 use crate::styles::StyleHash;
-use crate::reprint::RefIndex;
 use crate::volatile::LiveVolatile;
 
 /// Told when Undo or Redo is asked for: per-user undo comes with G11.
@@ -358,7 +358,9 @@ impl GridApp<'_> {
         let mut naming = BTreeSet::new();
         for op in &ops {
             let (sheet, axis, ids) = match op {
-                Op::Insert { sheet, axis, ids, .. } | Op::Delete { sheet, axis, ids, .. } | Op::Undelete { sheet, axis, ids, .. } => (*sheet, *axis, ids),
+                Op::Insert { sheet, axis, ids, .. } | Op::Delete { sheet, axis, ids, .. } | Op::Undelete { sheet, axis, ids, .. } => {
+                    (*sheet, *axis, ids)
+                }
             };
             naming.extend(m.index.naming(sheet, axis, ids));
             if let Some(i) = final_layout.sheet_index(sheet) {

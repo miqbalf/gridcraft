@@ -17,14 +17,14 @@ use serde_json::Value as Json;
 use sha2::{Digest, Sha256};
 
 use crate::app::{GridApp, Mapping, caret_payload};
+use crate::axis::AxisKind;
 use crate::doc::{GridDoc, GridSeed};
 use crate::gate::{Class, NOT_YET_TEXT, class};
-use crate::axis::AxisKind;
 use crate::ids::Id;
 use crate::kind::{Grid, GridEdit, GridPos};
-use crate::ordered::{BUSY_TEXT, LOCK_LOST_TEXT, Pending, SCOPE, Tracked, request, resolve, send_actions};
 use crate::layout::Layout;
 use crate::local::has_random;
+use crate::ordered::{BUSY_TEXT, LOCK_LOST_TEXT, Pending, SCOPE, Tracked, request, resolve, send_actions};
 use crate::remote::build;
 use crate::styles::{StyleHash, fnv1a64};
 use crate::volatile::LiveVolatile;
@@ -84,6 +84,8 @@ impl EditObserver for Tap {
     }
 }
 
+type SharedClock = Arc<Mutex<Box<dyn FnMut() -> f64 + Send>>>;
+
 /// A GridCraft document edited live.
 pub struct GridLive<H: Hub> {
     core: LiveEditing<Tracked<H>, Grid>,
@@ -103,7 +105,8 @@ pub struct GridLive<H: Hub> {
     joins: Arc<AtomicU64>,
     seen_joins: u64,
     /// The clock the lock's wait runs on (shared with the link's own).
-    clock: Option<Arc<Mutex<Box<dyn FnMut() -> f64 + Send>>>>,
+    clock: Option<SharedClock>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     started: Option<std::time::Instant>,
     /// Frames pumped, the clock where there is none.
     frames: u64,
@@ -381,14 +384,21 @@ impl<H: Hub> GridLive<H> {
         if let Some(c) = &self.clock {
             return c.lock().map_or(0.0, |mut f| f());
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            return self.started.get_or_insert_with(std::time::Instant::now).elapsed().as_secs_f64() * 1000.0;
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            self.frames as f64 * 16.0
-        }
+        self.native_ms().unwrap_or(self.frames as f64 * 16.0)
+    }
+
+    /// Milliseconds since the first call; none on the web, which has no clock (the host gives one
+    /// with [`GridLive::set_clock`], and frames stand in for it).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn native_ms(&mut self) -> Option<f64> {
+        #[allow(clippy::disallowed_methods)] // off wasm only, as clippy.toml asks
+        let start = *self.started.get_or_insert_with(std::time::Instant::now);
+        Some(start.elapsed().as_secs_f64() * 1000.0)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn native_ms(&mut self) -> Option<f64> {
+        None
     }
 
     fn send(&mut self, actions: &[Action]) {
@@ -448,7 +458,11 @@ impl<H: Hub> GridLive<H> {
 
     fn holder_name(&self, holder: &str) -> String {
         let uid = uid_of(holder);
-        self.names.get(uid).cloned().filter(|_| !holder.is_empty()).unwrap_or_else(|| if holder.is_empty() { "The relay".to_owned() } else { "Another editor".to_owned() })
+        self.names
+            .get(uid)
+            .cloned()
+            .filter(|_| !holder.is_empty())
+            .unwrap_or_else(|| if holder.is_empty() { "The relay".to_owned() } else { "Another editor".to_owned() })
     }
 
     /// Runs an ordered edit that holds the lock: its lines are found again by id, the command runs

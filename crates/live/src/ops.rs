@@ -200,7 +200,8 @@ pub(crate) fn reprint(cx: &mut RemoteCtx, ctx: &Ctx, doc: &GridDoc, cells: &BTre
 }
 
 /// The content an author writes for a formula whose id-form text became `text`.
-pub(crate) fn rewritten_content(base: &Workbook, doc: &GridDoc, layout: &Layout, i: usize, sheet: Id, key: &str, text: String, by: &str) -> Option<CellContent> {
+pub(crate) fn rewritten_content(base: &Workbook, doc: &GridDoc, layout: &Layout, host: (usize, Id), key: &str, text: String, by: &str) -> Option<CellContent> {
+    let (i, sheet) = host;
     let home = Home { layout, sheet: sheet.0 };
     let mut c = match doc.cell(sheet, key) {
         Entry::Set(c) => c,
@@ -266,10 +267,20 @@ impl Author<'_> {
                             if let Some(size) = info.size
                                 && let Some(num) = serde_json::Number::from_f64(f64::from(size))
                             {
-                                self.plan.line(sheet, *axis, crate::remote::line_key(*id, part), crate::split::Put::Set(serde_json::Value::Number(num)));
+                                self.plan.line(
+                                    sheet,
+                                    *axis,
+                                    crate::remote::line_key(*id, part),
+                                    crate::split::Put::Set(serde_json::Value::Number(num)),
+                                );
                             }
                             if *axis == AxisKind::Rows && info.custom {
-                                self.plan.line(sheet, *axis, crate::remote::line_key(*id, "hc"), crate::split::Put::Set(serde_json::Value::Bool(true)));
+                                self.plan.line(
+                                    sheet,
+                                    *axis,
+                                    crate::remote::line_key(*id, "hc"),
+                                    crate::split::Put::Set(serde_json::Value::Bool(true)),
+                                );
                             }
                         }
                     }
@@ -308,7 +319,7 @@ impl Author<'_> {
             let Some(src) = formula_source(self.base, self.replica, hi, Id(host), &key) else { continue };
             let Some(after) = self.layout.sheets.get(i).map(|s| s.axis(axis)) else { continue };
             let Some(new) = crate::reprint::shrink_ends(&src, host, sheet, axis, after) else { continue };
-            let Some(content) = rewritten_content(self.base, self.replica, self.layout, hi, Id(host), &key, new, self.uid) else { continue };
+            let Some(content) = rewritten_content(self.base, self.replica, self.layout, (hi, Id(host)), &key, new, self.uid) else { continue };
             self.plan.cell(crate::split::CellWrite {
                 sheet: Id(host),
                 key,
@@ -321,7 +332,15 @@ impl Author<'_> {
 }
 
 /// What an undelete puts back: the lines, and the cells written for them or in the base file.
-pub(crate) fn undeleted_targets(t: &mut crate::remote::Targets, layout: &Layout, doc: &GridDoc, base: &Workbook, i: usize, axis: AxisKind, ids: &[Id]) {
+pub(crate) fn undeleted_targets(
+    t: &mut crate::remote::Targets,
+    layout: &Layout,
+    doc: &GridDoc,
+    base: &Workbook,
+    i: usize,
+    axis: AxisKind,
+    ids: &[Id],
+) {
     let set: BTreeSet<Id> = ids.iter().copied().collect();
     let Some(sl) = layout.sheets.get(i) else { return };
     for id in ids {

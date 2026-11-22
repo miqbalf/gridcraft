@@ -150,7 +150,9 @@ impl Planner<'_> {
     }
 
     fn line(&mut self, r: &EditReport, i: usize, axis: AxisKind, idx: u32, plan: &mut Plan) -> Result<(), LocalError> {
-        let (Some(layout), Some(before), Some(after)) = (self.layout.sheets.get(i), self.before_wb(r).sheet(i), r.after.sheet(i)) else { return refused() };
+        let (Some(layout), Some(before), Some(after)) = (self.layout.sheets.get(i), self.before_wb(r).sheet(i), r.after.sheet(i)) else {
+            return refused();
+        };
         let Some(id) = layout.axis(axis).id_at(idx) else { return refused() };
         let (b, a) = (line_at(before, axis, idx), line_at(after, axis, idx));
         if b == a {
@@ -210,7 +212,9 @@ impl Planner<'_> {
     }
 
     fn props(&mut self, r: &EditReport, i: usize, plan: &mut Plan) -> Result<(), LocalError> {
-        let (Some(layout), Some(before), Some(after)) = (self.layout.sheets.get(i), self.before_wb(r).sheet(i), r.after.sheet(i)) else { return refused() };
+        let (Some(layout), Some(before), Some(after)) = (self.layout.sheets.get(i), self.before_wb(r).sheet(i), r.after.sheet(i)) else {
+            return refused();
+        };
         if before.default_col_width != after.default_col_width {
             plan.prop(layout.id, "defw", number(f64::from(after.default_col_width)));
         }
