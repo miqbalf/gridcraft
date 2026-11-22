@@ -25,6 +25,11 @@ use crate::schema::{
 /// The key the change observers are registered under.
 const OBSERVER: &str = "gridcraft-live/changes";
 
+/// The most updates [`GridDoc`] keeps while yrs holds pending ones (see `settle`).
+pub const HELD_MAX_ENTRIES: usize = 1024;
+/// The most bytes [`GridDoc`] keeps while yrs holds pending ones, the relay's cap in order of size.
+pub const HELD_MAX_BYTES: usize = 4 * 1024 * 1024;
+
 /// A key's state in the overlay.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Entry<T> {
@@ -169,6 +174,13 @@ pub struct GridDoc {
     /// Updates that arrived while yrs was waiting for missing dependencies, kept until the gap
     /// closes and then applied again (see [`GridDoc::settle`]).
     held: Vec<Vec<u8>>,
+    /// The bytes in `held`.
+    held_bytes: usize,
+    /// The copies outgrew their cap and were dropped: this replica may never close its gap
+    /// alone and needs a full state. Sticky until [`GridDoc::clear_resync`].
+    resync: bool,
+    /// Writes the last [`GridDoc::write`] skipped.
+    skipped: usize,
 }
 
 impl GridDoc {
@@ -190,7 +202,7 @@ impl GridDoc {
         // No undo scope: every write is untracked (Ruling R3).
         let mut y = YReplica::assemble(doc, client, |_, _| {});
         y.set_untracked(true);
-        GridDoc { y, roots, seen, held: Vec::new() }
+        GridDoc { y, roots, seen, held: Vec::new(), held_bytes: 0, resync: false, skipped: 0 }
     }
 
     fn missing(&self) -> bool {
@@ -201,30 +213,88 @@ impl GridDoc {
     /// always let it go: with updates delivered out of order, a pending update can stay pending
     /// after its dependencies have landed (its retry check misses them), and a merge of pending
     /// updates can lose items. Applying the same bytes again lets it go. So this replica keeps its
-    /// own copy of every update that arrives while anything is pending and, after each apply,
-    /// applies the copies again, pass after pass while the state still grows. Once nothing is
-    /// pending the copies are dropped. Blocks yrs already has are skipped, so a repeat only fills
-    /// what was held back. Updates from the relay arrive in order, so this is normally a no-op.
-    fn settle(&mut self, update: &[u8]) {
+    /// own copy of every update that arrives while anything is pending and, after an apply that
+    /// grew the state (`grew`), applies the copies again, pass after pass while the state still
+    /// grows. Once nothing is pending the copies are dropped. Blocks yrs already has are skipped,
+    /// so a repeat only fills what was held back. Updates from the relay arrive in order, so this
+    /// is normally a no-op.
+    ///
+    /// The copies are capped ([`HELD_MAX_ENTRIES`], [`HELD_MAX_BYTES`]): a gap that never closes
+    /// (a lost message, a partial state) drops them and raises [`needs_resync`](Self::needs_resync).
+    fn settle(&mut self, update: &[u8], grew: bool) {
         if !self.held.is_empty() || self.missing() {
+            self.held_bytes += update.len();
             self.held.push(update.to_vec());
+            if self.held.len() > HELD_MAX_ENTRIES || self.held_bytes > HELD_MAX_BYTES {
+                if !self.resync {
+                    log::warn!(
+                        "gridcraft-live: {} updates wait on a dependency that has not arrived; dropped, a full state is needed",
+                        self.held.len()
+                    );
+                }
+                self.drop_held();
+                self.resync = true;
+                return;
+            }
         }
-        for _ in 0..self.held.len() {
-            if !self.missing() {
-                break;
-            }
-            let before = self.y.doc().transact().state_vector();
-            for u in &self.held {
-                // Each was decoded and applied once already.
-                let _ = self.y.apply(u);
-            }
-            if self.y.doc().transact().state_vector() == before {
-                break;
+        if grew {
+            for _ in 0..self.held.len() {
+                if !self.missing() {
+                    break;
+                }
+                let before = self.y.doc().transact().state_vector();
+                for u in &self.held {
+                    // Each was decoded and applied once already.
+                    let _ = self.y.apply(u);
+                }
+                if self.y.doc().transact().state_vector() == before {
+                    break;
+                }
             }
         }
         if !self.missing() {
-            self.held.clear();
+            self.drop_held();
         }
+    }
+
+    fn drop_held(&mut self) {
+        self.held.clear();
+        self.held_bytes = 0;
+    }
+
+    /// Whether this replica dropped updates it was holding for a dependency that never came, so
+    /// the session should fetch a full state (a checkpoint) and apply it. Stays set until
+    /// [`clear_resync`](Self::clear_resync).
+    #[must_use]
+    pub fn needs_resync(&self) -> bool {
+        self.resync
+    }
+
+    /// The session has asked for (or applied) a full state.
+    pub fn clear_resync(&mut self) {
+        self.resync = false;
+    }
+
+    /// How many updates are held for a missing dependency (for tests and diagnostics).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn held_len(&self) -> usize {
+        self.held.len()
+    }
+
+    /// The bytes held for a missing dependency (for tests and diagnostics).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn held_bytes(&self) -> usize {
+        self.held_bytes
+    }
+
+    /// How many writes the last [`write`](Self::write) skipped: writes to a sheet the document
+    /// does not hold, to a sheet property that names a part, or of a line id yrs cannot store.
+    /// Nonzero means the caller's view now differs from the document; reload that sheet.
+    #[must_use]
+    pub fn write_skipped(&self) -> usize {
+        self.skipped
     }
 
     fn drain_seen(&self) -> Vec<Seen> {
@@ -395,11 +465,12 @@ impl GridDoc {
         if self.y.client().is_none() {
             return Err(LiveError::NoClient);
         }
-        let update = {
-            let mut g = GridTxn { txn: self.y.doc().transact_mut_with(UNTRACKED), roots: &self.roots };
+        let (update, skipped) = {
+            let mut g = GridTxn { txn: self.y.doc().transact_mut_with(UNTRACKED), roots: &self.roots, skipped: 0 };
             f(&mut g);
-            g.txn.encode_update_v1()
+            (g.txn.encode_update_v1(), g.skipped)
         };
+        self.skipped = skipped;
         // This replica's own writes are not remote changes.
         self.drain_seen();
         Ok(update)
@@ -518,17 +589,22 @@ impl Replica for GridDoc {
         let doc = self.y.rebuilt(space)?;
         let damaged = self.y.damaged();
         let held = std::mem::take(&mut self.held);
+        let (held_bytes, resync) = (self.held_bytes, self.resync);
         *self = GridDoc::assemble(doc, Some(space));
         self.y.set_damaged(damaged);
         self.held = held;
+        self.held_bytes = held_bytes;
+        self.resync = resync;
         Ok(())
     }
 
     fn apply(&mut self, update: &[u8]) -> Result<Vec<GridChange>, LiveError> {
         let ops_before = self.ops_len();
         self.drain_seen();
+        let before = self.y.doc().transact().state_vector();
         self.y.apply(update)?;
-        self.settle(update);
+        let grew = self.y.doc().transact().state_vector() != before;
+        self.settle(update, grew);
         let seen = self.drain_seen();
         Ok(self.changes(ops_before, seen))
     }
@@ -555,12 +631,25 @@ impl Replica for GridDoc {
 pub struct GridTxn<'a> {
     txn: TransactionMut<'a>,
     roots: &'a Roots,
+    /// Writes skipped so far (see [`GridDoc::write_skipped`]).
+    skipped: usize,
 }
 
 impl GridTxn<'_> {
+    /// Ids as yrs numbers. An id past `i64` cannot be stored; it is skipped and counted.
+    fn ids_any(&mut self, ids: &[Id]) -> Vec<Any> {
+        let out: Vec<Any> = ids.iter().filter_map(|id| id_any(*id).ok()).collect();
+        if out.len() < ids.len() {
+            self.skipped += ids.len() - out.len();
+            log::warn!("gridcraft-live: a line id too large to store was skipped");
+        }
+        out
+    }
+
     fn part_map(&mut self, sheet: Id, part: &str) -> Option<MapRef> {
         let m = self.roots.part_map(&self.txn, sheet, part);
         if m.is_none() {
+            self.skipped += 1;
             log::warn!("gridcraft-live: no sheet {} in the document; a {part} write was skipped", sheet.text());
         }
         m
@@ -582,7 +671,10 @@ impl GridTxn<'_> {
     pub fn set_cell(&mut self, sheet: Id, key: &str, c: &CellContent) {
         match serde_json::to_value(c) {
             Ok(v) => self.put(sheet, CELLS, key, Some(to_any(&v))),
-            Err(e) => log::warn!("gridcraft-live: cell content did not encode ({e}); not written"),
+            Err(e) => {
+                self.skipped += 1;
+                log::warn!("gridcraft-live: cell content did not encode ({e}); not written");
+            }
         }
     }
 
@@ -620,6 +712,7 @@ impl GridTxn<'_> {
     /// is refused and logged, so a property never replaces a part.
     pub fn set_sheet_prop(&mut self, sheet: Id, name: &str, v: Value) {
         if SHEET_PARTS.contains(&name) {
+            self.skipped += 1;
             log::warn!("gridcraft-live: sheet property {name} names a part of the sheet; not written");
             return;
         }
@@ -627,7 +720,10 @@ impl GridTxn<'_> {
             Some(m) => {
                 m.insert(&mut self.txn, name, to_any(&v));
             }
-            None => log::warn!("gridcraft-live: no sheet {} in the document; a property write was skipped", sheet.text()),
+            None => {
+                self.skipped += 1;
+                log::warn!("gridcraft-live: no sheet {} in the document; a property write was skipped", sheet.text());
+            }
         }
     }
 
@@ -641,12 +737,14 @@ impl GridTxn<'_> {
     pub fn axis_insert(&mut self, sheet: Id, axis: AxisKind, ins: &Insertion, ids: &[Id]) {
         let (part, _) = axis_parts(axis);
         let Some(array) = self.roots.part_array(&self.txn, sheet, part) else {
+            self.skipped += 1;
             log::warn!("gridcraft-live: no sheet {} in the document; an axis insert was skipped", sheet.text());
             return;
         };
         let raw: Vec<Option<Id>> = array.iter(&self.txn).map(|o| id_of_out(&o)).collect();
         let mut present: BTreeSet<Id> = raw.iter().flatten().copied().collect();
-        let tail: Vec<Any> = ins.materialise.iter().filter(|id| present.insert(**id)).filter_map(|id| id_any(*id).ok()).collect();
+        let tail: Vec<Id> = ins.materialise.iter().copied().filter(|id| present.insert(*id)).collect();
+        let tail = self.ids_any(&tail);
         let len = array.len(&self.txn);
         array.insert_range(&mut self.txn, len, tail);
         let raw: Vec<Option<Id>> = array.iter(&self.txn).map(|o| id_of_out(&o)).collect();
@@ -660,7 +758,8 @@ impl GridTxn<'_> {
                 }
             },
         };
-        let new: Vec<Any> = ids.iter().filter(|id| present.insert(**id)).filter_map(|id| id_any(*id).ok()).collect();
+        let new: Vec<Id> = ids.iter().copied().filter(|id| present.insert(*id)).collect();
+        let new = self.ids_any(&new);
         let at = u32::try_from(at).unwrap_or(u32::MAX).min(array.len(&self.txn));
         array.insert_range(&mut self.txn, at, new);
     }

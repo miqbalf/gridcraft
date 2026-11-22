@@ -16,7 +16,7 @@ pub mod op;
 pub mod schema;
 
 pub use axis::{Axis, AxisKind, Insertion};
-pub use doc::{CellContent, Entry, GridChange, GridDoc, GridSeed, GridTxn, Meta};
+pub use doc::{CellContent, Entry, GridChange, GridDoc, GridSeed, GridTxn, HELD_MAX_BYTES, HELD_MAX_ENTRIES, Meta};
 pub use ids::{Id, cell_key, parse_cell_key};
 pub use layout::{Hosted, Layout, SheetLayout};
 pub use op::Op;

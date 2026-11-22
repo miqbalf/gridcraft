@@ -2,7 +2,7 @@
 //! bytes, and replicas that reach the same document whatever order their updates arrive in.
 
 use craft_collab::Replica;
-use gridcraft_live::{AxisKind, CellContent, Entry, GridChange, GridDoc, GridSeed, Id, Op, cell_key};
+use gridcraft_live::{AxisKind, CellContent, Entry, GridChange, GridDoc, GridSeed, HELD_MAX_BYTES, HELD_MAX_ENTRIES, Id, Op, cell_key};
 use serde_json::{Value, json};
 
 use crate::{Rng, seeds};
@@ -104,6 +104,19 @@ fn garbage_update_is_refused_and_the_doc_stays_sound() {
         let _ = b.apply(&real[..cut]);
         assert!(!b.damaged(), "a cut at {cut} leaves the replica sound");
     }
+    // Seeded random bytes, some starting like the real update.
+    for seed in seeds() {
+        let mut rng = Rng(seed);
+        for _ in 0..20 {
+            let mut junk: Vec<u8> = (0..rng.below(64)).map(|_| rng.next_u64() as u8).collect();
+            if rng.chance(30) {
+                let keep = rng.below(real.len());
+                junk.splice(0..0, real[..keep].iter().copied());
+            }
+            let _ = b.apply(&junk);
+            assert!(!b.damaged(), "seed {seed}: random bytes leave the replica sound");
+        }
+    }
     b.apply(&real).unwrap();
     assert_eq!(b.cell(sheet, &key), a.cell(sheet, &key), "a real update still lands afterwards");
     assert!(b.write(|t| t.clear_cell(sheet, &key)).is_ok(), "and the replica still takes local edits");
@@ -188,4 +201,90 @@ fn free_writes_converge_in_any_order() {
         let joiner = GridDoc::from_state(&docs[n - 1].state()).unwrap();
         assert_eq!(dump(&joiner), first, "seed {seed}: a joiner from a checkpoint reads the same");
     }
+}
+
+#[test]
+fn a_gap_that_never_closes_is_bounded_and_asks_for_a_full_state() {
+    let s = seed(4);
+    let (mut a, mut b) = (peer(&s, 1), peer(&s, 2));
+    let sheet = Id::base(0);
+    // The value every later write to the same key names as its origin; `b` never hears it.
+    // (yrs integrates across a clock gap when an item's origins are known, so the dependency
+    // has to be an origin.)
+    let key = cell_key(Id::base(0), Id::base(0));
+    let _withheld = a.write(|t| t.set_cell(sheet, &key, &content(json!(-1), "alice"))).unwrap();
+    let mut most_held = 0;
+    let mut most_bytes = 0;
+    for n in 0..(HELD_MAX_ENTRIES * 2) {
+        let u = a.write(|t| t.set_cell(sheet, &key, &content(json!(n), "alice"))).unwrap();
+        b.apply(&u).unwrap();
+        most_held = most_held.max(b.held_len());
+        most_bytes = most_bytes.max(b.held_bytes());
+    }
+    assert!(most_held <= HELD_MAX_ENTRIES, "the copies never outgrow their cap");
+    assert!(most_bytes <= HELD_MAX_BYTES, "nor their byte cap");
+    assert!(b.needs_resync(), "a gap that outgrew the cap asks for a full state");
+    assert_ne!(dump(&b), dump(&a), "the stuck replica is behind");
+    b.apply(&a.state()).unwrap();
+    b.clear_resync();
+    assert_eq!(dump(&b), dump(&a), "after a full state the replicas agree");
+    assert_eq!(b.held_len(), 0, "and nothing is held any more");
+    assert!(!b.needs_resync());
+}
+
+#[test]
+fn writes_to_a_sheet_the_doc_lacks_are_counted() {
+    let s = seed(5);
+    let mut d = peer(&s, 1);
+    let gone = Id::base(s.sheets + 3);
+    let key = cell_key(Id::base(0), Id::base(0));
+    d.write(|t| {
+        t.set_cell(gone, &key, &content(json!(1), "alice"));
+        t.set_line(gone, AxisKind::Rows, "1/h", json!(20));
+    })
+    .unwrap();
+    assert!(d.write_skipped() >= 2, "both writes to the missing sheet are counted");
+    assert_eq!(d.cell(gone, &key), Entry::Absent, "and nothing was written");
+    d.write(|t| t.set_cell(Id::base(0), &key, &content(json!(1), "alice"))).unwrap();
+    assert_eq!(d.write_skipped(), 0, "a write that lands counts nothing, and the count is per write");
+}
+
+#[test]
+fn styles_props_and_meta_are_named_and_converge() {
+    let s = seed(6);
+    let (mut a, mut b) = (peer(&s, 1), peer(&s, 2));
+    let sheet = Id::base(1);
+    // One write each, seen by the other: each change is named.
+    let u = a.write(|t| t.put_style("k1", json!({"b": true}))).unwrap();
+    assert!(b.apply(&u).unwrap().contains(&GridChange::Styles { keys: vec!["k1".into()] }));
+    let u = a.write(|t| t.set_sheet_prop(sheet, "defw", json!(12))).unwrap();
+    assert!(b.apply(&u).unwrap().contains(&GridChange::SheetProps { sheet }));
+    let u = a.write(|t| t.bump_epoch("alice")).unwrap();
+    assert!(b.apply(&u).unwrap().contains(&GridChange::Meta));
+    // Then both write the same style, prop and epoch at once, and hear each other in either order.
+    let ua = a
+        .write(|t| {
+            t.put_style("k1", json!({"i": true}));
+            t.set_sheet_prop(sheet, "defw", json!(20));
+            t.bump_epoch("alice");
+        })
+        .unwrap();
+    let ub = b
+        .write(|t| {
+            t.put_style("k1", json!({"u": true}));
+            t.set_sheet_prop(sheet, "defw", json!(30));
+            t.bump_epoch("bob");
+        })
+        .unwrap();
+    let mut c = GridDoc::from_state(&a.state()).unwrap();
+    b.apply(&ua).unwrap();
+    a.apply(&ub).unwrap();
+    c.apply(&ub).unwrap();
+    c.apply(&ua).unwrap();
+    for d in [&b, &c] {
+        assert_eq!(d.style("k1"), a.style("k1"), "one style wins everywhere");
+        assert_eq!(d.sheet_prop(sheet, "defw"), a.sheet_prop(sheet, "defw"), "one prop wins everywhere");
+        assert_eq!(d.meta(), a.meta(), "one epoch wins everywhere");
+    }
+    assert_eq!(dump(&b), dump(&a));
 }
