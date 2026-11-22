@@ -594,6 +594,10 @@ impl LiveApp<Grid> for GridApp<'_> {
         m.pending.clear();
         m.unresolved.clear();
         m.index.clear();
+        // A reset mid-session (a fenced run taken back, or the room's checkpoint replacing the
+        // replica) drops every local edit that was not ordered: none of them is a step to undo.
+        m.sent.clear();
+        m.removed.clear();
     }
 
     fn set_space(&mut self, space: u32) {
