@@ -3,10 +3,12 @@
 //! [`Session`] and passes it to each call.
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex};
 
 use craft_collab::{Hub, LiveError, Replica};
-use craft_live::{Access, LiveEditing, LiveStatus, uid_of};
+use craft_live::ordered::{Action, Ordered, Polled};
+use craft_live::{Access, LiveApp, LiveEditing, LiveStatus, uid_of};
 use gridcraft_calc::VolatileSource;
 use gridcraft_core::CellRef;
 use gridcraft_engine::{DocState, EditObserver, EditReport, Session, Trust};
@@ -17,7 +19,10 @@ use sha2::{Digest, Sha256};
 use crate::app::{GridApp, Mapping, caret_payload};
 use crate::doc::{GridDoc, GridSeed};
 use crate::gate::{Class, NOT_YET_TEXT, class};
+use crate::axis::AxisKind;
+use crate::ids::Id;
 use crate::kind::{Grid, GridEdit, GridPos};
+use crate::ordered::{BUSY_TEXT, LOCK_LOST_TEXT, Pending, SCOPE, Tracked, request, resolve, send_actions};
 use crate::layout::Layout;
 use crate::local::has_random;
 use crate::remote::build;
@@ -81,7 +86,7 @@ impl EditObserver for Tap {
 
 /// A GridCraft document edited live.
 pub struct GridLive<H: Hub> {
-    core: LiveEditing<H, Grid>,
+    core: LiveEditing<Tracked<H>, Grid>,
     map: Mapping,
     observed: Arc<std::sync::atomic::AtomicU64>,
     /// uid to the display name last seen in the roster.
@@ -90,6 +95,20 @@ pub struct GridLive<H: Hub> {
     undo_notified: bool,
     /// The replica fell out of step for good (told once).
     broken_told: bool,
+    /// The structure lock's queue (one ordered edit at a time).
+    ordered: Ordered<Pending>,
+    /// An ordered edit that has the lock but waits for the engine to catch up.
+    deferred: Option<Pending>,
+    /// How many join answers the hub has seen, and how many of them were told.
+    joins: Arc<AtomicU64>,
+    seen_joins: u64,
+    /// The clock the lock's wait runs on (shared with the link's own).
+    clock: Option<Arc<Mutex<Box<dyn FnMut() -> f64 + Send>>>>,
+    started: Option<std::time::Instant>,
+    /// Frames pumped, the clock where there is none.
+    frames: u64,
+    /// The unlock for a broken replica was sent.
+    broken_sent: bool,
 }
 
 const NOT_ACTIVE: &str = "The live workbook is not open any more";
@@ -128,7 +147,8 @@ impl<H: Hub> GridLive<H> {
             log::info!("gridcraft-live: opening the base gave {} warnings", warnings.len());
         }
         let seed = GridSeed { base_sha256: sha, sheets: u32::try_from(wb.sheets.len()).unwrap_or(u32::MAX) };
-        let core = LiveEditing::<H, Grid>::start(hub, room, &seed, access).map_err(LiveFail::Live)?;
+        let (hub, joins) = Tracked::new(hub);
+        let core = LiveEditing::<Tracked<H>, Grid>::start(hub, room, &seed, access).map_err(LiveFail::Live)?;
         let title = std::path::Path::new(base.name).file_name().map_or_else(|| base.name.to_owned(), |n| n.to_string_lossy().into_owned());
         session.add_document(DocState::new(wb, None, title, Trust::FromFile));
         let (doc, wb) = session.active().map(|d| (d.uid, d.wb.clone())).ok_or(LiveFail::Open("no workbook".into()))?;
@@ -157,9 +177,29 @@ impl<H: Hub> GridLive<H> {
             mine: HashMap::new(),
             lost: Vec::new(),
             editor: None,
+            applied_ops: 0,
+            index: crate::reprint::RefIndex::default(),
+            recent: std::collections::BTreeMap::new(),
+            lines_minted: 0,
+            removed: Vec::new(),
         };
         let observed = Arc::new(std::sync::atomic::AtomicU64::new(doc));
-        let mut live = GridLive { core, map, observed, names: HashMap::new(), undo_notified: false, broken_told: false };
+        let mut live = GridLive {
+            core,
+            map,
+            observed,
+            names: HashMap::new(),
+            undo_notified: false,
+            broken_told: false,
+            ordered: Ordered::new(SCOPE),
+            deferred: None,
+            joins,
+            seen_joins: 0,
+            clock: None,
+            started: None,
+            frames: 0,
+            broken_sent: false,
+        };
         live.bind(session).map_err(|e| LiveFail::Open(e.to_string()))?;
         Ok(live)
     }
@@ -218,6 +258,10 @@ impl<H: Hub> GridLive<H> {
             log::warn!("gridcraft-live: a held-back change did not land: {e}");
             self.core.end(RESYNC_TEXT);
         }
+        if self.core.live().unconfirmed_edits() == 0 {
+            // Everything this window wrote has been ordered: no delete can have missed it.
+            self.map.recent.clear();
+        }
         let peers = {
             let mut app = GridApp { session, map: &mut self.map };
             self.core.pump(&mut app)
@@ -225,6 +269,7 @@ impl<H: Hub> GridLive<H> {
         for p in &peers {
             self.names.insert(uid_of(&p.id).to_owned(), p.display.clone());
         }
+        self.drive_ordered(session);
         self.after_pump(session);
         peers
     }
@@ -243,6 +288,10 @@ impl<H: Hub> GridLive<H> {
         for (uid, cell) in std::mem::take(&mut self.map.lost) {
             let who = self.names.get(&uid).cloned().unwrap_or(uid);
             self.map.notices.push(format!("{who} changed {cell} at the same time. Their change was kept."));
+        }
+        for (uid, cell, value, what) in std::mem::take(&mut self.map.removed) {
+            let who = self.names.get(&uid).cloned().unwrap_or(uid);
+            self.map.notices.push(format!("{who} deleted the {what} where you had typed {value}. Your entry in {cell} was removed."));
         }
         for n in std::mem::take(&mut self.map.notices) {
             self.core.push_notice(n);
@@ -274,8 +323,144 @@ impl<H: Hub> GridLive<H> {
                 self.flush(session);
                 Ok(Ran::Done(done))
             }
-            // G9 replaces this arm with the queue.
-            Class::Ordered | Class::NotYet => Err(NOT_YET_TEXT.to_owned()),
+            Class::Ordered => {
+                self.activate(session)?;
+                if !self.core.editable() {
+                    return Err(self.core.not_editable());
+                }
+                let pending = request(session, &self.map.layout, id, &params)?;
+                self.enqueue(pending)
+            }
+            Class::NotYet => Err(NOT_YET_TEXT.to_owned()),
+        }
+    }
+
+    /// Brings deleted lines back (the undo of a delete, G11's, and tests): an `Undelete` op,
+    /// through the same lock as any ordered edit.
+    ///
+    /// # Errors
+    /// The refusal, as text for the user.
+    pub fn undelete_lines(&mut self, session: &mut Session, sheet: Id, axis: AxisKind, ids: Vec<Id>) -> Result<Ran, String> {
+        self.activate(session)?;
+        if !self.core.editable() {
+            return Err(self.core.not_editable());
+        }
+        self.enqueue(Pending { command: String::new(), anchors: Vec::new(), count: 0, undelete: Some((sheet, axis, ids)) })
+    }
+
+    fn enqueue(&mut self, pending: Pending) -> Result<Ran, String> {
+        let now = self.now();
+        match self.ordered.request(pending, now) {
+            Ok(actions) => {
+                self.send(&actions);
+                Ok(Ran::Queued)
+            }
+            Err(_) => Err(BUSY_TEXT.to_owned()),
+        }
+    }
+
+    fn now(&mut self) -> f64 {
+        if let Some(c) = &self.clock {
+            return c.lock().map_or(0.0, |mut f| f());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            return self.started.get_or_insert_with(std::time::Instant::now).elapsed().as_secs_f64() * 1000.0;
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.frames as f64 * 16.0
+        }
+    }
+
+    fn send(&mut self, actions: &[Action]) {
+        send_actions(&mut self.core, actions);
+    }
+
+    /// One frame of the ordered edit's queue: the relay's word on the lock, a rejoin, the edit
+    /// itself when it may run, and the unlock once the edit is ordered.
+    fn drive_ordered(&mut self, session: &mut Session) {
+        self.frames = self.frames.saturating_add(1);
+        let now = self.now();
+        if matches!(self.core.status(), LiveStatus::Broken(_)) && !self.broken_sent {
+            self.broken_sent = true;
+            let actions = self.ordered.replica_broken();
+            self.send(&actions);
+        }
+        for ev in self.core.take_lock_events() {
+            let actions = self.ordered.on_lock(&ev, now);
+            self.send(&actions);
+        }
+        let joins = self.joins.load(std::sync::atomic::Ordering::Relaxed);
+        if joins > self.seen_joins {
+            if self.seen_joins > 0 {
+                let actions = self.ordered.rejoined(now);
+                self.send(&actions);
+            }
+            self.seen_joins = joins;
+        }
+        let polled = match self.deferred.take() {
+            Some(p) => Polled::Run(p),
+            None => self.ordered.poll(self.core.newest_seq(), now),
+        };
+        match polled {
+            Polled::Nothing => {}
+            Polled::Run(p) => self.run_pending(session, p),
+            Polled::GaveUp { holder, .. } => {
+                let who = self.holder_name(&holder);
+                self.map.notices.push(format!("{who} is still changing the sheet's structure. Try again in a moment."));
+            }
+            Polled::LockLost { .. } => {
+                self.map.notices.push(LOCK_LOST_TEXT.to_owned());
+                // The edit went out without the lock: take the engine back to what the room holds.
+                if let Some(doc) = self.core.live().doc() {
+                    let mut app = GridApp { session, map: &mut self.map };
+                    if let Err(e) = LiveApp::resync(&mut app, doc) {
+                        log::warn!("gridcraft-live: the engine could not be rebuilt after a lost lock: {e}");
+                    }
+                }
+            }
+        }
+        if self.deferred.is_none() {
+            let settled = self.core.local_settled();
+            let actions = self.ordered.finish(settled);
+            self.send(&actions);
+        }
+    }
+
+    fn holder_name(&self, holder: &str) -> String {
+        let uid = uid_of(holder);
+        self.names.get(uid).cloned().filter(|_| !holder.is_empty()).unwrap_or_else(|| if holder.is_empty() { "The relay".to_owned() } else { "Another editor".to_owned() })
+    }
+
+    /// Runs an ordered edit that holds the lock: its lines are found again by id, the command runs
+    /// on today's positions, and its edit is shared in one transaction.
+    fn run_pending(&mut self, session: &mut Session, p: Pending) {
+        if !self.core.editable() {
+            let why = self.core.not_editable();
+            self.map.notices.push(why);
+            return;
+        }
+        if !self.map.pending.is_empty() || self.map.restore.is_some() {
+            // The engine has not applied everything the room holds (an undo group is open).
+            self.deferred = Some(p);
+            return;
+        }
+        if let Err(e) = self.activate(session) {
+            self.map.notices.push(e);
+            return;
+        }
+        if let Some((sheet, axis, ids)) = p.undelete {
+            self.core.queue().push(GridEdit::Undelete { sheet, axis, ids });
+            self.flush(session);
+            return;
+        }
+        match resolve(&p, &self.map.layout) {
+            Err(text) => self.map.notices.push(text),
+            Ok(params) => match session.execute(&p.command, params) {
+                Ok(_) => self.flush(session),
+                Err(e) => self.map.notices.push(e.to_string()),
+            },
         }
     }
 
@@ -288,7 +473,7 @@ impl<H: Hub> GridLive<H> {
     /// Whether the host may offer `id` now: LOCAL and FREE commands (ordered ones from G9).
     #[must_use]
     pub fn allows(&self, id: &str) -> bool {
-        matches!(class(id), Class::Local | Class::Free)
+        matches!(class(id), Class::Local | Class::Free | Class::Ordered)
     }
 
     #[must_use]
@@ -296,10 +481,34 @@ impl<H: Hub> GridLive<H> {
         self.core.status()
     }
 
-    /// "Waiting for Bob's change…" while an ordered edit waits (G9); none until then.
+    /// "Waiting for Bob's change…" while an ordered edit waits for another editor's lock.
     #[must_use]
     pub fn status_line(&self) -> Option<String> {
-        None
+        let holder = self.ordered.waiting_for()?;
+        Some(format!("Waiting for {}'s change…", self.holder_name(holder)))
+    }
+
+    /// Builds the engine from a checkpoint's state, as the link does when the room's snapshot
+    /// replaces the replica: nothing is replayed, and the applied-ops count is the log's length.
+    /// For tests.
+    ///
+    /// # Errors
+    /// The state did not decode, or did not build.
+    #[doc(hidden)]
+    pub fn apply_checkpoint(&mut self, session: &mut Session, state: &[u8]) -> Result<(), String> {
+        let doc = GridDoc::from_state(state).map_err(|e| e.to_string())?;
+        self.activate(session)?;
+        let space = self.map.space;
+        let mut app = GridApp { session, map: &mut self.map };
+        LiveApp::reset(&mut app, space);
+        LiveApp::resync(&mut app, &doc)
+    }
+
+    /// How many op-log entries the engine has applied (equal to the log's length when it is
+    /// caught up, or was built from the state).
+    #[must_use]
+    pub fn applied_ops(&self) -> u32 {
+        self.map.applied_ops
     }
 
     pub fn take_notices(&mut self) -> Vec<String> {
@@ -343,15 +552,18 @@ impl<H: Hub> GridLive<H> {
     }
 
     pub fn set_clock(&mut self, clock: Box<dyn FnMut() -> f64 + Send>) {
-        self.core.set_clock(clock);
+        let shared = Arc::new(Mutex::new(clock));
+        let link = shared.clone();
+        self.core.set_clock(Box::new(move || link.lock().map_or(0.0, |mut f| f())));
+        self.clock = Some(shared);
     }
 
     #[must_use]
-    pub fn core(&self) -> &LiveEditing<H, Grid> {
+    pub fn core(&self) -> &LiveEditing<Tracked<H>, Grid> {
         &self.core
     }
 
-    pub fn core_mut(&mut self) -> &mut LiveEditing<H, Grid> {
+    pub fn core_mut(&mut self) -> &mut LiveEditing<Tracked<H>, Grid> {
         &mut self.core
     }
 

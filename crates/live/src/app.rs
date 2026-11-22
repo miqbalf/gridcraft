@@ -1,7 +1,7 @@
 //! [`GridApp`]: GridCraft's side of each step of a live session, built per call from the engine
 //! session and the mapping's state.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use craft_live::{Landed, LiveApp, LocalError};
@@ -15,16 +15,18 @@ use crate::ids::{Id, parse_cell_key};
 use crate::kind::{Grid, GridCaret, GridEdit, GridPos};
 use crate::layout::Layout;
 use crate::local::Planner;
+use crate::op::Op;
+use crate::ops::{Author, Step, apply_ops, ensure_index, formula_source, replay_before, reprint, undeleted_targets};
 use crate::remote::{Ctx, Targets, apply, build};
 use crate::split::{Plan, Put};
 use crate::styles::StyleHash;
 use crate::volatile::Volatile;
+use crate::reprint::RefIndex;
 
 /// Told when Undo or Redo is asked for: per-user undo comes with G11.
 pub const UNDO_NOT_YET_TEXT: &str = "Undo and Redo are not available while editing live yet";
-/// Told when another peer ran an ordered edit this build cannot apply.
-pub const ORDERED_REMOTE_TEXT: &str =
-    "Another editor changed rows or columns, which this version cannot follow yet. Reopen the file to keep editing.";
+/// Told when a change cannot run now because an undo group is open.
+pub const BUSY_TEXT: &str = "Finish what you are doing, then try that change again.";
 /// The most ranges of a caret kept.
 const CARET_RANGES_MAX: usize = 64;
 /// The most of this peer's own writes remembered for "your value was replaced" notices.
@@ -65,6 +67,17 @@ pub(crate) struct Mapping {
     pub lost: Vec<(String, String)>,
     /// The slot the cell editor is open on: (sheet, row, column).
     pub editor: Option<(Id, Id, Id)>,
+    /// How many op-log entries the engine has applied (or is built from).
+    pub applied_ops: u32,
+    /// Which formula cells name each line (built when the first ordered edit needs it).
+    pub index: RefIndex,
+    /// This peer's cell writes the room may not have seen yet, to tell it when a delete took
+    /// the row or column it typed into.
+    pub recent: BTreeMap<(Id, String), CellContent>,
+    /// Line ids this peer minted in its space.
+    pub lines_minted: u32,
+    /// Entries a delete took away: (their uid, the cell, the value as text, `row` or `column`).
+    pub removed: Vec<(String, String, String, &'static str)>,
 }
 
 /// The engine session and the mapping, for one call.
@@ -142,6 +155,247 @@ impl GridApp<'_> {
         Ok(())
     }
 
+    fn local_inner(&mut self, replica: &mut GridDoc, edits: &[GridEdit]) -> Result<Vec<Vec<u8>>, LocalError> {
+        let GridApp { session, map: m } = self;
+        let mut plan = Plan::default();
+        let mut steps: Vec<Step> = Vec::new();
+        let mut layout = m.layout.clone();
+        let mut minted = m.lines_minted;
+        let (mut calculate, mut random, mut resync, mut ordered) = (false, false, false, false);
+        for e in edits {
+            match e {
+                GridEdit::Command(r) if r.doc == m.doc => {
+                    let replay = if r.edits.is_empty() {
+                        None
+                    } else {
+                        if m.space == 0 {
+                            return Err(LocalError::Refused(crate::gate::NOT_YET_TEXT.to_owned()));
+                        }
+                        ordered = true;
+                        let wb = replay_before(&r.before, &r.edits).ok_or_else(|| LocalError::Refused(crate::gate::NOT_YET_TEXT.to_owned()))?;
+                        let mut author = Author {
+                            base: &m.base,
+                            replica,
+                            index: &mut m.index,
+                            layout: &mut layout,
+                            minted: &mut minted,
+                            space: m.space,
+                            uid: &m.uid,
+                            steps: &mut steps,
+                            plan: &mut plan,
+                        };
+                        author.report(r)?;
+                        Some(wb)
+                    };
+                    let mut planner = Planner {
+                        base: &m.base,
+                        layout: &layout,
+                        doc: replica,
+                        uid: &m.uid,
+                        space: m.space,
+                        hash: m.hash,
+                        keys: &mut m.keys,
+                        minted: &mut m.minted,
+                        resync: false,
+                        random: false,
+                        before: replay.as_ref(),
+                    };
+                    planner.report(r, &mut plan)?;
+                    random |= planner.random;
+                    resync |= planner.resync;
+                }
+                GridEdit::Command(_) => {}
+                GridEdit::Undo | GridEdit::Redo => m.notices.push(UNDO_NOT_YET_TEXT.to_owned()),
+                GridEdit::CalculateNow => calculate = true,
+                GridEdit::Undelete { sheet, axis, ids } => {
+                    let Some(i) = layout.sheet_index(*sheet) else { continue };
+                    if m.space == 0 || ids.len() > crate::ops::LINES_MAX {
+                        return Err(LocalError::Refused(crate::ops::TOO_MANY_TEXT.to_owned()));
+                    }
+                    ordered = true;
+                    let Some(sl) = layout.sheets.get_mut(i) else { continue };
+                    let areas = sl.axis_mut(*axis).undelete(ids);
+                    minted = minted.saturating_add(1);
+                    let op = Op::Undelete { id: Id::minted(m.space, minted).0, by: m.uid.clone(), sheet: *sheet, axis: *axis, ids: ids.clone() };
+                    steps.push(Step::Undelete { sheet: *sheet, axis: *axis, ids: ids.clone() });
+                    steps.push(Step::Op(op));
+                    ensure_index(&mut m.index, &m.base, &layout, replica);
+                    let naming = m.index.naming(*sheet, *axis, ids);
+                    let mut t = Targets::default();
+                    undeleted_targets(&mut t, &layout, replica, &m.base, i, *axis, ids);
+                    m.vol.set_layout(layout.clone());
+                    let ctx = Ctx { base: &m.base, layout: &layout };
+                    let unresolved = &mut m.unresolved;
+                    let doc: &GridDoc = replica;
+                    let done = session.apply_remote(m.doc, |cx| {
+                        for (first, count) in &areas {
+                            cx.insert_lines(i, *axis, *first, *count)?;
+                        }
+                        apply(cx, &ctx, doc, &t, unresolved)?;
+                        reprint(cx, &ctx, doc, &naming)
+                    });
+                    match done {
+                        Ok(()) => {}
+                        Err(EngineError::RemoteBusy) => return Err(LocalError::Refused(BUSY_TEXT.to_owned())),
+                        Err(e) => return Err(LocalError::Failed(e.to_string())),
+                    }
+                }
+            }
+        }
+        m.has_random |= random;
+        m.resync_wanted |= resync;
+        plan.epoch = calculate || m.has_random;
+        if plan.is_empty() && steps.is_empty() {
+            return Ok(Vec::new());
+        }
+        let epoch = plan.epoch;
+        let mut updates = Vec::new();
+        for (n, chunk) in plan.split().into_iter().enumerate() {
+            let update = replica
+                .write(|t| {
+                    if n == 0 {
+                        for s in &steps {
+                            s.write(t);
+                        }
+                    }
+                    chunk.write(t, &m.uid);
+                })
+                .map_err(|e| LocalError::Failed(e.to_string()))?;
+            m.skipped += replica.write_skipped();
+            for w in &chunk.cells {
+                match &w.content {
+                    crate::split::Put::Set(c) if m.mine.len() < MINE_MAX => {
+                        m.mine.insert((w.sheet, w.key.clone()), c.clone());
+                        m.recent.insert((w.sheet, w.key.clone()), c.clone());
+                    }
+                    Put::Keep => {}
+                    _ => {
+                        m.mine.remove(&(w.sheet, w.key.clone()));
+                        m.recent.remove(&(w.sheet, w.key.clone()));
+                    }
+                }
+                if m.index.built
+                    && !matches!(w.content, Put::Keep)
+                    && let Some(i) = layout.sheet_index(w.sheet)
+                {
+                    let text = formula_source(&m.base, replica, i, w.sheet, &w.key);
+                    m.index.set(w.sheet.0, &w.key, text.as_deref());
+                }
+            }
+            updates.push(update);
+        }
+        if ordered {
+            m.layout = layout;
+            m.lines_minted = minted;
+            m.applied_ops = replica.ops_len();
+            m.vol.set_layout(m.layout.clone());
+            if m.has_random {
+                m.vol.follow(replica);
+                m.recalc = true;
+            }
+        }
+        if epoch {
+            m.vol.follow(replica);
+            m.recalc = true;
+        }
+        Ok(updates)
+    }
+
+    /// Keeps the reference index in step with the cells the changes name.
+    fn index_changes(&mut self, replica: &GridDoc, changes: &[GridChange]) {
+        let m = &mut *self.map;
+        if !m.index.built {
+            return;
+        }
+        for c in changes {
+            let GridChange::Cells { sheet, keys } = c else { continue };
+            let Some(i) = m.layout.sheet_index(*sheet) else { continue };
+            for k in keys {
+                let text = formula_source(&m.base, replica, i, *sheet, k);
+                m.index.set(sheet.0, k, text.as_deref());
+            }
+        }
+    }
+
+    /// Applies new op-log entries and the state changes of the same updates: the ops in array
+    /// order through the engine (the layout moving with each), then the state over the result,
+    /// then the formulas that name the ops' lines re-printed from their id form. When the engine
+    /// refuses an op, or lands on another layout than the document's, it is rebuilt from the
+    /// document instead.
+    fn apply_ordered(&mut self, replica: &GridDoc, all: Vec<GridChange>, t: Targets) -> Result<(), String> {
+        let GridApp { session, map: m } = self;
+        let mut t = t;
+        let final_layout = Layout::from_doc(replica, &m.base);
+        let ops = replica.ops_from(m.applied_ops);
+        let new_len = replica.ops_len();
+        ensure_index(&mut m.index, &m.base, &final_layout, replica);
+        for c in &all {
+            let GridChange::Cells { sheet, keys } = c else { continue };
+            let Some(i) = m.layout.sheet_index(*sheet) else { continue };
+            for k in keys {
+                let text = formula_source(&m.base, replica, i, *sheet, k);
+                m.index.set(sheet.0, k, text.as_deref());
+            }
+        }
+        let mut naming = BTreeSet::new();
+        for op in &ops {
+            let (sheet, axis, ids) = match op {
+                Op::Insert { sheet, axis, ids, .. } | Op::Delete { sheet, axis, ids, .. } | Op::Undelete { sheet, axis, ids, .. } => (*sheet, *axis, ids),
+            };
+            naming.extend(m.index.naming(sheet, axis, ids));
+            if let Some(i) = final_layout.sheet_index(sheet) {
+                if matches!(op, Op::Undelete { .. }) {
+                    undeleted_targets(&mut t, &final_layout, replica, &m.base, i, axis, ids);
+                }
+                if let Op::Delete { by, .. } = op
+                    && by != &m.uid
+                {
+                    removed_notices(m, sheet, axis, ids, by);
+                }
+            }
+        }
+        let sel = session.documents().iter().find(|d| d.uid == m.doc).map(|d| (d.wb.active_sheet(), d.selection.clone()));
+        let old_layout = m.layout.clone();
+        m.vol.set_layout(final_layout.clone());
+        if t.epoch {
+            m.vol.follow(replica);
+        }
+        let mut work = old_layout.clone();
+        let ctx = Ctx { base: &m.base, layout: &final_layout };
+        let unresolved = &mut m.unresolved;
+        let res = session.apply_remote(m.doc, |cx| {
+            apply_ops(cx, &mut work, &ops)?;
+            if work != final_layout {
+                return Err(EngineError::Other("the op log did not reach the document's layout".into()));
+            }
+            apply(cx, &ctx, replica, &t, unresolved)?;
+            reprint(cx, &ctx, replica, &naming)
+        });
+        match res {
+            Ok(()) => {
+                m.layout = final_layout;
+                m.applied_ops = new_len;
+                if let Some((sheet, sel)) = sel {
+                    follow_selection(session, m.doc, sheet, &sel, &old_layout, &m.layout);
+                }
+                if m.has_random {
+                    self.recalc_all();
+                }
+                Ok(())
+            }
+            Err(EngineError::RemoteBusy) => {
+                m.vol.set_layout(old_layout);
+                m.pending = all;
+                Ok(())
+            }
+            Err(e) => {
+                log::warn!("gridcraft-live: an ordered edit did not land ({e}); rebuilding from the document");
+                m.removed.clear();
+                self.resync(replica)
+            }
+        }
+    }
+
     fn a1(&self, sheet: Id, key: &str) -> String {
         let at = parse_cell_key(key).and_then(|(r, c)| self.map.layout.sheet_index(sheet).and_then(|i| self.map.layout.cell_at(i, r, c)));
         at.map_or_else(|| key.to_owned(), |c| c.a1())
@@ -150,59 +404,13 @@ impl GridApp<'_> {
 
 impl LiveApp<Grid> for GridApp<'_> {
     fn local(&mut self, replica: &mut GridDoc, edits: &[GridEdit]) -> Result<Vec<Vec<u8>>, LocalError> {
-        let mut plan = Plan::default();
-        let m = &mut *self.map;
-        let mut planner = Planner {
-            base: &m.base,
-            layout: &m.layout,
-            doc: replica,
-            uid: &m.uid,
-            space: m.space,
-            hash: m.hash,
-            keys: &mut m.keys,
-            minted: &mut m.minted,
-            resync: false,
-            random: false,
-        };
-        let mut calculate = false;
-        for e in edits {
-            match e {
-                GridEdit::Command(r) if r.doc == m.doc => planner.report(r, &mut plan)?,
-                GridEdit::Command(_) => {}
-                GridEdit::Undo | GridEdit::Redo => m.notices.push(UNDO_NOT_YET_TEXT.to_owned()),
-                GridEdit::CalculateNow => calculate = true,
-            }
+        let out = self.local_inner(replica, edits);
+        if out.is_err() {
+            // Nothing of an ordered edit was kept: the layout and the index go back.
+            self.map.vol.set_layout(self.map.layout.clone());
+            self.map.index.clear();
         }
-        let (random, resync) = (planner.random, planner.resync);
-        m.has_random |= random;
-        m.resync_wanted |= resync;
-        plan.epoch = calculate || m.has_random;
-        if plan.is_empty() {
-            return Ok(Vec::new());
-        }
-        let epoch = plan.epoch;
-        let mut updates = Vec::new();
-        for chunk in plan.split() {
-            let update = replica.write(|t| chunk.write(t, &m.uid)).map_err(|e| LocalError::Failed(e.to_string()))?;
-            m.skipped += replica.write_skipped();
-            for w in &chunk.cells {
-                match &w.content {
-                    crate::split::Put::Set(c) if m.mine.len() < MINE_MAX => {
-                        m.mine.insert((w.sheet, w.key.clone()), c.clone());
-                    }
-                    Put::Keep => {}
-                    _ => {
-                        m.mine.remove(&(w.sheet, w.key.clone()));
-                    }
-                }
-            }
-            updates.push(update);
-        }
-        if epoch {
-            m.vol.follow(replica);
-            m.recalc = true;
-        }
-        Ok(updates)
+        out
     }
 
     fn landed(&mut self) -> Landed {
@@ -255,13 +463,13 @@ impl LiveApp<Grid> for GridApp<'_> {
     fn apply(&mut self, replica: &GridDoc, changes: &[GridChange]) -> Result<(), String> {
         let mut all = std::mem::take(&mut self.map.pending);
         all.extend_from_slice(changes);
-        if all.is_empty() {
+        let m = &mut *self.map;
+        if all.is_empty() && replica.ops_len() <= m.applied_ops {
             return Ok(());
         }
-        let m = &mut *self.map;
         let t = Targets::from_changes(&m.layout, replica, &all, &mut m.unresolved);
-        if t.layout {
-            return Err(ORDERED_REMOTE_TEXT.to_owned());
+        if t.layout || replica.ops_len() > m.applied_ops {
+            return self.apply_ordered(replica, all, t);
         }
         if t.epoch {
             m.vol.follow(replica);
@@ -278,7 +486,8 @@ impl LiveApp<Grid> for GridApp<'_> {
                 Err(e) => return Err(e.to_string()),
             }
         }
-        if t.epoch && m.has_random {
+        self.index_changes(replica, &all);
+        if t.epoch && self.map.has_random {
             self.recalc_all();
         }
         Ok(())
@@ -288,6 +497,9 @@ impl LiveApp<Grid> for GridApp<'_> {
         let m = &mut *self.map;
         m.pending.clear();
         m.layout = Layout::from_doc(replica, &m.base);
+        m.applied_ops = replica.ops_len();
+        m.index.clear();
+        m.recent.clear();
         m.vol.set_layout(m.layout.clone());
         m.vol.follow(replica);
         let source: Arc<dyn gridcraft_calc::VolatileSource> = m.vol.clone();
@@ -301,12 +513,15 @@ impl LiveApp<Grid> for GridApp<'_> {
         m.space = space;
         m.keys.clear();
         m.mine.clear();
+        m.recent.clear();
         m.pending.clear();
         m.unresolved.clear();
+        m.index.clear();
     }
 
     fn set_space(&mut self, space: u32) {
         self.map.space = space;
+        self.map.lines_minted = 0;
     }
 
     fn caret(&self, payload: &Value) -> Option<GridCaret> {
@@ -350,4 +565,55 @@ pub(crate) fn caret_payload(layout: &Layout, sheet: usize, active: CellRef, rang
     let key = |at: CellRef| layout.slot_at(sheet, at).map(|(r, c)| crate::ids::cell_key(r, c));
     let rs: Vec<String> = ranges.iter().take(CARET_RANGES_MAX).filter_map(|r| Some(format!("{}:{}", key(r.start)?, key(r.end)?))).collect();
     Some(json!({"s": layout.sheets.get(sheet)?.id.text(), "a": key(active)?, "r": rs, "e": editing}))
+}
+
+/// Notes the entries this peer typed that a delete by `by` took away (it had not seen them).
+fn removed_notices(m: &mut Mapping, sheet: Id, axis: crate::axis::AxisKind, ids: &[Id], by: &str) {
+    let set: BTreeSet<Id> = ids.iter().copied().collect();
+    let what = if axis == crate::axis::AxisKind::Rows { "row" } else { "column" };
+    let hits: Vec<(Id, String, CellContent)> = m
+        .recent
+        .iter()
+        .filter(|((s, key), _)| {
+            *s == sheet && parse_cell_key(key).is_some_and(|(r, c)| set.contains(&if axis == crate::axis::AxisKind::Rows { r } else { c }))
+        })
+        .map(|((s, key), c)| (*s, key.clone(), c.clone()))
+        .collect();
+    for (s, key, c) in hits {
+        let at = parse_cell_key(&key)
+            .and_then(|(r, col)| m.layout.sheet_index(s).and_then(|i| m.layout.cell_at(i, r, col)))
+            .map_or_else(|| key.clone(), |cell| cell.a1());
+        let value = match (&c.f, &c.v) {
+            (Some(f), _) => format!("={f}"),
+            (None, Some(Value::String(t))) => t.clone(),
+            (None, Some(v)) => v.to_string(),
+            _ => String::new(),
+        };
+        m.removed.push((by.to_owned(), at, value, what));
+        m.recent.remove(&(s, key));
+    }
+}
+
+/// Moves the selection with its cells: each corner is looked up by id in the new layout (a
+/// deleted line gives its neighbour's position).
+fn follow_selection(session: &mut Session, doc: u64, sheet: usize, sel: &gridcraft_engine::Selection, old: &Layout, new: &Layout) {
+    let move_cell = |c: CellRef| -> CellRef {
+        let Some((r, col)) = old.slot_at(sheet, c) else { return c };
+        let Some(s) = new.sheets.get(sheet) else { return c };
+        let pos = |ax: &crate::axis::Axis, id: Id, was: u32| match ax.pos_of(id) {
+            gridcraft_formula::ids::Lookup::At(p) => p,
+            gridcraft_formula::ids::Lookup::Deleted { after, before } => after.or(before).unwrap_or(was),
+            gridcraft_formula::ids::Lookup::Unknown => was,
+        };
+        CellRef::new(pos(&s.rows, r, c.row), pos(&s.cols, col, c.col))
+    };
+    let moved = gridcraft_engine::Selection {
+        active: move_cell(sel.active),
+        anchor: move_cell(sel.anchor),
+        ranges: sel.ranges.iter().map(|r| RangeRef::new(move_cell(r.start), move_cell(r.end))).collect(),
+    };
+    if moved.active != sel.active || moved.anchor != sel.anchor || moved.ranges != sel.ranges {
+        // The document is open (the apply just ran on it).
+        let _ = session.set_selection_quiet(doc, moved);
+    }
 }

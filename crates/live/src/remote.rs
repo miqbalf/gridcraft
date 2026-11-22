@@ -77,11 +77,21 @@ pub(crate) struct Targets {
     props: BTreeSet<usize>,
     /// The epoch or seed may have moved: random numbers change.
     pub epoch: bool,
-    /// The layout (rows or columns) changed: not supported until G9.
+    /// The layout (rows or columns) or the op log changed.
     pub layout: bool,
 }
 
 impl Targets {
+    /// Names one cell (by sheet index and key).
+    pub(crate) fn add_cell(&mut self, sheet: usize, key: String) {
+        self.cells.insert((sheet, key));
+    }
+
+    /// Names one line (by sheet index, axis and id).
+    pub(crate) fn add_line(&mut self, sheet: usize, axis: AxisKind, id: Id) {
+        self.lines.insert((sheet, u8::from(axis == AxisKind::Cols), id));
+    }
+
     /// Whether nothing but possibly the epoch is named.
     pub(crate) fn is_empty(&self) -> bool {
         self.cells.is_empty() && self.lines.is_empty() && self.props.is_empty()
@@ -169,7 +179,12 @@ fn cell(cx: &mut RemoteCtx, ctx: &Ctx, doc: &GridDoc, i: usize, key: &str, unres
     let home = Home { layout: ctx.layout, sheet: sheet.0 };
     let base = base_cell(ctx.base, i, row, col);
     let mut out = match doc.cell(sheet, key) {
-        Entry::Absent => base.filter(|c| c.has_content()).cloned().unwrap_or_default(),
+        Entry::Absent => match base.filter(|c| c.has_content()) {
+            // A base formula names base lines: once lines moved it is read through their ids.
+            Some(b) if b.formula.is_some() && !ctx.layout.is_base() => base_formula(ctx, i, sheet, b),
+            Some(b) => b.clone(),
+            None => Cell::default(),
+        },
         Entry::Cleared => Cell::default(),
         Entry::Set(c) => from_content(Some(&c), at, &home, StyleId::DEFAULT).unwrap_or_default(),
     };
@@ -186,6 +201,59 @@ fn cell(cx: &mut RemoteCtx, ctx: &Ctx, doc: &GridDoc, i: usize, key: &str, unres
         },
     };
     cx.set_cell(i, at, (!out.is_blank()).then_some(out))
+}
+
+/// The base file's formula cell `b` with its references read through the layout's ids.
+fn base_formula(ctx: &Ctx, _i: usize, sheet: Id, b: &Cell) -> Cell {
+    let parsed = crate::ops::base_source(ctx.base, sheet, b).and_then(|src| gridcraft_formula::ids::parse_ids(&src, sheet.0, ctx.layout).ok());
+    match (parsed, &b.formula) {
+        (Some(e), Some(old)) => {
+            let mut f = gridcraft_model::Formula::from_expr(e);
+            f.array = old.array;
+            f.dynamic = old.dynamic;
+            Cell { formula: Some(Arc::new(f)), ..b.clone() }
+        }
+        _ => b.clone(),
+    }
+}
+
+/// Puts the base file's lines where the axes say: the deleted base lines go (one call per sheet
+/// and axis, all in the base frame), then the lines minted live are inserted, left to right.
+fn structure(cx: &mut RemoteCtx, ctx: &Ctx) -> gridcraft_engine::Result<()> {
+    for (i, s) in ctx.layout.sheets.iter().enumerate() {
+        for axis in [AxisKind::Rows, AxisKind::Cols] {
+            let ax = s.axis(axis);
+            let max = if axis == AxisKind::Rows { MAX_ROWS } else { MAX_COLS };
+            let mut areas: Vec<(u32, u32)> = Vec::new();
+            for b in ax.deleted().iter().filter_map(|id| id.base_index()).filter(|b| *b < max) {
+                match areas.last_mut() {
+                    Some(last) if last.1 + 1 == b => last.1 = b,
+                    _ => areas.push((b, b)),
+                }
+            }
+            if !areas.is_empty() {
+                cx.delete_lines(i, axis, &areas)?;
+            }
+            let shown = ax.shown();
+            let mut p = 0usize;
+            while p < shown.len() {
+                if shown.get(p).is_some_and(|id| id.space() != 0) {
+                    let start = p;
+                    while shown.get(p).is_some_and(|id| id.space() != 0) {
+                        p += 1;
+                    }
+                    let at = u32::try_from(start).unwrap_or(u32::MAX);
+                    let count = u32::try_from(p - start).unwrap_or(u32::MAX).min(max.saturating_sub(at));
+                    if count > 0 {
+                        cx.insert_lines(i, axis, at, count)?;
+                    }
+                } else {
+                    p += 1;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn bool_entry(e: Entry<serde_json::Value>, base: bool) -> bool {
@@ -241,6 +309,10 @@ pub(crate) fn build(base: &Workbook, doc: &GridDoc, source: Option<Arc<dyn Volat
     let uid = s.active().map(|d| d.uid).ok_or(craft_collab::LiveError::Decode)?;
     s.set_volatile_source(uid, source).map_err(fail)?;
     let ctx = Ctx { base, layout: &layout };
-    s.apply_remote(uid, |cx| apply(cx, &ctx, doc, &t, &mut BTreeSet::new())).map_err(fail)?;
+    s.apply_remote(uid, |cx| {
+        structure(cx, &ctx)?;
+        apply(cx, &ctx, doc, &t, &mut BTreeSet::new())
+    })
+    .map_err(fail)?;
     s.active().map(|d| (*d.wb).clone()).ok_or(craft_collab::LiveError::Decode)
 }

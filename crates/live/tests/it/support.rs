@@ -19,12 +19,17 @@ use serde_json::Value as Json;
 pub struct SpyHub {
     inner: MemHub,
     pub sizes: Rc<RefCell<Vec<usize>>>,
+    /// How many lock requests this hub sent.
+    pub locks: Rc<RefCell<usize>>,
 }
 
 impl Hub for SpyHub {
     fn send(&mut self, msg: ClientMsg) -> craft_collab::Result<()> {
         if let ClientMsg::Submit { params, .. } = &msg {
             self.sizes.borrow_mut().push(serde_json::to_string(params).map_or(0, |s| s.len()));
+        }
+        if matches!(msg, ClientMsg::Lock { .. }) {
+            *self.locks.borrow_mut() += 1;
         }
         self.inner.send(msg)
     }
@@ -43,6 +48,7 @@ pub struct Peer {
     pub session: Session,
     pub live: GridLive<SpyHub>,
     pub sizes: Rc<RefCell<Vec<usize>>>,
+    pub locks: Rc<RefCell<usize>>,
     pub notices: Vec<String>,
 }
 
@@ -100,14 +106,15 @@ impl Room {
         let uid = name.to_lowercase();
         let hub = self.relay.connect(&uid, name, access == Access::Edit);
         let sizes = Rc::new(RefCell::new(Vec::new()));
-        let hub = SpyHub { inner: hub, sizes: sizes.clone() };
+        let locks = Rc::new(RefCell::new(0));
+        let hub = SpyHub { inner: hub, sizes: sizes.clone(), locks: locks.clone() };
         let mut session = Session::new();
         let base = BaseFile { bytes: &self.bytes, name: FILE, expected_sha256: None };
         let live = match hash {
             Some(h) => GridLive::start_with(hub, ROOM, &base, access, &uid, &mut session, h),
             None => GridLive::start(hub, ROOM, &base, access, &uid, &mut session),
         };
-        self.peers.push(Peer { session, live: live.unwrap(), sizes, notices: Vec::new() });
+        self.peers.push(Peer { session, live: live.unwrap(), sizes, locks, notices: Vec::new() });
         self.peers.len() - 1
     }
 
@@ -138,6 +145,13 @@ impl Room {
     pub fn run(&mut self, i: usize, id: &str, params: Json) -> Result<Ran, String> {
         let p = &mut self.peers[i];
         p.live.run(&mut p.session, id, params)
+    }
+
+    /// Puts peer `i`'s selection on one cell.
+    pub fn select(&mut self, i: usize, cell: &str) {
+        let p = &mut self.peers[i];
+        let uid = p.session.active().map(|d| d.uid).unwrap();
+        p.session.set_selection_quiet(uid, gridcraft_engine::Selection::at(a1(cell))).unwrap();
     }
 
     pub fn wb(&self, i: usize) -> &Workbook {

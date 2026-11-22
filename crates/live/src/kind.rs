@@ -24,6 +24,8 @@ pub enum GridEdit {
     /// `formulas.calculateNow`: bumps the room's recalculation epoch, so every peer draws new
     /// random numbers.
     CalculateNow,
+    /// Bring deleted lines back (the undo of a delete): an `Undelete` op.
+    Undelete { sheet: Id, axis: crate::axis::AxisKind, ids: Vec<Id> },
 }
 
 /// Where another editor's selection is, as the host draws it. Positions are today's, resolved

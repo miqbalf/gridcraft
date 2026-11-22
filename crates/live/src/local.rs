@@ -39,6 +39,8 @@ pub(crate) struct Planner<'a> {
     pub resync: bool,
     /// Output: a written formula calls a random function.
     pub random: bool,
+    /// The report's `before` with its structural edits replayed (set for an ordered edit).
+    pub before: Option<&'a Workbook>,
 }
 
 fn refused<T>() -> Result<T, LocalError> {
@@ -53,7 +55,7 @@ impl Planner<'_> {
     /// Adds one report's writes to `plan`. Anything the report holds that is not shared (and
     /// every structural edit) refuses the whole batch.
     pub(crate) fn report(&mut self, r: &EditReport, plan: &mut Plan) -> Result<(), LocalError> {
-        if !r.unshared.is_empty() || !r.edits.is_empty() {
+        if !r.unshared.is_empty() {
             return refused();
         }
         for (sheet, at) in &r.cells {
@@ -73,9 +75,16 @@ impl Planner<'_> {
         Ok(())
     }
 
+    fn before_wb<'r>(&self, r: &'r EditReport) -> &'r Workbook
+    where
+        Self: 'r,
+    {
+        self.before.unwrap_or(&*r.before)
+    }
+
     fn cell(&mut self, r: &EditReport, i: usize, at: CellRef, plan: &mut Plan) -> Result<(), LocalError> {
         let (Some((row, col)), Some(sheet)) = (self.layout.slot_at(i, at), self.layout.sheets.get(i)) else { return refused() };
-        let (Some(before), Some(after)) = (r.before.sheet(i), r.after.sheet(i)) else { return refused() };
+        let (Some(before), Some(after)) = (self.before_wb(r).sheet(i), r.after.sheet(i)) else { return refused() };
         let (cb, ca) = (before.cell(at), after.cell(at));
         let base = base_cell(self.base, i, row, col);
         let same_place = row.base_index() == Some(at.row) && col.base_index() == Some(at.col);
@@ -98,7 +107,7 @@ impl Planner<'_> {
         };
         let (mut fmt, mut style) = (Put::Keep, None);
         let json = |wb: &Workbook, id: StyleId| styles::canonical(&styles::to_json(wb.styles.get(id)));
-        let (sb, sa) = (json(&r.before, cb.map_or(StyleId::DEFAULT, |c| c.style)), json(&r.after, ca.map_or(StyleId::DEFAULT, |c| c.style)));
+        let (sb, sa) = (json(self.before_wb(r), cb.map_or(StyleId::DEFAULT, |c| c.style)), json(&r.after, ca.map_or(StyleId::DEFAULT, |c| c.style)));
         if sb != sa {
             let dflt = json(&r.after, StyleId::DEFAULT);
             let base_style = base.map_or_else(|| dflt.clone(), |b| json(self.base, b.style));
@@ -135,7 +144,7 @@ impl Planner<'_> {
     }
 
     fn line(&mut self, r: &EditReport, i: usize, axis: AxisKind, idx: u32, plan: &mut Plan) -> Result<(), LocalError> {
-        let (Some(layout), Some(before), Some(after)) = (self.layout.sheets.get(i), r.before.sheet(i), r.after.sheet(i)) else { return refused() };
+        let (Some(layout), Some(before), Some(after)) = (self.layout.sheets.get(i), self.before_wb(r).sheet(i), r.after.sheet(i)) else { return refused() };
         let Some(id) = layout.axis(axis).id_at(idx) else { return refused() };
         let (b, a) = (line_at(before, axis, idx), line_at(after, axis, idx));
         if b == a {
@@ -173,7 +182,7 @@ impl Planner<'_> {
     }
 
     fn props(&mut self, r: &EditReport, i: usize, plan: &mut Plan) -> Result<(), LocalError> {
-        let (Some(layout), Some(before), Some(after)) = (self.layout.sheets.get(i), r.before.sheet(i), r.after.sheet(i)) else { return refused() };
+        let (Some(layout), Some(before), Some(after)) = (self.layout.sheets.get(i), self.before_wb(r).sheet(i), r.after.sheet(i)) else { return refused() };
         if before.default_col_width != after.default_col_width {
             plan.prop(layout.id, "defw", number(f64::from(after.default_col_width)));
         }

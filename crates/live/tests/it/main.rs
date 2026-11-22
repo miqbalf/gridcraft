@@ -7,6 +7,8 @@ mod free;
 #[cfg(feature = "test-util")]
 mod gate;
 #[cfg(feature = "test-util")]
+mod ordered;
+#[cfg(feature = "test-util")]
 mod support;
 
 /// SplitMix64, the house generator for seeded random tests (as in the engine's

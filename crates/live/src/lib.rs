@@ -19,7 +19,10 @@ pub mod kind;
 pub mod layout;
 mod local;
 pub mod op;
+mod ops;
+pub mod ordered;
 mod remote;
+pub mod reprint;
 pub mod schema;
 pub mod session;
 pub mod split;
@@ -33,5 +36,12 @@ pub use ids::{Id, cell_key, parse_cell_key};
 pub use kind::{Grid, GridCaret, GridEdit, GridPos};
 pub use layout::{Hosted, Layout, SheetLayout};
 pub use op::Op;
+pub use ordered::Tracked;
 pub use session::{BaseFile, GridLive, LiveFail, Peer, Ran, schema, volatile_for, workbook_from_state};
 pub use volatile::Volatile;
+
+/// Rows, for callers that name an axis without importing the formula crate.
+#[must_use]
+pub fn axis_kind_rows() -> AxisKind {
+    AxisKind::Rows
+}

@@ -97,6 +97,18 @@ impl Axis {
         self.next_base = next_base;
     }
 
+    /// The explicit lines that are shown, in order: positions `0..len`.
+    #[must_use]
+    pub fn shown(&self) -> &[Id] {
+        &self.shown
+    }
+
+    /// Whether this is the base file's own axis: nothing explicit, nothing deleted.
+    #[must_use]
+    pub fn is_base(&self) -> bool {
+        self.explicit.is_empty() && self.deleted.is_empty()
+    }
+
     /// The id shown at `pos`, if `pos` is on the sheet.
     #[must_use]
     pub fn id_at(&self, pos: u32) -> Option<Id> {
@@ -173,6 +185,43 @@ impl Axis {
         self.explicit.splice(index..index, new);
         self.derive();
         Insertion { index: u32::try_from(index).unwrap_or(u32::MAX), materialise, prev }
+    }
+
+    /// Insert `ids` right after the array element `prev` (at the front when `None`), as an
+    /// op-log entry says. A `prev` in the implicit tail materialises the base ids up to it; one
+    /// the axis does not know appends. Returns where the first new line is shown now (clamped to
+    /// the sheet) and how many were new.
+    pub fn insert_after(&mut self, prev: Option<Id>, ids: &[Id]) -> (u32, usize) {
+        let index = match prev {
+            None => 0,
+            Some(p) => match self.index.get(&p) {
+                Some((i, _)) => i + 1,
+                None if p.space() == 0 && p.0 >= self.next_base => {
+                    let upto = p.0;
+                    let from = self.next_base;
+                    self.explicit.extend((from..=upto).map(Id));
+                    self.derive();
+                    self.explicit.len()
+                }
+                None => self.explicit.len(),
+            },
+        };
+        let mut fresh = BTreeSet::new();
+        let new: Vec<Id> = ids.iter().copied().filter(|id| !self.index.contains_key(id) && fresh.insert(*id)).collect();
+        let count = new.len();
+        let index = index.min(self.explicit.len());
+        self.explicit.splice(index..index, new);
+        self.derive();
+        let first = ids.iter().find_map(|id| match self.pos_of(*id) {
+            Lookup::At(p) => Some(p),
+            _ => None,
+        });
+        // Not shown (pushed past the sheet, or deleted): the number of shown lines before the gap.
+        let at = first.unwrap_or_else(|| {
+            let before = self.explicit.get(..index).map_or(0, |e| e.iter().filter(|i| !self.deleted.contains(*i)).count());
+            u32::try_from(before).unwrap_or(u32::MAX).min(self.limit)
+        });
+        (at, count)
     }
 
     /// Delete `ids`. Returns the positions they were shown at, before the delete, as ascending

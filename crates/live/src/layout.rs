@@ -23,6 +23,14 @@ pub struct SheetLayout {
 }
 
 impl SheetLayout {
+    /// The axis for `axis`, to change.
+    pub fn axis_mut(&mut self, axis: AxisKind) -> &mut Axis {
+        match axis {
+            AxisKind::Rows => &mut self.rows,
+            AxisKind::Cols => &mut self.cols,
+        }
+    }
+
     /// The axis for `axis`.
     #[must_use]
     pub fn axis(&self, axis: AxisKind) -> &Axis {
@@ -58,6 +66,31 @@ impl Layout {
             })
             .collect();
         Layout { sheets }
+    }
+
+    /// The base file's own layout: every position holds its base id.
+    #[must_use]
+    pub fn of_base(base: &Workbook) -> Layout {
+        let sheets = base
+            .sheets
+            .iter()
+            .enumerate()
+            .filter_map(|(i, sheet)| {
+                Some(SheetLayout {
+                    id: Id::base(u32::try_from(i).ok()?),
+                    name: sheet.name.clone(),
+                    rows: Axis::base(MAX_ROWS),
+                    cols: Axis::base(MAX_COLS),
+                })
+            })
+            .collect();
+        Layout { sheets }
+    }
+
+    /// Whether every axis is the base file's.
+    #[must_use]
+    pub fn is_base(&self) -> bool {
+        self.sheets.iter().all(|s| s.rows.is_base() && s.cols.is_base())
     }
 
     /// The slot `(row id, col id)` shown at `at` on sheet `sheet`.
