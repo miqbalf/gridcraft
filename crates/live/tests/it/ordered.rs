@@ -7,7 +7,7 @@ use craft_live::Access;
 use craft_live::testing::ROOM;
 use gridcraft_core::Value;
 use gridcraft_engine::{Session, io};
-use gridcraft_live::{Id, axis_kind_rows, volatile_for, workbook_from_state};
+use gridcraft_live::{Id, LINES_MAX, TOO_MANY_TEXT, axis_kind_rows, volatile_for, workbook_from_state};
 use gridcraft_model::{Cell, Formula, Workbook};
 use serde_json::{Value as Json, json};
 
@@ -78,7 +78,7 @@ fn sum_follows_a_row_delete_on_every_peer() {
     let want = reference(&room.bytes, &[("cell.set", json!({"cell": "E1", "input": "=SUM(B2:B10)"})), ("home.deleteRows", json!({"rows": "5:5"}))]);
     for i in 0..2 {
         assert_eq!(room.finger(i), want, "peer {i}");
-        assert_eq!(formula_at(&room, i, "E1").as_deref(), Some("SUM(B2:B9)").or(formula_at(&room, i, "E1").as_deref()));
+        assert_eq!(formula_at(&room, i, "E1").as_deref(), Some("SUM(B2:B9)"), "peer {i}");
     }
     assert_eq!(formula_at(&room, 0, "E1"), formula_at(&room, 1, "E1"));
     same_everywhere(&room, "sum and delete");
@@ -203,7 +203,7 @@ fn a_held_lock_shows_the_holders_name_and_gives_up_after_10s() {
     assert!(line.contains("Bob"), "{line}");
     *now.lock().unwrap() = 11_000.0;
     room.settle();
-    let told = room.notices_of(0).iter().any(|n| n.contains("Bob") && n.contains("Try again"));
+    let told = room.notices_of(0).iter().any(|n| n.contains("Bob") && n.contains("was not made"));
     assert!(told, "{:?}", room.notices_of(0));
     assert_eq!(room.finger(0), before);
     assert_eq!(room.peers[0].live.status_line(), None);
@@ -293,4 +293,199 @@ fn ordered_ops_reach_the_op_log_and_every_peer_applies_each_once() {
     for (i, p) in room.peers.iter().enumerate() {
         assert_eq!(p.live.applied_ops(), n, "peer {i}");
     }
+}
+
+/// The sizes of the updates peer `i` sent since `from`.
+fn sent_since(room: &Room, i: usize, from: usize) -> Vec<usize> {
+    room.peers[i].sizes.borrow()[from..].to_vec()
+}
+
+fn assert_under_cap(sizes: &[usize], what: &str) {
+    assert!(!sizes.is_empty(), "{what}: nothing was sent");
+    assert!(sizes.iter().all(|s| *s <= gridcraft_live::split::UPDATE_MAX_BYTES), "{what}: an update is over the relay's cap: {sizes:?}");
+}
+
+#[test]
+fn a_one_row_insert_far_down_the_sheet_stays_under_the_cap() {
+    let mut room = Room::new(2);
+    let from = room.peers[0].sizes.borrow().len();
+    room.run(0, "home.insertRows", json!({"rows": "150000:150000"})).unwrap();
+    room.settle();
+    let sizes = sent_since(&room, 0, from);
+    assert_under_cap(&sizes, "insert at row 150000");
+    assert!(sizes.len() > 1, "the ids up to the row travelled in parts: {sizes:?}");
+    let want = reference(&room.bytes, &[("home.insertRows", json!({"rows": "150000:150000"}))]);
+    for i in 0..2 {
+        assert_eq!(room.finger(i), want, "peer {i}");
+    }
+    same_everywhere(&room, "far insert");
+    // Rows above and below it still move with the next ordered edit.
+    room.run(1, "home.deleteRows", json!({"rows": "2:2"})).unwrap();
+    room.settle();
+    same_everywhere(&room, "delete after far insert");
+}
+
+#[test]
+fn the_largest_insert_and_delete_stay_under_the_cap() {
+    for custom_height in [false, true] {
+        let mut room = Room::new(2);
+        if custom_height {
+            room.run(0, "home.rowHeight", json!({"rows": "1:1", "height": 55})).unwrap();
+            room.settle();
+        }
+        let n = LINES_MAX;
+        // Under the custom-height row 1, every new row takes its height.
+        let first = if custom_height { 2 } else { 1 };
+        let last = first + n - 1;
+        let from = room.peers[0].sizes.borrow().len();
+        room.run(0, "home.insertRows", json!({"rows": format!("{first}:{last}")})).unwrap();
+        room.settle();
+        let sizes = sent_since(&room, 0, from);
+        eprintln!("insert {n} custom={custom_height}: {sizes:?}");
+        assert_under_cap(&sizes, &format!("insert of {n} rows (custom height {custom_height})"));
+        same_everywhere(&room, "big insert");
+        let from = room.peers[1].sizes.borrow().len();
+        room.run(1, "home.deleteRows", json!({"rows": format!("{first}:{last}")})).unwrap();
+        room.settle();
+        let sizes = sent_since(&room, 1, from);
+        eprintln!("delete {n} custom={custom_height}: {sizes:?}");
+        assert_under_cap(&sizes, &format!("delete of {n} rows (custom height {custom_height})"));
+        same_everywhere(&room, "big delete");
+    }
+}
+
+#[test]
+fn more_lines_than_the_cap_are_refused_and_nothing_changes() {
+    let mut room = Room::new(2);
+    let before = room.finger(0);
+    let over = LINES_MAX + 1;
+    for (id, p) in [("home.insertRows", json!({"rows": format!("1:{over}")})), ("home.deleteRows", json!({"rows": format!("1:{over}")}))] {
+        let told = match room.run(0, id, p) {
+            Err(e) => e,
+            Ok(_) => {
+                room.settle();
+                room.notices_of(0).join("\n")
+            }
+        };
+        assert!(told.contains(TOO_MANY_TEXT), "{id}: {told}");
+    }
+    room.settle();
+    assert_eq!(room.finger(0), before);
+    assert_eq!(room.finger(1), before);
+    assert_eq!(room.peers[0].live.replica().unwrap().ops_len(), 0);
+}
+
+/// Drives peer `i` until its ordered edit has run and gone out, but before the relay's answer
+/// is read.
+fn until_ran(room: &mut Room, i: usize) {
+    for _ in 0..12 {
+        if room.peers[i].live.replica().unwrap().ops_len() > 0 {
+            return;
+        }
+        room.pump(i);
+    }
+    panic!("the ordered edit never ran");
+}
+
+#[test]
+fn a_rejoin_after_the_edit_ran_is_told_and_the_edit_lands_once() {
+    let mut room = Room::new(2);
+    room.run(0, "home.insertRows", json!({"rows": "3:3"})).unwrap();
+    until_ran(&mut room, 0);
+    room.relay.drop_link(room.peers[0].live.core().hub().inner().mem());
+    room.relay.restore_link(room.peers[0].live.core().hub().inner().mem());
+    room.settle();
+    let told = room.notices_of(0).iter().any(|n| n.contains("connection dropped") && n.contains("sent again") && !n.contains("not kept"));
+    assert!(told, "{:?}", room.notices_of(0));
+    let want = reference(&room.bytes, &[("home.insertRows", json!({"rows": "3:3"}))]);
+    for i in 0..2 {
+        assert_eq!(room.finger(i), want, "peer {i}: one insert");
+    }
+    assert_eq!(room.peers[1].live.replica().unwrap().ops_len(), 1);
+    same_everywhere(&room, "rejoin");
+    // The lock is free again: the next ordered edit goes through.
+    room.run(1, "home.deleteRows", json!({"rows": "2:2"})).unwrap();
+    room.settle();
+    same_everywhere(&room, "after the rejoin");
+}
+
+#[test]
+fn an_edit_that_waits_for_an_open_undo_group_runs_once_it_closes() {
+    let mut room = Room::new(2);
+    let token = room.peers[1].session.group_begin("macro").unwrap();
+    room.run(0, "cell.set", json!({"cell": "D5", "input": "from alice"})).unwrap();
+    room.settle();
+    room.run(1, "home.insertRows", json!({"rows": "3:3"})).unwrap();
+    for _ in 0..6 {
+        room.pump(1);
+    }
+    assert_eq!(room.peers[1].live.replica().unwrap().ops_len(), 0, "deferred while the group is open");
+    room.peers[1].session.group_end(token).unwrap();
+    room.settle();
+    let want = reference(&room.bytes, &[("cell.set", json!({"cell": "D5", "input": "from alice"})), ("home.insertRows", json!({"rows": "3:3"}))]);
+    for i in 0..2 {
+        assert_eq!(room.finger(i), want, "peer {i}");
+    }
+    assert_eq!(room.peers[0].live.replica().unwrap().ops_len(), 1);
+    same_everywhere(&room, "deferred edit");
+}
+
+#[test]
+fn a_deferred_edit_does_not_run_after_a_rejoin_took_its_lock() {
+    let mut room = Room::new(2);
+    let token = room.peers[1].session.group_begin("macro").unwrap();
+    room.run(0, "cell.set", json!({"cell": "D5", "input": "from alice"})).unwrap();
+    room.settle();
+    room.run(1, "home.insertRows", json!({"rows": "3:3"})).unwrap();
+    for _ in 0..6 {
+        room.pump(1);
+    }
+    room.relay.drop_link(room.peers[1].live.core().hub().inner().mem());
+    room.relay.restore_link(room.peers[1].live.core().hub().inner().mem());
+    room.pump(1);
+    room.pump(1);
+    room.peers[1].session.group_end(token).unwrap();
+    room.settle();
+    let told = room.notices_of(1).iter().any(|n| n.contains("connection dropped") && n.contains("Nothing was changed"));
+    assert!(told, "{:?}", room.notices_of(1));
+    let want = reference(&room.bytes, &[("cell.set", json!({"cell": "D5", "input": "from alice"}))]);
+    for i in 0..2 {
+        assert_eq!(room.finger(i), want, "peer {i}: the insert never ran");
+    }
+    assert_eq!(room.peers[0].live.replica().unwrap().ops_len(), 0);
+    // The scope is free: Alice's own insert is granted and lands.
+    room.run(0, "home.insertRows", json!({"rows": "2:2"})).unwrap();
+    room.settle();
+    same_everywhere(&room, "after the lost lock");
+    assert_eq!(room.peers[0].live.replica().unwrap().ops_len(), 1);
+}
+
+#[test]
+fn a_refused_ordered_edit_leaves_the_layout_the_engine_and_the_lock_as_before() {
+    let mut room = Room::with(2, base_with_ref(), None);
+    room.run(0, "home.deleteRows", json!({"rows": "9:9"})).unwrap();
+    room.settle();
+    let before = room.finger(0);
+    let sent = room.peers[0].sizes.borrow().len();
+    // An open undo group makes the engine refuse the undelete after the author has begun it.
+    let token = room.peers[0].session.group_begin("macro").unwrap();
+    let p = &mut room.peers[0];
+    p.live.undelete_lines(&mut p.session, Id::base(0), axis_kind_rows(), vec![Id::base(8)]).unwrap();
+    for _ in 0..8 {
+        room.pump(0);
+    }
+    let told = room.notices_of(0).iter().any(|n| n.starts_with("Finish what you are doing"));
+    assert!(told, "{:?}", room.notices_of(0));
+    assert_eq!(room.peers[0].sizes.borrow().len(), sent, "nothing was shared");
+    assert_eq!(room.peers[0].live.replica().unwrap().ops_len(), 1, "no undelete in the log");
+    room.peers[0].session.group_end(token).unwrap();
+    room.settle();
+    assert_eq!(room.finger(0), before);
+    assert_eq!(room.finger(1), before);
+    same_everywhere(&room, "after the refusal");
+    assert_eq!(room.peers[0].live.status_line(), None);
+    // The lock was given back, and the layout is the document's: a later edit works everywhere.
+    room.run(1, "home.deleteRows", json!({"rows": "3:3"})).unwrap();
+    room.settle();
+    same_everywhere(&room, "an edit after the refusal");
 }

@@ -23,6 +23,13 @@ pub struct SpyHub {
     pub locks: Rc<RefCell<usize>>,
 }
 
+impl SpyHub {
+    /// The in-memory hub, for the relay's link controls.
+    pub fn mem(&self) -> &MemHub {
+        &self.inner
+    }
+}
+
 impl Hub for SpyHub {
     fn send(&mut self, msg: ClientMsg) -> craft_collab::Result<()> {
         if let ClientMsg::Submit { params, .. } = &msg {

@@ -299,7 +299,23 @@ impl GridApp<'_> {
         let mut updates = Vec::new();
         m.group += 1;
         let group = m.group;
-        for (n, chunk) in plan.split().into_iter().enumerate() {
+        // Base ids an insert far down the sheet must write first travel in updates of their own:
+        // they change nothing a reader sees, so the edit itself stays small.
+        for s in &mut steps {
+            if let Step::Insert { sheet, axis, ins, .. } = s
+                && ins.materialise.len() > crate::ops::FILL_MAX
+            {
+                let all = std::mem::take(&mut ins.materialise);
+                for piece in all.chunks(crate::ops::FILL_MAX) {
+                    let fill = crate::axis::Insertion { index: 0, materialise: piece.to_vec(), prev: None };
+                    let update =
+                        replica.write_grouped(group, |t| t.axis_insert(*sheet, *axis, &fill, &[])).map_err(|e| LocalError::Failed(e.to_string()))?;
+                    updates.push(update);
+                }
+            }
+        }
+        let reserved: usize = steps.iter().map(Step::cost).sum();
+        for (n, chunk) in plan.split_reserving(reserved).into_iter().enumerate() {
             let update = replica
                 .write_grouped(group, |t| {
                     if n == 0 {
@@ -418,7 +434,7 @@ impl GridApp<'_> {
         let unresolved = &mut m.unresolved;
         let res = session.apply_remote(m.doc, |cx| {
             apply_ops(cx, &mut work, &ops)?;
-            if work != final_layout {
+            if !work.equivalent(&final_layout) {
                 return Err(EngineError::Other("the op log did not reach the document's layout".into()));
             }
             apply(cx, &ctx, replica, &t, unresolved)?;

@@ -19,8 +19,10 @@ use crate::op::Op;
 use crate::remote::{Ctx, base_cell};
 use crate::reprint::RefIndex;
 
-/// The most lines one ordered edit may name: its ids travel in one update.
-pub(crate) const LINES_MAX: usize = 40_000;
+/// The most lines one ordered edit may name. Its ids travel in one update, with the op that names
+/// them: a delete of 40,000 lines measured 1.2 MB there (about 31 bytes a line), over the relay's
+/// 1 MiB cap, so the limit leaves a margin under it.
+pub const LINES_MAX: usize = 20_000;
 
 /// One thing an author writes into the transaction of an ordered edit, in order.
 #[derive(Clone, Debug)]
@@ -31,7 +33,23 @@ pub(crate) enum Step {
     Op(Op),
 }
 
+/// Base ids an insert far down the sheet writes into one update of their own, at most.
+pub(crate) const FILL_MAX: usize = 16_384;
+
 impl Step {
+    /// An upper estimate of what the step adds to an update, in bytes: an id in the axis array,
+    /// in the op's list, and for a delete in the `gone` map.
+    pub(crate) fn cost(&self) -> usize {
+        match self {
+            Step::Insert { ids, ins, .. } => 64 + ids.len() * 16 + ins.materialise.len() * 12,
+            Step::Delete { ids, .. } => 64 + ids.len() * 24,
+            Step::Undelete { ids, .. } => 64 + ids.len() * 16,
+            Step::Op(op) => match op {
+                Op::Insert { ids, .. } | Op::Delete { ids, .. } | Op::Undelete { ids, .. } => 128 + ids.len() * 20,
+            },
+        }
+    }
+
     pub(crate) fn write(&self, t: &mut GridTxn) {
         match self {
             Step::Insert { sheet, axis, ins, ids } => t.axis_insert(*sheet, *axis, ins, ids),

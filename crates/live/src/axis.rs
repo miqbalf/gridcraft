@@ -106,6 +106,29 @@ impl Axis {
         &self.shown
     }
 
+    /// The explicit prefix without a trailing run of untouched base ids: those say no more than
+    /// the implicit tail does.
+    fn trimmed(&self) -> &[Id] {
+        let mut n = self.explicit.len();
+        while n > 0 {
+            let id = self.explicit[n - 1];
+            let prev_ok = if n == 1 { id.0 == 1 } else { self.explicit[n - 2].0 + 1 == id.0 && self.explicit[n - 2].space() == 0 };
+            if id.space() == 0 && prev_ok && !self.deleted.contains(&id) {
+                n -= 1;
+            } else {
+                break;
+            }
+        }
+        &self.explicit[..n]
+    }
+
+    /// Whether both axes show the same ids in the same places: an axis whose explicit prefix
+    /// spells out more of the base tail is equivalent to one that leaves it implicit.
+    #[must_use]
+    pub fn equivalent(&self, other: &Axis) -> bool {
+        self.limit == other.limit && self.deleted == other.deleted && self.trimmed() == other.trimmed()
+    }
+
     /// Whether this is the base file's own axis: nothing explicit, nothing deleted.
     #[must_use]
     pub fn is_base(&self) -> bool {

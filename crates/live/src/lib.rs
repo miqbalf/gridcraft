@@ -37,6 +37,7 @@ pub use ids::{Id, cell_key, parse_cell_key};
 pub use kind::{Grid, GridCaret, GridEdit, GridPos};
 pub use layout::{Hosted, Layout, SheetLayout};
 pub use op::Op;
+pub use ops::{LINES_MAX, TOO_MANY_TEXT};
 pub use ordered::Tracked;
 pub use session::{BaseFile, GridLive, LiveFail, Peer, Ran, schema, volatile_for, workbook_from_state};
 pub use volatile::LiveVolatile;

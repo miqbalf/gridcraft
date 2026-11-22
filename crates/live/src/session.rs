@@ -24,7 +24,7 @@ use crate::ids::Id;
 use crate::kind::{Grid, GridEdit, GridPos};
 use crate::layout::Layout;
 use crate::local::has_random;
-use crate::ordered::{BUSY_TEXT, LOCK_LOST_TEXT, Pending, SCOPE, Tracked, request, resolve, send_actions};
+use crate::ordered::{BUSY_TEXT, LOCK_LOST_TEXT, LOCK_LOST_UNRUN_TEXT, Pending, SCOPE, Tracked, request, resolve, send_actions};
 use crate::remote::build;
 use crate::styles::{StyleHash, fnv1a64};
 use crate::volatile::LiveVolatile;
@@ -428,25 +428,28 @@ impl<H: Hub> GridLive<H> {
             }
             self.seen_joins = joins;
         }
-        let polled = match self.deferred.take() {
-            Some(p) => Polled::Run(p),
-            None => self.ordered.poll(self.core.newest_seq(), now),
+        // The queue's own state stays the judge, deferred edit or not: a rejoin while the edit
+        // waits for an open undo group ends as `LockLost`, never as a run without the lock.
+        let polled = match self.ordered.poll(self.core.newest_seq(), now) {
+            Polled::Nothing => self.deferred.take().map_or(Polled::Nothing, Polled::Run),
+            other => other,
         };
         match polled {
             Polled::Nothing => {}
             Polled::Run(p) => self.run_pending(session, p),
             Polled::GaveUp { holder, .. } => {
                 let who = self.holder_name(&holder);
-                self.map.notices.push(format!("{who} is still changing the sheet's structure. Try again in a moment."));
+                self.map.notices.push(format!("{who} is still changing the sheet's structure. Your change was not made; try again in a moment."));
             }
             Polled::LockLost { .. } => {
-                self.map.notices.push(LOCK_LOST_TEXT.to_owned());
-                // The edit went out without the lock: take the engine back to what the room holds.
-                if let Some(doc) = self.core.live().doc() {
-                    let mut app = GridApp { session, map: &mut self.map };
-                    if let Err(e) = LiveApp::resync(&mut app, doc) {
-                        log::warn!("gridcraft-live: the engine could not be rebuilt after a lost lock: {e}");
-                    }
+                if self.deferred.take().is_some() {
+                    // It never ran: nothing was changed or shared.
+                    self.map.notices.push(LOCK_LOST_UNRUN_TEXT.to_owned());
+                } else {
+                    // It ran and was shared without the lock. Until the relay refuses such an edit
+                    // (the fencing follow-up), the link resends it, so the engine and the room
+                    // agree and nothing is rolled back here.
+                    self.map.notices.push(LOCK_LOST_TEXT.to_owned());
                 }
             }
         }

@@ -2,8 +2,8 @@
 //!
 //! One batch becomes updates of at most [`UPDATE_MAX_BYTES`] (the relay's cap), each a complete
 //! set of cells: a cell's content, its style key and the style itself always travel in the same
-//! update, so a receiver never sees half a cell. Lines, sheet properties and the epoch bump go
-//! with the first update. Sizes are estimated from the content (twice its JSON length plus a
+//! update, so a receiver never sees half a cell. Lines are cut like cells; sheet properties and
+//! the epoch bump go with the first update. Sizes are estimated from the content (twice its JSON length plus a
 //! fixed cost per key), against a budget of [`CHUNK_BUDGET_BYTES`], which leaves room for yrs's
 //! framing; a test checks that real updates stay under the cap.
 
@@ -121,18 +121,33 @@ impl Plan {
     /// Cuts the plan into updates' worth of writes, each within [`CHUNK_BUDGET_BYTES`].
     #[must_use]
     pub fn split(self) -> Vec<Chunk> {
-        let mut chunks = vec![Chunk {
-            cells: Vec::new(),
-            lines: self.lines.into_iter().map(|((sheet, _, key), (axis, put))| ((sheet, axis, key), put)).collect(),
-            props: self.props.into_iter().collect(),
-            styles: self.styles.into_iter().collect(),
-            epoch: self.epoch,
-        }];
-        let mut used = 0usize;
+        self.split_reserving(0)
+    }
+
+    /// As [`split`](Self::split), with `reserved` estimated bytes already spoken for in the first
+    /// update (the structure steps of an ordered edit). Lines are cut like cells; properties,
+    /// styles and the epoch bump go with the first update.
+    #[must_use]
+    pub fn split_reserving(self, reserved: usize) -> Vec<Chunk> {
+        let empty = || Chunk { cells: Vec::new(), lines: Vec::new(), props: Vec::new(), styles: Vec::new(), epoch: false };
+        let mut chunks =
+            vec![Chunk { props: self.props.into_iter().collect(), styles: self.styles.into_iter().collect(), epoch: self.epoch, ..empty() }];
+        let mut used = reserved;
+        for ((sheet, _, key), (axis, put)) in self.lines {
+            let size = KEY_COST * 2 + key.len() + if let Put::Set(v) = &put { v.to_string().len() * 2 } else { 0 };
+            if used > 0 && used + size > CHUNK_BUDGET_BYTES {
+                chunks.push(empty());
+                used = 0;
+            }
+            used += size;
+            if let Some(c) = chunks.last_mut() {
+                c.lines.push(((sheet, axis, key), put));
+            }
+        }
         for (_, w) in self.cells {
             let size = w.size();
             if used > 0 && used + size > CHUNK_BUDGET_BYTES {
-                chunks.push(Chunk { cells: Vec::new(), lines: Vec::new(), props: Vec::new(), styles: Vec::new(), epoch: false });
+                chunks.push(empty());
                 used = 0;
             }
             used += size;

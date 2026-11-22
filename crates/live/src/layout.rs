@@ -48,6 +48,17 @@ pub struct Layout {
 }
 
 impl Layout {
+    /// Whether both layouts show the same ids in the same places (see [`Axis::equivalent`]).
+    #[must_use]
+    pub fn equivalent(&self, other: &Layout) -> bool {
+        self.sheets.len() == other.sheets.len()
+            && self
+                .sheets
+                .iter()
+                .zip(&other.sheets)
+                .all(|(a, b)| a.id == b.id && a.name == b.name && a.rows.equivalent(&b.rows) && a.cols.equivalent(&b.cols))
+    }
+
     /// The layout `doc` gives over `base`.
     #[must_use]
     pub fn from_doc(doc: &GridDoc, base: &Workbook) -> Layout {
