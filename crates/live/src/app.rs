@@ -8,11 +8,11 @@ use craft_live::{Landed, LiveApp, LocalError};
 use gridcraft_core::{CellRef, RangeRef};
 use gridcraft_engine::{EngineError, Session};
 use gridcraft_model::Workbook;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::doc::{CellContent, Entry, GridChange, GridDoc};
 use crate::ids::{Id, parse_cell_key};
-use crate::kind::{Grid, GridCaret, GridEdit, GridPos};
+use crate::kind::{Grid, GridCaret, GridEdit};
 use crate::layout::Layout;
 use crate::local::Planner;
 use crate::op::Op;
@@ -27,8 +27,6 @@ use crate::volatile::LiveVolatile;
 pub const UNDO_NOT_YET_TEXT: &str = "Undo and Redo are not available while editing live yet";
 /// Told when a change cannot run now because an undo group is open.
 pub const BUSY_TEXT: &str = "Finish what you are doing, then try that change again.";
-/// The most ranges of a caret kept.
-const CARET_RANGES_MAX: usize = 64;
 /// The most of this peer's own writes remembered for "your value was replaced" notices.
 const MINE_MAX: usize = 200_000;
 
@@ -599,46 +597,17 @@ impl LiveApp<Grid> for GridApp<'_> {
     }
 
     fn caret(&self, payload: &Value) -> Option<GridCaret> {
-        let sheet = Id::parse(payload.get("s")?.as_str()?)?;
-        let active = parse_cell_key(payload.get("a")?.as_str()?)?;
-        let ranges: Vec<((Id, Id), (Id, Id))> = payload
-            .get("r")
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .take(CARET_RANGES_MAX)
-                    .filter_map(|v| {
-                        let (x, y) = v.as_str()?.split_once(':')?;
-                        Some((parse_cell_key(x)?, parse_cell_key(y)?))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let editing = payload.get("e").and_then(Value::as_bool).unwrap_or(false);
-        let mut c = GridCaret { sheet, active, ranges, editing, pos: GridPos { sheet: 0, active: CellRef::default(), ranges: Vec::new(), editing } };
-        resolve(&self.map.layout, &mut c).then_some(c)
+        let mut c = crate::presence::parse(payload)?;
+        crate::presence::resolve(&self.map.layout, &mut c);
+        Some(c)
     }
 
     fn follow(&self, carets: &mut HashMap<String, GridCaret>) {
-        carets.retain(|_, c| resolve(&self.map.layout, c));
+        // A caret on an id not known yet stays (hidden) and shows when the id arrives.
+        for c in carets.values_mut() {
+            crate::presence::resolve(&self.map.layout, c);
+        }
     }
-}
-
-/// Works out where a caret is now; false when its sheet or active cell is gone.
-fn resolve(layout: &Layout, c: &mut GridCaret) -> bool {
-    let Some(i) = layout.sheet_index(c.sheet) else { return false };
-    let Some(active) = layout.cell_at(i, c.active.0, c.active.1) else { return false };
-    let ranges =
-        c.ranges.iter().filter_map(|((r0, c0), (r1, c1))| Some(RangeRef::new(layout.cell_at(i, *r0, *c0)?, layout.cell_at(i, *r1, *c1)?))).collect();
-    c.pos = GridPos { sheet: i, active, ranges, editing: c.editing };
-    true
-}
-
-/// The caret payload for a selection: ids, so it follows its cells through inserts and deletes.
-pub(crate) fn caret_payload(layout: &Layout, sheet: usize, active: CellRef, ranges: &[RangeRef], editing: bool) -> Option<Value> {
-    let key = |at: CellRef| layout.slot_at(sheet, at).map(|(r, c)| crate::ids::cell_key(r, c));
-    let rs: Vec<String> = ranges.iter().take(CARET_RANGES_MAX).filter_map(|r| Some(format!("{}:{}", key(r.start)?, key(r.end)?))).collect();
-    Some(json!({"s": layout.sheets.get(sheet)?.id.text(), "a": key(active)?, "r": rs, "e": editing}))
 }
 
 /// Notes the entries this peer typed that a delete by `by` took away (it had not seen them).

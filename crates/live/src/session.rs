@@ -16,7 +16,7 @@ use gridcraft_model::Workbook;
 use serde_json::Value as Json;
 use sha2::{Digest, Sha256};
 
-use crate::app::{GridApp, Mapping, caret_payload};
+use crate::app::{GridApp, Mapping};
 use crate::axis::AxisKind;
 use crate::doc::{GridDoc, GridSeed};
 use crate::gate::{Class, NOT_YET_TEXT, class};
@@ -565,7 +565,7 @@ impl<H: Hub> GridLive<H> {
         let Some(d) = session.documents().iter().find(|d| d.uid == self.map.doc) else { return };
         let editing = self.map.editor.is_some();
         let sel = &d.selection;
-        if let Some(p) = caret_payload(&self.map.layout, d.wb.active_sheet(), sel.active, &sel.ranges, editing) {
+        if let Some(p) = crate::presence::payload(&self.map.layout, d.wb.active_sheet(), sel.active, &sel.ranges, editing) {
             self.core.send_presence(p);
         }
     }
