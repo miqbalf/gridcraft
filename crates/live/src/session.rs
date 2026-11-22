@@ -27,7 +27,7 @@ use crate::layout::Layout;
 use crate::local::has_random;
 use crate::remote::build;
 use crate::styles::{StyleHash, fnv1a64};
-use crate::volatile::Volatile;
+use crate::volatile::LiveVolatile;
 
 /// Another editor, with the selection as the host draws it.
 pub type Peer = craft_live::Peer<GridPos>;
@@ -153,9 +153,9 @@ impl<H: Hub> GridLive<H> {
         session.add_document(DocState::new(wb, None, title, Trust::FromFile));
         let (doc, wb) = session.active().map(|d| (d.uid, d.wb.clone())).ok_or(LiveFail::Open("no workbook".into()))?;
         let replica = GridDoc::seeded(&seed).map_err(LiveFail::Live)?;
-        let vol = Volatile::new(&replica, &wb);
+        let vol = LiveVolatile::new(&replica, &wb);
         let layout = Layout::from_doc(&replica, &wb);
-        vol.set_layout(layout.clone());
+        vol.update_layout(layout.clone());
         let map = Mapping {
             doc,
             has_random: has_random(&wb),
@@ -605,6 +605,6 @@ pub fn workbook_from_state(base: &Workbook, state: &[u8], source: Option<Arc<dyn
 /// [`LiveError`] when the state does not decode.
 pub fn volatile_for(base: &Workbook, state: &[u8]) -> Result<Arc<dyn VolatileSource>, LiveError> {
     let doc = GridDoc::from_state(state)?;
-    let source: Arc<dyn VolatileSource> = Volatile::new(&doc, base);
+    let source: Arc<dyn VolatileSource> = LiveVolatile::new(&doc, base);
     Ok(source)
 }

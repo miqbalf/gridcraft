@@ -20,8 +20,8 @@ use crate::ops::{Author, Step, apply_ops, ensure_index, formula_source, replay_b
 use crate::remote::{Ctx, Targets, apply, build};
 use crate::split::{Plan, Put};
 use crate::styles::StyleHash;
-use crate::volatile::Volatile;
 use crate::reprint::RefIndex;
+use crate::volatile::LiveVolatile;
 
 /// Told when Undo or Redo is asked for: per-user undo comes with G11.
 pub const UNDO_NOT_YET_TEXT: &str = "Undo and Redo are not available while editing live yet";
@@ -44,7 +44,7 @@ pub(crate) struct Mapping {
     /// Canonical style JSON to the key it was written under.
     pub keys: HashMap<String, String>,
     pub minted: u32,
-    pub vol: Arc<Volatile>,
+    pub vol: Arc<LiveVolatile>,
     /// The workbook holds a formula that calls a random function.
     pub has_random: bool,
     /// Lines for the user, taken into the session's notices at the next pump.
@@ -223,7 +223,7 @@ impl GridApp<'_> {
                     let naming = m.index.naming(*sheet, *axis, ids);
                     let mut t = Targets::default();
                     undeleted_targets(&mut t, &layout, replica, &m.base, i, *axis, ids);
-                    m.vol.set_layout(layout.clone());
+                    m.vol.update_layout(layout.clone());
                     let ctx = Ctx { base: &m.base, layout: &layout };
                     let unresolved = &mut m.unresolved;
                     let doc: &GridDoc = replica;
@@ -288,7 +288,7 @@ impl GridApp<'_> {
             m.layout = layout;
             m.lines_minted = minted;
             m.applied_ops = replica.ops_len();
-            m.vol.set_layout(m.layout.clone());
+            m.vol.update_layout(m.layout.clone());
             if m.has_random {
                 m.vol.follow(replica);
                 m.recalc = true;
@@ -356,7 +356,7 @@ impl GridApp<'_> {
         }
         let sel = session.documents().iter().find(|d| d.uid == m.doc).map(|d| (d.wb.active_sheet(), d.selection.clone()));
         let old_layout = m.layout.clone();
-        m.vol.set_layout(final_layout.clone());
+        m.vol.update_layout(final_layout.clone());
         if t.epoch {
             m.vol.follow(replica);
         }
@@ -384,7 +384,7 @@ impl GridApp<'_> {
                 Ok(())
             }
             Err(EngineError::RemoteBusy) => {
-                m.vol.set_layout(old_layout);
+                m.vol.update_layout(old_layout);
                 m.pending = all;
                 Ok(())
             }
@@ -407,7 +407,7 @@ impl LiveApp<Grid> for GridApp<'_> {
         let out = self.local_inner(replica, edits);
         if out.is_err() {
             // Nothing of an ordered edit was kept: the layout and the index go back.
-            self.map.vol.set_layout(self.map.layout.clone());
+            self.map.vol.update_layout(self.map.layout.clone());
             self.map.index.clear();
         }
         out
@@ -500,7 +500,7 @@ impl LiveApp<Grid> for GridApp<'_> {
         m.applied_ops = replica.ops_len();
         m.index.clear();
         m.recent.clear();
-        m.vol.set_layout(m.layout.clone());
+        m.vol.update_layout(m.layout.clone());
         m.vol.follow(replica);
         let source: Arc<dyn gridcraft_calc::VolatileSource> = m.vol.clone();
         let fresh = build(&m.base, replica, Some(source)).map_err(|e| e.to_string())?;

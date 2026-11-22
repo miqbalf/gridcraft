@@ -38,7 +38,7 @@ pub use layout::{Hosted, Layout, SheetLayout};
 pub use op::Op;
 pub use ordered::Tracked;
 pub use session::{BaseFile, GridLive, LiveFail, Peer, Ran, schema, volatile_for, workbook_from_state};
-pub use volatile::Volatile;
+pub use volatile::LiveVolatile;
 
 /// Rows, for callers that name an axis without importing the formula crate.
 #[must_use]

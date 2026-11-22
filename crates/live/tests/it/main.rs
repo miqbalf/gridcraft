@@ -10,6 +10,8 @@ mod gate;
 mod ordered;
 #[cfg(feature = "test-util")]
 mod support;
+#[cfg(feature = "test-util")]
+mod volatile;
 
 /// SplitMix64, the house generator for seeded random tests (as in the engine's
 /// `command_sequence_fuzz`): tiny and deterministic. Each test prints its seed on failure.
