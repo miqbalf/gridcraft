@@ -24,6 +24,8 @@ pub struct GridWorkerLive<H: Hub> {
     core: LiveEditing<H, Grid>,
     map: Mapping,
     session: Session,
+    /// The replica fell out of step and the link was ended (done once).
+    ended: bool,
 }
 
 impl<H: Hub> GridWorkerLive<H> {
@@ -49,13 +51,19 @@ impl<H: Hub> GridWorkerLive<H> {
         let source: Arc<dyn gridcraft_calc::VolatileSource> = vol.clone();
         session.set_volatile_source(doc, Some(source)).map_err(|e| LiveFail::Open(e.to_string()))?;
         let map = Mapping::new(doc, wb, layout, layout_rev, uid, fnv1a64, vol);
-        Ok(GridWorkerLive { core, map, session })
+        Ok(GridWorkerLive { core, map, session, ended: false })
     }
 
     /// One turn of the link: takes in the other editors' changes. The editors in the room.
     pub fn pump(&mut self) -> Vec<Peer> {
         let mut app = GridApp { session: &mut self.session, map: &mut self.map };
-        self.core.pump(&mut app)
+        let peers = self.core.pump(&mut app);
+        if !self.ended && self.core.live().doc().is_some_and(crate::doc::GridDoc::needs_resync) {
+            // M1: a replica that cannot catch up ends the link; the worker saves nothing from it.
+            self.ended = true;
+            self.core.end(crate::session::RESYNC_TEXT);
+        }
+        peers
     }
 
     #[must_use]
