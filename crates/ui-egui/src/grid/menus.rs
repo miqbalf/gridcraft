@@ -16,19 +16,8 @@ pub(super) fn filter_menu(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_
     if sh.autofilter.is_none()
         && let Some(r) = table_range
     {
-        let _ = app.session.run("data.filter", json!({"range": r.a1()}));
-        let _ = app.session.run("data.filter", json!({"range": r.a1()}));
-        if let Some(sh2) = app.session.active().and_then(|d| d.wb.active()).map(|s| s.autofilter.is_some())
-            && !sh2
-        {
-            let d = app.session.active_mut();
-            if let Some(d) = d {
-                let wbm = Arc::make_mut(&mut d.wb);
-                if let Some(s) = wbm.sheet_mut(si) {
-                    s.autofilter = Some(gridcraft_engine::model::AutoFilter { range: r, criteria: vec![] });
-                }
-            }
-        }
+        // A command, so the change is undoable, journaled and seen by an edit observer.
+        let _ = app.session.run("data.filter", json!({"range": r.a1(), "install": true}));
     }
     let wb = app.session.active().map(|d| d.wb.clone()).unwrap_or(wb);
     let values = gridcraft_engine::cmd::data::filter_values(&wb, si, col);

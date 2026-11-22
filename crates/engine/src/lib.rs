@@ -112,6 +112,10 @@ struct OpenGroup {
     /// Where the recording was when the group began (`None` when nothing was recording): a
     /// rollback takes back the steps recorded since, as it takes back their edits.
     recorded: Option<(u64, u64)>,
+    /// The observed command the group began in and how many structural edits it had logged then
+    /// (`None`: no command was being observed). A rollback in another command takes back a
+    /// workbook the logged edits do not describe.
+    observed: Option<(u64, usize)>,
 }
 
 /// Where the last [`Session::group_end`] or [`Session::group_rollback`] left its document: the
@@ -228,8 +232,9 @@ pub struct DocState {
     /// without names, each area written with its sheet (`Sheet1!B14:C22,Sheet1!F19:G30`).
     pub go_to_recent: Vec<String>,
     /// While an [`EditObserver`] is installed and a top-level command runs: the structural edits
-    /// it and the commands nested in it made. Apart from `edits`, which a macro step owns.
-    pub(crate) observed_edits: Option<Vec<(String, gridcraft_formula::adjust::Edit)>>,
+    /// it and the commands nested in it made, and whether it restored an older workbook. Kept
+    /// apart from `edits`, which a macro step owns.
+    pub(crate) observed: Option<live::Observed>,
 }
 
 static NEXT_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -367,7 +372,7 @@ impl DocState {
             touched: None,
             edits: None,
             go_to_recent: vec![],
-            observed_edits: None,
+            observed: None,
         }
     }
     pub fn is_dirty(&self) -> bool {
@@ -571,6 +576,8 @@ pub struct Session {
     pub text_width: Option<TextWidth>,
     /// Hears each top-level command that changed a document ([`live::EditObserver`]).
     observer: Option<Box<dyn EditObserver>>,
+    /// Counts the top-level commands that were observed (see [`live::Observed::epoch`]).
+    observe_epoch: u64,
 }
 
 impl Session {
@@ -781,7 +788,7 @@ impl Session {
         if marked.is_some() {
             self.marks.pop();
         }
-        let observed_edits = observed.map(|uid| self.observe_take(uid));
+        let observed_seen = observed.map(|uid| self.observe_take(uid));
         let result = match result {
             Ok(r) => r,
             Err(p) => {
@@ -930,8 +937,8 @@ impl Session {
             // group becomes a step, and `group_rollback` puts it back as it was.
             d.revision += 1;
         }
-        if let (Some(uid), Some(wb), Some(edits)) = (observed, observed_before, observed_edits) {
-            self.observe_end(uid, id, &params, wb, edits);
+        if let (Some(uid), Some(wb), Some(seen)) = (observed, observed_before, observed_seen) {
+            self.observe_end(uid, id, &params, wb, seen);
         }
         // The history limit applies once the outermost command has collapsed its steps, so the
         // lengths it compared stay true. Meanwhile the steps made inside it are bounded on their own.
@@ -988,6 +995,7 @@ impl Session {
             selection: d.selection.clone(),
             redo: d.redo.clone(),
             recorded: self.recorder.as_ref().map(record::Recorder::mark),
+            observed: d.observed.as_ref().map(|o| (o.epoch, o.edits.len())),
         };
         let token = GroupToken { id: g.id, doc: g.doc };
         self.next_group = self.next_group.saturating_add(1);
@@ -1079,6 +1087,13 @@ impl Session {
         if !Arc::ptr_eq(&d.wb, &g.wb) {
             d.wb = g.wb;
             d.calc.rebuild(&d.wb);
+        }
+        // The edits the group's commands logged are undone with them. A group that began before
+        // the running command takes back a workbook the observer's replay cannot follow.
+        match (d.observed.as_mut(), g.observed) {
+            (Some(o), Some((epoch, len))) if epoch == o.epoch => o.edits.truncate(len),
+            (Some(o), _) => o.restored = true,
+            (None, _) => {}
         }
         d.selection = g.selection;
         d.undo.truncate(g.start);

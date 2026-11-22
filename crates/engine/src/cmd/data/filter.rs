@@ -12,6 +12,17 @@ pub(super) fn toggle_filter(s: &mut Session, p: &Json) -> Result<Json> {
     // The active cell belongs to the active sheet: on another sheet the table is the one at `range`.
     let at = if sheet == s.doc()?.wb.active_sheet() { s.doc()?.selection.active } else { r.start };
     let has = s.doc()?.wb.sheet(sheet).is_some_and(|sh| sh.autofilter.is_some());
+    // `install`: put a sheet AutoFilter over `range` when the sheet has none (a table's filter
+    // menu needs one), and never toggle.
+    if p.get("install").and_then(Json::as_bool) == Some(true) {
+        return edit(s, |cx| {
+            let sh = cx.sheet_mut(sheet)?;
+            if sh.autofilter.is_none() {
+                sh.autofilter = Some(gridcraft_model::AutoFilter { range: r, criteria: vec![] });
+            }
+            Ok(json!({"filter": true}))
+        });
+    }
     let in_table = s.doc()?.wb.sheet(sheet).and_then(|sh| sh.table_at(at).map(|t| t.name.clone()));
     if let Some(name) = in_table {
         return edit(s, |cx| {

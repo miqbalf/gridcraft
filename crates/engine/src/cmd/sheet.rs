@@ -612,6 +612,7 @@ fn insert_copied_cells(s: &mut Session, p: &Json) -> Result<Json> {
     }
     let revision = d.revision;
     let before = (d.wb.clone(), d.selection.clone());
+    let observed_len = d.observed.as_ref().map(|o| o.edits.len());
     // Inside an undo group the nested steps add no undo entries of their own.
     let nested_entries = !s.in_group(d.uid);
     let result = insert_copied_steps(s, &clip, sheet, at, shift, cut);
@@ -632,6 +633,10 @@ fn insert_copied_cells(s: &mut Session, p: &Json) -> Result<Json> {
         Err(e) => {
             d.wb = before.0;
             d.selection = before.1;
+            // The edits the failed steps logged went back with the workbook.
+            if let (Some(o), Some(len)) = (d.observed.as_mut(), observed_len) {
+                o.edits.truncate(len);
+            }
             d.calc.rebuild(&d.wb);
             s.clipboard = Some(clip);
             Err(e)

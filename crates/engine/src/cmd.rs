@@ -433,8 +433,8 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
             }
         }
     }
-    if let Some(log) = d.observed_edits.as_mut() {
-        log.extend(edits.iter().cloned());
+    if let Some(o) = d.observed.as_mut() {
+        o.edits.extend(edits.iter().cloned());
     }
     if let Some(log) = d.edits.as_mut() {
         log.extend(edits);

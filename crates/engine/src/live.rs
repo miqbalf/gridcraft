@@ -74,6 +74,27 @@ pub enum Unshared {
     Structure(usize),
 }
 
+/// What the running top-level command has done to a document, for the observer.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Observed {
+    /// Which top-level command this is: a group begun under another one is not this command's own.
+    pub(crate) epoch: u64,
+    /// Structural edits in order (the sheet's name, the edit), nested commands included.
+    pub(crate) edits: Vec<(String, Edit)>,
+    /// A whole older workbook was put back (Undo, Redo, a rolled-back group that began before the
+    /// command). The edits do not describe it.
+    pub(crate) restored: bool,
+}
+
+impl crate::DocState {
+    /// Notes that the running command put an older workbook back.
+    pub(crate) fn note_restore(&mut self) {
+        if let Some(o) = self.observed.as_mut() {
+            o.restored = true;
+        }
+    }
+}
+
 impl Session {
     /// Installs (or removes) the observer. While one is installed, every top-level command that
     /// changes a document is reported once, with the structural edits of the commands nested in it.
@@ -81,7 +102,7 @@ impl Session {
         self.observer = o;
         if self.observer.is_none() {
             for d in &mut self.docs {
-                d.observed_edits = None;
+                d.observed = None;
             }
         }
     }
@@ -92,31 +113,36 @@ impl Session {
 
     /// Starts collecting structural edits on a document (a top-level command is about to run).
     pub(crate) fn observe_begin(&mut self, doc: u64) {
+        self.observe_epoch = self.observe_epoch.wrapping_add(1);
         if let Some(d) = self.docs.iter_mut().find(|d| d.uid == doc) {
-            d.observed_edits = Some(Vec::new());
+            d.observed = Some(Observed { epoch: self.observe_epoch, ..Observed::default() });
         }
     }
 
     /// Stops collecting and hands back what was collected.
-    pub(crate) fn observe_take(&mut self, doc: u64) -> Vec<(String, Edit)> {
-        self.docs.iter_mut().find(|d| d.uid == doc).and_then(|d| d.observed_edits.take()).unwrap_or_default()
+    pub(crate) fn observe_take(&mut self, doc: u64) -> Observed {
+        self.docs.iter_mut().find(|d| d.uid == doc).and_then(|d| d.observed.take()).unwrap_or_default()
     }
 
     /// Reports a finished top-level command to the observer when it changed the document.
-    pub(crate) fn observe_end(&mut self, doc: u64, command: &str, params: &Json, before: Arc<Workbook>, edits: Vec<(String, Edit)>) {
+    pub(crate) fn observe_end(&mut self, doc: u64, command: &str, params: &Json, before: Arc<Workbook>, seen: Observed) {
         let Some(after) = self.docs.iter().find(|d| d.uid == doc).map(|d| d.wb.clone()) else { return };
         if Arc::ptr_eq(&before, &after) {
             return;
         }
-        let report = diff(doc, command, params, before, after, edits);
+        let report = diff(doc, command, params, before, after, seen);
         if report.is_empty() {
             return;
         }
         // The observer is out of the session while it runs, so it cannot be reached re-entrantly.
+        // A panic in the observer is the observer's: it is dropped, and the command's own cleanup
+        // (history limits, group bookkeeping) still runs.
         if let Some(mut o) = self.observer.take() {
-            o.edited(report);
-            if self.observer.is_none() {
+            let heard = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| o.edited(report)));
+            if heard.is_ok() && self.observer.is_none() {
                 self.observer = Some(o);
+            } else if heard.is_err() {
+                log::error!("the edit observer panicked and was removed");
             }
         }
     }
@@ -128,7 +154,8 @@ fn replayed(_before: &Sheet, _edits: &[&Edit]) -> Option<Arc<Sheet>> {
     None
 }
 
-fn diff(doc: u64, command: &str, params: &Json, before: Arc<Workbook>, after: Arc<Workbook>, named: Vec<(String, Edit)>) -> EditReport {
+fn diff(doc: u64, command: &str, params: &Json, before: Arc<Workbook>, after: Arc<Workbook>, seen: Observed) -> EditReport {
+    let Observed { edits: named, restored, .. } = seen;
     let mut r = EditReport {
         doc,
         command: command.to_string(),
@@ -158,17 +185,32 @@ fn diff(doc: u64, command: &str, params: &Json, before: Arc<Workbook>, after: Ar
                 continue;
             }
             let own: Vec<&Edit> = r.edits.iter().filter(|(s, _)| *s == i).map(|(_, e)| e).collect();
-            if own.is_empty() {
-                sheet_diff(i, b, a, &mut r);
+            let lines_move = own.iter().any(|e| matches!(e, Edit::Insert { .. } | Edit::Delete { .. }));
+            if restored {
+                // Which steps the restored workbook crosses is not known: every changed sheet
+                // may have shifted lines, so none is compared position by position.
+                sheet_diff(i, b, a, command, &mut r);
+                push_once(&mut r.unshared, Unshared::Structure(i));
+            } else if own.is_empty() {
+                sheet_diff(i, b, a, command, &mut r);
+            } else if !lines_move {
+                // A move of cells: the cells are where they are, but it is not an insert or delete.
+                sheet_diff(i, b, a, command, &mut r);
+                push_once(&mut r.unshared, Unshared::Structure(i));
             } else {
                 match replayed(b, &own) {
-                    Some(replay) => sheet_diff(i, &replay, a, &mut r),
+                    Some(replay) => sheet_diff(i, &replay, a, command, &mut r),
                     None => push_once(&mut r.unshared, Unshared::Structure(i)),
                 }
             }
         }
     } else {
         push_once(&mut r.unshared, Unshared::Sheets);
+        if restored {
+            for i in 0..before.sheets.len() {
+                push_once(&mut r.unshared, Unshared::Structure(i));
+            }
+        }
         // Sheets that edits touched are still named, so a receiver can tell structure from the rest.
         let touched: Vec<usize> = r.edits.iter().map(|(s, _)| *s).collect();
         for i in touched {
@@ -179,37 +221,66 @@ fn diff(doc: u64, command: &str, params: &Json, before: Arc<Workbook>, after: Ar
     r
 }
 
+/// Whether a cell differs in what a person wrote into it (its content or its style), not in a
+/// result: the cached value of a formula or Python cell is whatever recalculation gave, and every
+/// peer recalculates for itself.
+fn authored(b: Option<&gridcraft_model::Cell>, a: Option<&gridcraft_model::Cell>) -> bool {
+    match (b, a) {
+        (Some(b), Some(a)) => {
+            let computed = a.formula.is_some() || a.py.is_some();
+            b.formula != a.formula || b.py != a.py || b.style != a.style || (!computed && b.value != a.value)
+        }
+        _ => true,
+    }
+}
+
+/// Controls compared without the value a linked cell gives a slider (it follows the cell).
+fn same_controls(b: &[gridcraft_model::FormControl], a: &[gridcraft_model::FormControl]) -> bool {
+    b.len() == a.len() && b.iter().zip(a).all(|(x, y)| gridcraft_model::FormControl { value: y.value, ..x.clone() } == *y)
+}
+
 fn push_once(v: &mut Vec<Unshared>, u: Unshared) {
     if !v.contains(&u) {
         v.push(u);
     }
 }
 
-fn lines_diff(i: usize, axis: Axis, b: &BTreeMap<u32, LineInfo>, a: &BTreeMap<u32, LineInfo>, out: &mut Vec<(usize, Axis, u32)>) {
+/// `fit`: a row height the engine measured by itself (the row is not set by hand) is not an edit:
+/// every peer fits its own rows, with its own fonts.
+fn lines_diff(i: usize, axis: Axis, fit: bool, b: &BTreeMap<u32, LineInfo>, a: &BTreeMap<u32, LineInfo>, out: &mut Vec<(usize, Axis, u32)>) {
     let mut keys: Vec<u32> = b.keys().chain(a.keys()).copied().collect();
     keys.sort_unstable();
     keys.dedup();
     let default = LineInfo::default();
     for k in keys {
-        if b.get(&k).unwrap_or(&default) != a.get(&k).unwrap_or(&default) {
+        let (x, y) = (b.get(&k).unwrap_or(&default), a.get(&k).unwrap_or(&default));
+        if x == y {
+            continue;
+        }
+        let measured = fit && axis == Axis::Rows && !x.custom && !y.custom && LineInfo { size: None, ..*x } == LineInfo { size: None, ..*y };
+        if !measured {
             out.push((i, axis, k));
         }
     }
 }
 
 /// Compares sheet `b` (as it was, replayed through the structural edits) with `a`.
-fn sheet_diff(i: usize, b: &Sheet, a: &Sheet, r: &mut EditReport) {
-    let mut cells: Vec<CellRef> = b.cells.diff(&a.cells);
+fn sheet_diff(i: usize, b: &Sheet, a: &Sheet, command: &str, r: &mut EditReport) {
+    let mut cells: Vec<CellRef> = b.cells.diff(&a.cells).into_iter().filter(|c| authored(b.cell(*c), a.cell(*c))).collect();
     cells.sort_unstable();
     cells.dedup();
     r.cells.extend(cells.into_iter().map(|c| (i, c)));
-    lines_diff(i, Axis::Rows, &b.rows, &a.rows, &mut r.lines);
-    lines_diff(i, Axis::Cols, &b.cols, &a.cols, &mut r.lines);
+    // Heights follow content on every peer; only an explicit AutoFit command is an edit.
+    let fit = command != "home.autofitRowHeight";
+    lines_diff(i, Axis::Rows, fit, &b.rows, &a.rows, &mut r.lines);
+    lines_diff(i, Axis::Cols, false, &b.cols, &a.cols, &mut r.lines);
     if b.default_col_width != a.default_col_width || b.default_row_height != a.default_row_height {
         r.sheet_props.push(i);
     }
     // Every other field is named here, so a field added to `Sheet` stops this from compiling
-    // until someone decides whether it is shared.
+    // until someone decides whether it is shared. Fields bound to `_` below are each person's own
+    // view of the sheet (zoom, scroll, gridlines, headings, zeros, formula display, view mode,
+    // active cell): never shared, so never reported and never put back.
     let Sheet {
         name: _,
         uid: _,
@@ -226,15 +297,15 @@ fn sheet_diff(i: usize, b: &Sheet, a: &Sheet, r: &mut EditReport) {
         freeze,
         tab_color,
         visibility,
-        show_gridlines,
-        show_headings,
-        show_formulas,
-        show_zeros,
-        show_outline_symbols,
+        show_gridlines: _,
+        show_headings: _,
+        show_formulas: _,
+        show_zeros: _,
+        show_outline_symbols: _,
         summary_below,
         summary_right,
         right_to_left,
-        zoom,
+        zoom: _,
         cond_formats,
         validations,
         tables,
@@ -251,9 +322,9 @@ fn sheet_diff(i: usize, b: &Sheet, a: &Sheet, r: &mut EditReport) {
         protection,
         edit_ranges,
         print,
-        view_active,
-        view_top_left,
-        view,
+        view_active: _,
+        view_top_left: _,
+        view: _,
         preserved,
     } = b;
     let u = &mut r.unshared;
@@ -277,7 +348,7 @@ fn sheet_diff(i: usize, b: &Sheet, a: &Sheet, r: &mut EditReport) {
         || *images != a.images
         || *shapes != a.shapes
         || *slicers != a.slicers
-        || *controls != a.controls
+        || !same_controls(controls, &a.controls)
     {
         push_once(u, Unshared::Objects(i));
     }
@@ -304,18 +375,9 @@ fn sheet_diff(i: usize, b: &Sheet, a: &Sheet, r: &mut EditReport) {
     }
     if *tab_color != a.tab_color
         || *visibility != a.visibility
-        || *show_gridlines != a.show_gridlines
-        || *show_headings != a.show_headings
-        || *show_formulas != a.show_formulas
-        || *show_zeros != a.show_zeros
-        || *show_outline_symbols != a.show_outline_symbols
         || *summary_below != a.summary_below
         || *summary_right != a.summary_right
         || *right_to_left != a.right_to_left
-        || *zoom != a.zoom
-        || *view_active != a.view_active
-        || *view_top_left != a.view_top_left
-        || *view != a.view
         || *preserved != a.preserved
     {
         push_once(u, Unshared::SheetView(i));
@@ -331,10 +393,10 @@ fn workbook_diff(b: &Workbook, a: &Workbook, u: &mut Vec<Unshared>) {
         theme,
         date_system,
         calc,
-        show_objects,
+        show_objects: _,
         remove_personal_info,
-        active_sheet,
-        view,
+        active_sheet: _,
+        view: _,
         props,
         protected_structure,
         structure_password,
@@ -359,14 +421,11 @@ fn workbook_diff(b: &Workbook, a: &Workbook, u: &mut Vec<Unshared>) {
     if (0..kept).any(|n| styles.get(StyleId(n)) != a.styles.get(StyleId(n))) {
         push_once(u, Unshared::Workbook("styles"));
     }
-    let checks: [(&'static str, bool); 15] = [
+    let checks: [(&'static str, bool); 12] = [
         ("theme", *theme != a.theme),
         ("date_system", *date_system != a.date_system),
         ("calc", *calc != a.calc),
-        ("show_objects", *show_objects != a.show_objects),
         ("remove_personal_info", *remove_personal_info != a.remove_personal_info),
-        ("active_sheet", active_sheet.get() != a.active_sheet.get()),
-        ("view", *view != a.view),
         ("props", *props != a.props),
         ("protected_structure", *protected_structure != a.protected_structure),
         ("structure_password", *structure_password != a.structure_password),
