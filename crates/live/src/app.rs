@@ -37,7 +37,10 @@ pub(crate) struct Mapping {
     /// The engine document's uid.
     pub doc: u64,
     pub base: Arc<Workbook>,
+    /// Never assign this directly: use [`GridApp::set_layout`].
     pub layout: Layout,
+    /// The revision of `layout` inside `vol`, set by `set_layout`.
+    pub layout_rev: u64,
     pub uid: String,
     pub space: u32,
     pub hash: StyleHash,
@@ -122,7 +125,32 @@ pub(crate) fn keep_view(mut fresh: Workbook, cur: &Workbook) -> Workbook {
     fresh
 }
 
+impl Mapping {
+    /// The one place the layout changes: the mapping's copy and the random source's copy move
+    /// together. G9 calls this (through [`GridApp::set_layout`]) after every ordered op, local or
+    /// remote, before anything recalculates.
+    pub(crate) fn set_layout(&mut self, layout: Layout) {
+        self.layout_rev = self.vol.update_layout(layout.clone());
+        self.layout = layout;
+    }
+
+    /// Before a recalculation: when the random source holds another layout than this mapping
+    /// (a change that did not go through `set_layout`), give it ours and say so.
+    pub(crate) fn sync_layout(&mut self) {
+        let held = self.vol.layout_rev();
+        if held != self.layout_rev {
+            log::warn!("gridcraft-live: the random source held layout revision {held}, not {}; replaced", self.layout_rev);
+            self.layout_rev = self.vol.update_layout(self.layout.clone());
+        }
+    }
+}
+
 impl GridApp<'_> {
+    /// Takes a new layout after an ordered op (see [`Mapping::set_layout`]).
+    pub(crate) fn set_layout(&mut self, layout: Layout) {
+        self.map.set_layout(layout);
+    }
+
     fn current(&self) -> Option<Arc<Workbook>> {
         self.session.documents().iter().find(|d| d.uid == self.map.doc).map(|d| d.wb.clone())
     }
@@ -144,6 +172,7 @@ impl GridApp<'_> {
 
     /// Recalculates every formula (the epoch moved).
     fn recalc_all(&mut self) {
+        self.map.sync_layout();
         let Some(wb) = self.current() else { return };
         match self.session.replace_workbook_quiet(self.map.doc, wb) {
             Ok(()) => self.map.recalc = false,
@@ -241,7 +270,7 @@ impl GridApp<'_> {
                     let naming = m.index.naming(*sheet, *axis, ids);
                     let mut t = Targets::default();
                     undeleted_targets(&mut t, &layout, replica, &m.base, i, *axis, ids);
-                    m.vol.update_layout(layout.clone());
+                    m.set_layout(layout.clone());
                     let ctx = Ctx { base: &m.base, layout: &layout };
                     let unresolved = &mut m.unresolved;
                     let doc: &GridDoc = replica;
@@ -308,10 +337,9 @@ impl GridApp<'_> {
         }
         m.sent.push(SentCommand { group, updates: updates.len() });
         if ordered {
-            m.layout = layout;
+            m.set_layout(layout);
             m.lines_minted = minted;
             m.applied_ops = replica.ops_len();
-            m.vol.update_layout(m.layout.clone());
             if m.has_random {
                 m.vol.follow(replica);
                 m.recalc = true;
@@ -381,7 +409,7 @@ impl GridApp<'_> {
         }
         let sel = session.documents().iter().find(|d| d.uid == m.doc).map(|d| (d.wb.active_sheet(), d.selection.clone()));
         let old_layout = m.layout.clone();
-        m.vol.update_layout(final_layout.clone());
+        m.set_layout(final_layout.clone());
         if t.epoch {
             m.vol.follow(replica);
         }
@@ -398,7 +426,6 @@ impl GridApp<'_> {
         });
         match res {
             Ok(()) => {
-                m.layout = final_layout;
                 m.applied_ops = new_len;
                 if let Some((sheet, sel)) = sel {
                     follow_selection(session, m.doc, sheet, &sel, &old_layout, &m.layout);
@@ -409,7 +436,7 @@ impl GridApp<'_> {
                 Ok(())
             }
             Err(EngineError::RemoteBusy) => {
-                m.vol.update_layout(old_layout);
+                m.set_layout(old_layout);
                 m.pending = all;
                 Ok(())
             }
@@ -429,10 +456,11 @@ impl GridApp<'_> {
 
 impl LiveApp<Grid> for GridApp<'_> {
     fn local(&mut self, replica: &mut GridDoc, edits: &[GridEdit]) -> Result<Vec<Vec<u8>>, LocalError> {
+        let before = self.map.layout.clone();
         let out = self.local_inner(replica, edits);
         if out.is_err() {
             // Nothing of an ordered edit was kept: the layout and the index go back.
-            self.map.vol.update_layout(self.map.layout.clone());
+            self.map.set_layout(before);
             self.map.index.clear();
         }
         out
@@ -501,6 +529,7 @@ impl LiveApp<Grid> for GridApp<'_> {
         if t.epoch {
             m.vol.follow(replica);
         }
+        m.sync_layout();
         if !t.is_empty() {
             let ctx = Ctx { base: &m.base, layout: &m.layout };
             let unresolved = &mut m.unresolved;
@@ -521,16 +550,18 @@ impl LiveApp<Grid> for GridApp<'_> {
     }
 
     fn resync(&mut self, replica: &GridDoc) -> Result<(), String> {
+        self.map.pending.clear();
+        let layout = Layout::from_doc(replica, &self.map.base);
+        self.set_layout(layout);
         let m = &mut *self.map;
-        m.pending.clear();
-        m.layout = Layout::from_doc(replica, &m.base);
         m.applied_ops = replica.ops_len();
         m.index.clear();
         m.recent.clear();
-        m.vol.update_layout(m.layout.clone());
         m.vol.follow(replica);
         let source: Arc<dyn gridcraft_calc::VolatileSource> = m.vol.clone();
         let fresh = build(&m.base, replica, Some(source)).map_err(|e| e.to_string())?;
+        // A late joiner learns of a random function only through the state it was given.
+        m.has_random |= crate::local::has_random(&fresh);
         let cur = self.current().ok_or_else(|| EngineError::NoDocument.to_string())?;
         self.install(Arc::new(keep_view(fresh, &cur)))
     }
