@@ -24,6 +24,29 @@ impl VolatileSource for Hashed {
     }
 }
 
+impl Hashed {
+    fn bits(&self, sheet: usize, cell: &str, draw: u32) -> f64 {
+        let c = CellRef::parse(cell).unwrap();
+        self.random(sheet, c, draw)
+    }
+}
+
+/// Returns what it is given, to test what the engine does with it.
+#[derive(Debug)]
+struct Fixed {
+    value: f64,
+    now: Option<f64>,
+}
+
+impl VolatileSource for Fixed {
+    fn random(&self, _: usize, _: CellRef, _: u32) -> f64 {
+        self.value
+    }
+    fn now(&self) -> Option<f64> {
+        self.now
+    }
+}
+
 fn session(source: Option<Arc<dyn VolatileSource>>) -> Session {
     let mut s = Session::new();
     s.new_workbook();
@@ -103,5 +126,80 @@ fn randbetween_stays_in_bounds_with_a_source() {
     for r in 0..40 {
         let n = num(&s, r, 0);
         assert!((3.0..=9.0).contains(&n) && n.fract() == 0.0, "row {r}: {n}");
+    }
+}
+
+#[test]
+fn nested_evaluation_draws_under_its_own_cell() {
+    let src = Hashed(5);
+    let mut s = session(Some(Arc::new(Hashed(5))));
+    set(&mut s, "B1", "=RAND()");
+    set(&mut s, "A1", "=B1+RAND()");
+    set(&mut s, "B2", "=RAND()");
+    set(&mut s, "A2", "=RAND()+B2+RAND()");
+    // A cell's draws are its own whatever it reads: B1 is read in the middle of A1 and A2.
+    assert_eq!(num(&s, 0, 1).to_bits(), src.bits(0, "B1", 0).to_bits());
+    assert_eq!(num(&s, 0, 0).to_bits(), (num(&s, 0, 1) + src.bits(0, "A1", 0)).to_bits());
+    assert_eq!(num(&s, 1, 0).to_bits(), (src.bits(0, "A2", 0) + num(&s, 1, 1) + src.bits(0, "A2", 1)).to_bits());
+}
+
+#[test]
+fn now_comes_from_the_source_when_it_has_one() {
+    let mut s = session(Some(Arc::new(Fixed { value: 0.5, now: Some(50000.25) })));
+    set(&mut s, "A1", "=NOW()");
+    assert_eq!(num(&s, 0, 0), 50000.25);
+}
+
+#[test]
+fn now_stays_local_when_the_source_has_none() {
+    let mut s = session(Some(Arc::new(Fixed { value: 0.5, now: None })));
+    set(&mut s, "A1", "=NOW()");
+    assert!(num(&s, 0, 0) > 40000.0 && num(&s, 0, 0) != 50000.25);
+}
+
+#[test]
+fn a_fixed_now_beats_the_source() {
+    let mut s = session(None);
+    s.doc_mut().unwrap().calc.fixed_now = Some(45000.0);
+    let uid = s.doc().unwrap().uid;
+    s.set_volatile_source(uid, Some(Arc::new(Fixed { value: 0.5, now: Some(50000.25) }))).unwrap();
+    set(&mut s, "A1", "=NOW()");
+    assert_eq!(num(&s, 0, 0), 45000.0);
+}
+
+#[test]
+fn setting_a_source_on_a_populated_workbook_changes_the_numbers_at_once() {
+    let mut s = session(None);
+    set(&mut s, "A1", "=RAND()");
+    let uid = s.doc().unwrap().uid;
+    s.set_volatile_source(uid, Some(Arc::new(Hashed(9)))).unwrap();
+    assert_eq!(num(&s, 0, 0).to_bits(), Hashed(9).bits(0, "A1", 0).to_bits());
+    s.set_volatile_source(uid, None).unwrap();
+    assert_ne!(num(&s, 0, 0).to_bits(), Hashed(9).bits(0, "A1", 0).to_bits());
+}
+
+#[test]
+fn the_sheet_reaches_the_source() {
+    let mut s = session(Some(Arc::new(Hashed(2))));
+    set(&mut s, "A1", "=RAND()");
+    s.execute("home.insertSheet", json!({})).unwrap();
+    let idx = s.doc().unwrap().wb.sheets.len() - 1;
+    s.execute("sheet.activate", json!({"sheet": idx})).unwrap();
+    set(&mut s, "A1", "=RAND()");
+    let on = |i: usize| match s.doc().unwrap().wb.sheet(i).unwrap().value(CellRef::new(0, 0)) {
+        Value::Number(n) => n,
+        _ => f64::NAN,
+    };
+    assert_eq!(on(idx).to_bits(), Hashed(2).bits(idx, "A1", 0).to_bits());
+    assert_ne!(on(0).to_bits(), on(idx).to_bits());
+}
+
+#[test]
+fn a_source_outside_the_range_is_pulled_into_it() {
+    for given in [1.0, 7.5, -3.0, f64::NAN, f64::INFINITY] {
+        let mut s = session(Some(Arc::new(Fixed { value: given, now: None })));
+        set(&mut s, "A1", "=RAND()");
+        let n = num(&s, 0, 0);
+        assert!((0.0..1.0).contains(&n), "{given} gave {n}");
     }
 }

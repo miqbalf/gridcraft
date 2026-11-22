@@ -17,6 +17,9 @@ const MAX_ITERATION_WORK: usize = 10_000_000;
 /// A block's results by last row: its sum and count, or `None` when it can't be summed from constants.
 type BlockSums = std::collections::BTreeMap<u32, Option<(f64, u64)>>;
 
+/// The largest `f64` below 1.
+const MAX_BELOW_ONE: f64 = 1.0 - f64::EPSILON / 2.0;
+
 pub(super) struct PassHost<'a> {
     wb: &'a Workbook,
     exprs: &'a HashMap<Key, std::sync::Arc<Expr>>,
@@ -779,10 +782,15 @@ impl Host for PassHost<'_> {
         self.now
     }
     fn random(&mut self) -> f64 {
-        if let (Some(source), Some((k, draw))) = (self.volatile, self.current.as_mut()) {
+        if let Some(source) = self.volatile {
+            // With a source, the number is the source's, never this process's generator: no
+            // formula being evaluated (not reachable through `calculate`) gives 0.0, and a
+            // value outside [0, 1) or NaN is pulled into range, so peers cannot disagree.
+            let Some((k, draw)) = self.current.as_mut() else { return 0.0 };
             let n = *draw;
             *draw = draw.saturating_add(1);
-            return source.random(k.0, k.1, n);
+            let x = source.random(k.0, k.1, n);
+            return if x.is_nan() { 0.0 } else { x.clamp(0.0, MAX_BELOW_ONE) };
         }
         // xorshift64*
         let mut x = *self.rng;

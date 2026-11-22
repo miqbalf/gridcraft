@@ -41,7 +41,7 @@ use pass_host::{PassHost, spills_as_before};
 /// Where the volatile functions get their numbers from, when something other than this process
 /// decides them (a shared session: every peer must see the same `RAND`).
 pub trait VolatileSource: Send + Sync + std::fmt::Debug {
-    /// In [0, 1). `draw` counts the random draws made while evaluating this cell (RANDARRAY: per element).
+    /// In [0, 1) (anything else is clamped, NaN becomes 0). `draw` counts the random draws made while evaluating this cell (RANDARRAY: per element).
     fn random(&self, sheet: usize, cell: CellRef, draw: u32) -> f64;
     /// `None`: the system clock (NOW/TODAY stay local while live).
     fn now(&self) -> Option<f64> {
