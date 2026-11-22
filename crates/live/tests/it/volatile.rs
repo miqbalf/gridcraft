@@ -8,6 +8,8 @@ use gridcraft_live::{GridDoc, GridSeed, Layout, LiveVolatile, volatile_for, work
 use serde_json::json;
 
 use crate::support::{Room, a1, finger};
+use crate::{Rng, seeds};
+use craft_live::Access;
 
 fn num(room: &Room, i: usize, cell: &str) -> Value {
     room.wb(i).sheet(0).unwrap().cell(a1(cell)).unwrap().value.clone()
@@ -102,7 +104,7 @@ fn the_same_inputs_give_the_same_bits() {
     assert_ne!(first.to_bits(), a.random(0, cell, 1).to_bits(), "draws differ");
     assert_ne!(first.to_bits(), a.random(1, cell, 0).to_bits(), "sheets differ");
     assert_ne!(first.to_bits(), a.random(0, CellRef::new(4, 3), 0).to_bits(), "rows and columns are not interchangeable");
-    // Pinned bits: a change here changes every shared document's numbers, native and wasm alike.
+    // A deliberate cross-build golden (not a relation): a change here changes every shared document's numbers, native and wasm alike.
     assert_eq!(first.to_bits(), 4_596_398_138_289_177_264);
     let (seed, n) = a.state();
     assert_ne!(seed, 0);
@@ -110,5 +112,66 @@ fn the_same_inputs_give_the_same_bits() {
     // The layout is what maps positions to ids.
     a.update_layout(Layout::from_doc(&doc, &base));
     assert_eq!(first.to_bits(), a.random(0, cell, 0).to_bits());
-    assert_eq!(doc.state().len(), GridDoc::seeded(&GridSeed { base_sha256: [9; 32], sheets: 2 }).unwrap().state().len());
+    let rev = a.layout_rev();
+    assert_eq!(a.update_layout(Layout::from_doc(&doc, &base)), rev + 1, "each layout taken is a new revision");
+    assert_eq!(a.layout_rev(), rev + 1);
+}
+
+fn bits(v: &Value) -> u64 {
+    match v {
+        Value::Number(n) => n.to_bits(),
+        other => panic!("not a number: {other:?}"),
+    }
+}
+
+#[test]
+fn concurrent_edits_converge_on_one_epoch() {
+    for seed in seeds() {
+        let mut rng = Rng(seed);
+        let n = 2 + rng.below(3);
+        let mut room = Room::new(n);
+        room.run(0, "cell.set", json!({"cell": "G1", "input": "=RAND()"})).unwrap();
+        room.settle();
+        for round in 0..3 {
+            let before = bits(&num(&room, 0, "G1"));
+            let (a, mut b) = (rng.below(n), rng.below(n));
+            if a == b {
+                b = (a + 1) % n;
+            }
+            // Both edit before either has seen the other: two bumps to the same count.
+            room.run(a, "cell.set", json!({"cell": format!("H{}", 2 + round), "input": "x"})).unwrap();
+            if rng.chance(50) {
+                room.pump(rng.below(n));
+            }
+            room.run(b, "cell.set", json!({"cell": format!("J{}", 2 + round), "input": "y"})).unwrap();
+            room.settle();
+            let e = epoch(&room, 0);
+            let state = room.replica_state(0);
+            let base = room.base();
+            let rebuilt = workbook_from_state(&base, &state, Some(volatile_for(&base, &state).unwrap())).unwrap();
+            let want = bits(&rebuilt.sheet(0).unwrap().cell(a1("G1")).unwrap().value.clone());
+            for i in 0..n {
+                assert_eq!(epoch(&room, i), e, "seed {seed} round {round}: peer {i} holds the one epoch");
+                assert_eq!(bits(&num(&room, i, "G1")), want, "seed {seed} round {round}: peer {i} shows the rebuild's RAND");
+            }
+            assert_ne!(want, before, "seed {seed} round {round}: the edits changed the number");
+        }
+    }
+}
+
+#[test]
+fn a_peer_joining_after_rand_was_typed_recalculates_with_the_room() {
+    let mut room = Room::new(2);
+    room.run(0, "cell.set", json!({"cell": "G1", "input": "=RAND()"})).unwrap();
+    room.settle();
+    let late = room.join("Carol", Access::Edit, None);
+    room.settle();
+    assert_eq!(bits(&num(&room, late, "G1")), bits(&num(&room, 0, "G1")), "the late peer starts equal");
+    for (who, cell) in [(0, "H2"), (1, "H3"), (late, "H4")] {
+        room.run(who, "cell.set", json!({"cell": cell, "input": "x"})).unwrap();
+        room.settle();
+        let want = bits(&num(&room, 0, "G1"));
+        assert_eq!(bits(&num(&room, 1, "G1")), want);
+        assert_eq!(bits(&num(&room, late, "G1")), want, "the late peer follows the epoch after an edit by peer {who}");
+    }
 }

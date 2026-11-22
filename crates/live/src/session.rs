@@ -135,12 +135,13 @@ impl<H: Hub> GridLive<H> {
         let replica = GridDoc::seeded(&seed).map_err(LiveFail::Live)?;
         let vol = LiveVolatile::new(&replica, &wb);
         let layout = Layout::from_doc(&replica, &wb);
-        vol.update_layout(layout.clone());
+        let layout_rev = vol.update_layout(layout.clone());
         let map = Mapping {
             doc,
             has_random: has_random(&wb),
             base: wb,
             layout,
+            layout_rev,
             uid: uid.to_owned(),
             space: 0,
             hash,
