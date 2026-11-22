@@ -24,7 +24,7 @@ struct State {
 /// The [`VolatileSource`] of a live session. The mapping updates it as the epoch and the layout
 /// move; the engine reads it while it calculates.
 #[derive(Debug)]
-pub struct Volatile(RwLock<State>);
+pub struct LiveVolatile(RwLock<State>);
 
 fn mix(h: u64, x: u64) -> u64 {
     let mut z = (h ^ x).wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -33,12 +33,12 @@ fn mix(h: u64, x: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-impl Volatile {
+impl LiveVolatile {
     /// A source for `doc` over `base`.
     #[must_use]
-    pub fn new(doc: &GridDoc, base: &Workbook) -> Arc<Volatile> {
+    pub fn new(doc: &GridDoc, base: &Workbook) -> Arc<LiveVolatile> {
         let meta = doc.meta();
-        Arc::new(Volatile(RwLock::new(State { seed: meta.seed, epoch: meta.epoch.0, layout: Layout::from_doc(doc, base) })))
+        Arc::new(LiveVolatile(RwLock::new(State { seed: meta.seed, epoch: meta.epoch.0, layout: Layout::from_doc(doc, base) })))
     }
 
     /// Takes the seed and epoch of `doc`.
@@ -49,18 +49,33 @@ impl Volatile {
         s.epoch = meta.epoch.0;
     }
 
-    /// Takes a new layout.
-    pub fn set_layout(&self, layout: Layout) {
+    /// Takes a new layout. Call it after every change of the row or column lines (an ordered op,
+    /// local or remote) and before the recalculation that follows it: the engine asks by
+    /// position and this maps the position to the line ids.
+    pub fn update_layout(&self, layout: Layout) {
         self.0.write().unwrap_or_else(PoisonError::into_inner).layout = layout;
+    }
+
+    /// The seed and epoch count now in use.
+    #[must_use]
+    pub fn state(&self) -> (u64, u64) {
+        let s = self.0.read().unwrap_or_else(PoisonError::into_inner);
+        (s.seed, s.epoch)
     }
 }
 
-impl VolatileSource for Volatile {
+impl VolatileSource for LiveVolatile {
     fn random(&self, sheet: usize, cell: CellRef, draw: u32) -> f64 {
         let s = self.0.read().unwrap_or_else(PoisonError::into_inner);
         let sheet_id = s.layout.sheets.get(sheet).map_or(sheet as u64, |l| l.id.0);
         let (row, col) = s.layout.slot_at(sheet, cell).map_or((u64::from(cell.row), u64::from(cell.col)), |(r, c)| (r.0, c.0));
+        debug_assert!(s.layout.sheets.get(sheet).is_some(), "random: sheet {sheet} is in the layout");
+        debug_assert!(s.layout.slot_at(sheet, cell).is_some(), "random: the line ids of {cell:?} on sheet {sheet} resolve");
         let h = [s.epoch, sheet_id, row, col, u64::from(draw)].into_iter().fold(mix(s.seed, 0x5241_4e44), mix);
-        (h >> 11) as f64 / (1u64 << 53) as f64
+        // The top 53 bits over 2^53: integer shifts and one exact conversion, so the bits are
+        // the same native and in wasm. No float math is involved (`fmath` has nothing to add).
+        let x = (h >> 11) as f64 / (1u64 << 53) as f64;
+        debug_assert!((0.0..1.0).contains(&x), "random: {x} is in [0, 1)");
+        x
     }
 }

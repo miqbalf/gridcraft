@@ -34,4 +34,4 @@ pub use kind::{Grid, GridCaret, GridEdit, GridPos};
 pub use layout::{Hosted, Layout, SheetLayout};
 pub use op::Op;
 pub use session::{BaseFile, GridLive, LiveFail, Peer, Ran, schema, volatile_for, workbook_from_state};
-pub use volatile::Volatile;
+pub use volatile::LiveVolatile;

@@ -18,7 +18,7 @@ use crate::local::Planner;
 use crate::remote::{Ctx, Targets, apply, build};
 use crate::split::{Plan, Put};
 use crate::styles::StyleHash;
-use crate::volatile::Volatile;
+use crate::volatile::LiveVolatile;
 
 /// Told when Undo or Redo is asked for: per-user undo comes with G11.
 pub const UNDO_NOT_YET_TEXT: &str = "Undo and Redo are not available while editing live yet";
@@ -42,7 +42,7 @@ pub(crate) struct Mapping {
     /// Canonical style JSON to the key it was written under.
     pub keys: HashMap<String, String>,
     pub minted: u32,
-    pub vol: Arc<Volatile>,
+    pub vol: Arc<LiveVolatile>,
     /// The workbook holds a formula that calls a random function.
     pub has_random: bool,
     /// Lines for the user, taken into the session's notices at the next pump.
@@ -288,7 +288,7 @@ impl LiveApp<Grid> for GridApp<'_> {
         let m = &mut *self.map;
         m.pending.clear();
         m.layout = Layout::from_doc(replica, &m.base);
-        m.vol.set_layout(m.layout.clone());
+        m.vol.update_layout(m.layout.clone());
         m.vol.follow(replica);
         let source: Arc<dyn gridcraft_calc::VolatileSource> = m.vol.clone();
         let fresh = build(&m.base, replica, Some(source)).map_err(|e| e.to_string())?;
