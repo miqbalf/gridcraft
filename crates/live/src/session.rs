@@ -612,6 +612,12 @@ impl<H: Hub> GridLive<H> {
         Some((i, self.map.layout.cell_at(i, r, c)?))
     }
 
+    /// The engine document (`DocState::uid`) this session edits.
+    #[must_use]
+    pub fn doc(&self) -> u64 {
+        self.map.doc
+    }
+
     pub fn set_clock(&mut self, clock: Box<dyn FnMut() -> f64 + Send>) {
         let shared = Arc::new(Mutex::new(clock));
         let link = shared.clone();

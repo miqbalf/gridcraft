@@ -28,7 +28,14 @@ mod view;
 impl SheetApp {
     /// Constructs a `SheetApp` with default UI, grid, printing, control and screenshot state and the caller's session and services.
     pub fn new(session: Session, mut services: Services) -> SheetApp {
-        let live = services.live.take().zip(session.active().map(|d| d.uid)).map(|(live, doc)| live::LiveUi::new(live, doc));
+        let mut live_refused = None;
+        let live = services.live.take().and_then(|live| match live::check_attached(&session, &live) {
+            Ok(()) => Some(live::LiveUi::new(live)),
+            Err(why) => {
+                live_refused = Some(why);
+                None
+            }
+        });
         SheetApp {
             session,
             ui: UiState::default(),
@@ -38,7 +45,7 @@ impl SheetApp {
             text_box_editor: None,
             dialog: None,
             backstage: None,
-            message: None,
+            message: live_refused.map(|why| ("GridCraft".into(), format!("Live editing was not started. {why}"))),
             toast: None,
             notice: None,
             services,

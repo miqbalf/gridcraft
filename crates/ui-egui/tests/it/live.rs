@@ -266,6 +266,14 @@ fn gated_command_is_greyed_with_the_reason() {
     h.state_mut().ui.ribbon_tab = "Home".into();
     settle(&mut rig, &mut h);
     assert!(!h.get_by_label("Paste").accesskit_node().is_disabled());
+    // The reason shows as the tooltip of the greyed button.
+    h.state_mut().ui.ribbon_tab = "Data".into();
+    settle(&mut rig, &mut h);
+    h.get_by_label("Remove Duplicates").hover();
+    for _ in 0..6 {
+        h.step();
+    }
+    h.get_by_label_contains(gridcraft_live::NOT_YET_TEXT);
     // The refusal says why.
     let err = h.state_mut().run("data.removeDuplicates", json!({})).expect_err("refused");
     assert!(err.contains(gridcraft_live::NOT_YET_TEXT), "{err}");
@@ -412,4 +420,107 @@ fn a_session_attached_after_construction_edits_live() {
     h.state_mut().run("cell.set", json!({"cell": "B2", "input": "5"})).expect("runs through the session");
     settle(&mut rig, &mut h);
     assert_eq!(bob_value(&rig, "B2"), Value::Number(5.0), "the change reached the other editor");
+}
+
+#[test]
+fn a_dropdown_whose_label_clashes_with_a_refused_command_stays_enabled() {
+    // "Clear" is also the label of `data.clearFilter` (refused), but Home's Clear menu holds
+    // commands the session shares.
+    let (mut rig, app) = rig(Access::Edit);
+    let mut h = harness(app);
+    settle(&mut rig, &mut h);
+    assert!(!h.get_by_label("Clear").accesskit_node().is_disabled());
+}
+
+#[test]
+fn typing_in_another_workbook_is_not_written_into_the_live_one() {
+    let (mut rig, app) = rig(Access::Edit);
+    let mut h = harness(app);
+    settle(&mut rig, &mut h);
+    let live_doc = h.state().session.active().expect("doc").uid;
+    h.state_mut().run("file.new", json!({})).expect("a second workbook opens");
+    assert_ne!(h.state().session.active().expect("doc").uid, live_doc, "the new workbook is active");
+    h.state_mut().run("selection.set", json!({"cell": "C3"})).expect("selects");
+    h.state_mut().begin_edit(Some("private".into()), false);
+    assert!(h.state_mut().commit_edit(0, 0, false, false));
+    settle(&mut rig, &mut h);
+    let active = h.state().session.active().expect("doc");
+    assert_ne!(active.uid, live_doc, "still in the second workbook");
+    assert_eq!(
+        active.wb.sheet(0).and_then(|s| s.cell(a1("C3"))).map(|c| c.value.clone()),
+        Some(Value::Text("private".into())),
+        "it went into its own workbook"
+    );
+    assert_eq!(bob_value(&rig, "C3"), Value::Empty, "nothing reached the other editor");
+    let live = h.state().session.documents().iter().find(|d| d.uid == live_doc).expect("live doc");
+    assert_eq!(live.wb.sheet(0).and_then(|s| s.cell(a1("C3"))).map(|c| c.value.clone()), None, "and the live workbook is untouched");
+}
+
+#[test]
+fn closing_the_live_workbook_ends_the_session_and_the_window_stays_usable() {
+    let (mut rig, app) = rig(Access::Edit);
+    let mut h = harness(app);
+    settle(&mut rig, &mut h);
+    h.state_mut().run("file.close", json!({"force": true})).expect("closes");
+    settle(&mut rig, &mut h);
+    assert!(h.state().live().is_none(), "the session ended with its workbook");
+    assert!(notice_text(h.state()).to_lowercase().contains("live editing ended"), "{:?}", notice_text(h.state()));
+    assert_eq!(h.state().session.live_undo_doc(), None, "the engine's hooks came off");
+    h.state_mut().run("cell.set", json!({"cell": "A1", "input": "x"})).expect("the window still edits");
+}
+
+#[test]
+fn a_deleted_row_draft_is_kept_whatever_else_the_room_says() {
+    let (mut rig, app) = rig(Access::Edit);
+    let mut h = harness(app);
+    settle(&mut rig, &mut h);
+    start_editing(&mut h, "B6", "short draft");
+    rig.bob.run("home.deleteRows", json!({"rows": "6:6"}));
+    // Another notice arrives in the same and in later frames.
+    h.state_mut().live_mut().expect("live").live_mut().core_mut().push_notice("Something else happened".into());
+    settle(&mut rig, &mut h);
+    h.state_mut().live_mut().expect("live").live_mut().core_mut().push_notice("And again".into());
+    settle(&mut rig, &mut h);
+    let said = h.state().message.as_ref().map(|(_, m)| m.clone()).unwrap_or_default();
+    assert!(said.contains("short draft"), "the entry stays in the message box until it is closed: {said:?}");
+}
+
+#[test]
+fn notices_from_one_pump_are_all_shown_one_after_the_other() {
+    let (mut rig, app) = rig(Access::Edit);
+    let mut h = harness(app);
+    settle(&mut rig, &mut h);
+    let live = h.state_mut().live_mut().expect("live").live_mut();
+    live.core_mut().push_notice("First thing".into());
+    live.core_mut().push_notice("Second thing".into());
+    settle(&mut rig, &mut h);
+    assert!(notice_text(h.state()).contains("First thing"), "{:?}", notice_text(h.state()));
+    h.state_mut().notice = None;
+    settle(&mut rig, &mut h);
+    assert!(notice_text(h.state()).contains("Second thing"), "{:?}", notice_text(h.state()));
+}
+
+#[test]
+fn a_session_started_on_another_engine_session_is_refused() {
+    let relay = MemRelay::new();
+    let bytes = base_bytes();
+    // Started on a scratch session, then handed to a window that has another one.
+    let hub = relay.connect("alice", "Alice", true);
+    let mut scratch = Session::new();
+    let base = BaseFile { bytes: &bytes, name: FILE, expected_sha256: None };
+    let live = GridLive::start(DynHub(Box::new(hub)), ROOM, &base, Access::Edit, "alice", &mut scratch).expect("starts");
+    let mut own = Session::new();
+    own.new_workbook();
+    let mut app = crate::common::prepare(SheetApp::new(own, Services::default()));
+    assert!(app.attach_live(live).is_err(), "no edit hook on this window's session");
+    assert!(app.live().is_none());
+    // The same through the constructor: refused with a message, not dropped silently.
+    let hub = relay.connect("alice2", "Alice", true);
+    let mut scratch = Session::new();
+    let live = GridLive::start(DynHub(Box::new(hub)), ROOM, &base, Access::Edit, "alice2", &mut scratch).expect("starts");
+    let mut own = Session::new();
+    own.new_workbook();
+    let app = crate::common::prepare(SheetApp::new(own, Services { live: Some(live), ..Default::default() }));
+    assert!(app.live().is_none());
+    assert!(app.message.as_ref().is_some_and(|(_, m)| m.contains("not started")), "{:?}", app.message);
 }
