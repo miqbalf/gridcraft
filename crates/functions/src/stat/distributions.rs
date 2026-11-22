@@ -1,9 +1,9 @@
-use gridcraft_core::fmath;
 use super::descriptive::{arg_nums, arg_pairs, mean, var_s};
 use super::{
     Arg, C, CellError, R, Value, arg, as_array, boolean, erf, gamma, has, invert, ln_beta, ln_gamma, norm_cdf, norm_inv, norm_pdf, num, num_val,
     reg_gamma_p, reg_gamma_q, reg_gamma_q_front, reg_inc_beta, reg_inc_beta_front,
 };
+use gridcraft_core::fmath;
 
 // ---------------------------------------------------------------------------------------------
 // Distributions
@@ -89,7 +89,11 @@ fn f_pdf(x: f64, d1: f64, d2: f64) -> f64 {
             0.0
         };
     }
-    fmath::exp((d1 / 2.0) * fmath::ln(d1 / d2) + (d1 / 2.0 - 1.0) * fmath::ln(x) - ((d1 + d2) / 2.0) * fmath::ln(1.0 + d1 * x / d2) - ln_beta(d1 / 2.0, d2 / 2.0))
+    fmath::exp(
+        (d1 / 2.0) * fmath::ln(d1 / d2) + (d1 / 2.0 - 1.0) * fmath::ln(x)
+            - ((d1 + d2) / 2.0) * fmath::ln(1.0 + d1 * x / d2)
+            - ln_beta(d1 / 2.0, d2 / 2.0),
+    )
 }
 
 const MAX_BINOM_TRIALS: f64 = 2_147_483_646.0;

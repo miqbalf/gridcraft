@@ -1,8 +1,8 @@
-use gridcraft_core::fmath;
 use super::descriptive::{kth, median, percentile_exc, percentile_inc, sorted};
 use super::{MAX_REGRESSORS, aggregate_values, aggregate_values_k, check_regression_size};
 use crate::util::R;
 use crate::util::testutil::*;
+use gridcraft_core::fmath;
 use gridcraft_core::{CellError, Value};
 
 const D7: f64 = 1e-6;

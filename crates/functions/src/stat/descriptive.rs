@@ -1,5 +1,5 @@
-use gridcraft_core::fmath;
 use super::{Arg, C, CellError, R, Value, arg, array_numbers, array_val, as_array, has, num, num_val, opt_num};
+use gridcraft_core::fmath;
 
 // ---------------------------------------------------------------------------------------------
 // Basic helpers over number lists

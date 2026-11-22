@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use gridcraft_core::date::{MONTHS, WEEKDAYS, datetime_from_serial, days_in_month, serial_from_ymd};
-use gridcraft_core::{CellRef, RangeRef, Value};
+use gridcraft_core::{CellRef, RangeRef, Value, fmath};
 use gridcraft_model::{Cell, Formula, Workbook};
 use gridcraft_numfmt::{FormatKind, NumberFormat};
 
@@ -518,7 +518,7 @@ fn round15(x: f64) -> f64 {
     if x == 0.0 || !x.is_finite() {
         return x;
     }
-    let mag = x.abs().log10().floor() as i32;
+    let mag = fmath::log10(x.abs()).floor() as i32;
     let p = 10f64.powi(14 - mag);
     if !p.is_finite() || p == 0.0 { x } else { (x * p).round() / p }
 }

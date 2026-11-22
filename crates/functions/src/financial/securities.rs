@@ -1,6 +1,6 @@
-use gridcraft_core::fmath;
 use super::day_count::{basis_arg, coup_daybs, coup_days, coup_daysnc, coupons, date, day_count, freq_arg, shift_months, year_basis, year_frac, ymd};
 use super::{Arg, CellError, Ctx, DateSystem, R, Value, days_in_month, has, num, num_val, opt_bool};
+use gridcraft_core::fmath;
 
 // ---------------------------------------------------------------------------------------------
 // Securities

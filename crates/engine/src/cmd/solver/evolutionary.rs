@@ -1,3 +1,5 @@
+use gridcraft_core::fmath;
+
 use super::lp::{Outcome, Row, Sense};
 use super::model::{EvoOptions, Goal};
 use super::nlp::{project, shape, violation};
@@ -33,7 +35,7 @@ impl Rng {
     /// Standard normal (Box–Muller).
     fn normal(&mut self) -> f64 {
         let u = self.uniform().max(f64::MIN_POSITIVE);
-        (-2.0 * u.ln()).sqrt() * (std::f64::consts::TAU * self.uniform()).cos()
+        (-2.0 * fmath::ln(u)).sqrt() * fmath::cos(std::f64::consts::TAU * self.uniform())
     }
 }
 

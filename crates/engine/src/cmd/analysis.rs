@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use gridcraft_core::{CellError, CellRef, DateSystem, MAX_COLS, MAX_ROWS, RangeRef, Value};
+use gridcraft_core::{CellError, CellRef, DateSystem, MAX_COLS, MAX_ROWS, RangeRef, Value, fmath};
 use gridcraft_model::{Cell, NumFmt, Sheet};
 use serde_json::{Value as Json, json};
 
@@ -1353,7 +1353,7 @@ fn fft(a: &mut [(f64, f64)], inverse: bool) {
         for start in (0..n).step_by(len) {
             for k in 0..len / 2 {
                 // Each twiddle factor is computed directly, not by repeated multiplication.
-                let (wr, wi) = ((ang * k as f64).cos(), (ang * k as f64).sin());
+                let (wr, wi) = (fmath::cos(ang * k as f64), fmath::sin(ang * k as f64));
                 let (i, j) = (start + k, start + k + len / 2);
                 let (Some(&(ur, ui)), Some(&(xr, xi))) = (a.get(i), a.get(j)) else { continue };
                 let (vr, vi) = (xr * wr - xi * wi, xr * wi + xi * wr);
@@ -1471,7 +1471,7 @@ impl Rng {
     /// Standard normal by the Box–Muller transform.
     fn normal(&mut self) -> f64 {
         let (u1, u2) = (1.0 - self.uniform(), self.uniform());
-        (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+        (-2.0 * fmath::ln(u1)).sqrt() * fmath::cos(2.0 * std::f64::consts::PI * u2)
     }
 }
 

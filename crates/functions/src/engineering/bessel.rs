@@ -1,5 +1,5 @@
-use gridcraft_core::fmath;
 use super::{Arg, CellError, Ctx, PI, R, Value, num, num_val};
+use gridcraft_core::fmath;
 
 // ---------------------------------------------------------------------------------------------
 // Bessel functions

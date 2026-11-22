@@ -1,6 +1,6 @@
-use gridcraft_core::fmath;
 use super::day_count::{basis_arg, date, year_frac};
 use super::{Arg, CellError, Ctx, R, Value, num, num_val, opt_bool, opt_num};
+use gridcraft_core::fmath;
 
 // ---------------------------------------------------------------------------------------------
 // Depreciation

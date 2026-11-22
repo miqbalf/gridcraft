@@ -1,5 +1,5 @@
-use gridcraft_core::fmath;
 use super::{Arg, CellError, Ctx, R, Value, array_numbers, as_array, flatten, num, num_val, numbers, opt_num, type_arg};
+use gridcraft_core::fmath;
 
 // ---------------------------------------------------------------------------------------------
 // Time value of money
