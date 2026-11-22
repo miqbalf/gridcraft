@@ -64,7 +64,7 @@ use std::rc::Rc;
 
 use craft_collab::Hub as _;
 use craft_live::LiveStatus;
-use craft_web_host::live::{LiveError, LiveMessage, LiveState, Peer as HostPeer};
+use craft_web_host::live::{LiveMessage, LiveState, Peer as HostPeer};
 use craft_web_host::web::{FileData, Host, Message};
 use craft_web_host::{Mode, Outgoing, file_name, message_type};
 use gridcraft_live::{BaseFile, LiveFail, schema};
@@ -290,6 +290,9 @@ fn deliver_open(inbox: &Inbox, ctx: &egui::Context, name: &str, data: &FileData)
 /// Told when the page speaks a newer live protocol than this build.
 const NEWER_TEXT: &str = "This file is being edited with a newer GridCraft. Update to join.";
 
+/// Told when the page's `live` message was refused.
+const UNUSABLE_TEXT: &str = "Live editing could not start. Saving is off in this window; reopen the file.";
+
 /// Longest wait for a base file that is not there yet, and how often it is asked for.
 const BASE_RETRIES: u32 = 4;
 const BASE_RETRY_MS: i32 = 500;
@@ -306,13 +309,16 @@ impl Bridge {
     pub fn listen_live(&self, events: LiveEvents, joining: Rc<RefCell<Joining>>, ctx: egui::Context) {
         let asked = self.live_asked.clone();
         self.host.listen_live(move |message| match message {
-            Err(LiveError::UnsupportedProto(_)) => {
-                asked.set(true);
-                events.borrow_mut().push(LiveEvent::Newer);
+            Err(e) => {
+                // The error never quotes the message, so no ticket reaches the log.
+                log::warn!("live message refused: {e}");
+                let event = match crate::live_ticket::note_refused(&asked, &e) {
+                    crate::live_ticket::Refusal::Newer => LiveEvent::Newer,
+                    crate::live_ticket::Refusal::Unusable => LiveEvent::Unusable,
+                };
+                events.borrow_mut().push(event);
                 ctx.request_repaint();
             }
-            // The error never quotes the message, so no ticket reaches the log.
-            Err(e) => log::warn!("live message refused: {e}"),
             Ok(message) => {
                 asked.set(true);
                 let access = crate::live_ticket::ticket_access(message.ticket());
@@ -365,6 +371,8 @@ pub enum LiveEvent {
     Failed(String),
     /// The room speaks a newer protocol.
     Newer,
+    /// The page's `live` message could not be used; saving is off.
+    Unusable,
     /// The session ended (another room, less access), for this reason.
     End(&'static str),
 }
@@ -400,6 +408,7 @@ impl Live {
         for event in arrived {
             match event {
                 LiveEvent::Newer => tell(app, NEWER_TEXT),
+                LiveEvent::Unusable => tell(app, UNUSABLE_TEXT),
                 LiveEvent::End(reason) => {
                     if let Some(live) = app.live_mut() {
                         live.live_mut().core_mut().end(reason);

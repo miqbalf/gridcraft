@@ -7,7 +7,7 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use craft_live::{Access, LiveStatus};
-use craft_web_host::live::LiveStatus as HostStatus;
+use craft_web_host::live::{LiveError, LiveStatus as HostStatus};
 use sha2::{Digest, Sha256};
 
 /// The window's end when the page sends a `live` message for another room after the join.
@@ -169,6 +169,23 @@ pub fn save_refusal(joined: bool, asked: bool, name: &str) -> Option<&'static st
     Some(if joined { SAVE_BY_SERVICE } else { SAVE_OFF_AFTER_FAILED_JOIN })
 }
 
+/// What a `live` message the host crate refused means for the window.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// The room speaks a newer protocol.
+    Newer,
+    /// The message is unusable (a bad ticket, a relay that is not `ws(s)://`...).
+    Unusable,
+}
+
+/// A `live` message was refused: the page meant this window to be a room's, so it is marked
+/// (`asked`) and no workbook save goes to the host from now on ([`save_refusal`]), whatever the
+/// reason. The error never quotes the message, so no ticket is shown or logged.
+pub fn note_refused(asked: &std::cell::Cell<bool>, error: &LiveError) -> Refusal {
+    asked.set(true);
+    if matches!(error, LiveError::UnsupportedProto(_)) { Refusal::Newer } else { Refusal::Unusable }
+}
+
 /// The `live-state` state and reason for the session's status.
 pub fn host_status(status: &LiveStatus) -> (HostStatus, Option<String>) {
     match status {
@@ -245,6 +262,17 @@ mod tests {
         assert!(save_refusal(true, true, "Budget.xlsx").is_some(), "the service saves a joined room");
         assert!(save_refusal(false, true, "Budget.pdf").is_none(), "an export is a copy");
         assert!(save_refusal(false, false, "Budget.xlsx").is_none(), "a window that was never asked to go live saves as before");
+    }
+
+    #[test]
+    fn a_refused_live_message_turns_saving_off() {
+        let asked = std::cell::Cell::new(false);
+        let bad = craft_web_host::live::LiveMessage::parse(r#"{"type":"live","ticket":"t","relayUrl":"http://not-ws","room":"r"}"#);
+        let Err(error) = bad else { panic!("the message should be refused") };
+        assert!(save_refusal(false, asked.get(), "Budget.xlsx").is_none(), "before: a plain window saves");
+        assert_eq!(note_refused(&asked, &error), Refusal::Unusable);
+        assert!(save_refusal(false, asked.get(), "Budget.xlsx").is_some(), "after the refusal no workbook save goes out");
+        assert!(!error.to_string().contains("not-ws"), "the error does not quote the message");
     }
 
     #[test]
