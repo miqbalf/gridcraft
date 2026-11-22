@@ -11,19 +11,19 @@ use craft_live::ordered::{Action, Ordered, Polled};
 use craft_live::{Access, LiveApp, LiveEditing, LiveStatus, uid_of};
 use gridcraft_calc::VolatileSource;
 use gridcraft_core::CellRef;
-use gridcraft_engine::{DocState, EditObserver, EditReport, Session, Trust};
+use gridcraft_engine::{EditObserver, EditReport, Session};
 use gridcraft_model::Workbook;
 use serde_json::Value as Json;
-use sha2::{Digest, Sha256};
 
 use crate::app::{GridApp, Mapping, caret_payload};
 use crate::axis::AxisKind;
-use crate::doc::{GridDoc, GridSeed};
+use crate::doc::GridDoc;
 use crate::gate::{Class, NOT_YET_TEXT, class};
 use crate::ids::Id;
 use crate::kind::{Grid, GridEdit, GridPos};
-use crate::layout::Layout;
-use crate::ordered::{BUSY_TEXT, LOCK_LOST_TEXT, LOCK_LOST_UNRUN_TEXT, Pending, SCOPE, Tracked, request, resolve, send_actions};
+use crate::ordered::{
+    BUSY_TEXT, LOCK_LOST_BROKEN_TEXT, LOCK_LOST_TEXT, LOCK_LOST_UNRUN_TEXT, Pending, SCOPE, Tracked, request, resolve, send_actions,
+};
 use crate::remote::build;
 use crate::styles::{StyleHash, fnv1a64};
 use crate::volatile::LiveVolatile;
@@ -49,6 +49,16 @@ pub enum LiveFail {
     /// The base bytes are not the file the room was opened on.
     BaseMismatch,
     Live(LiveError),
+}
+
+impl std::fmt::Display for LiveFail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LiveFail::Open(e) => write!(f, "the base file did not open: {e}"),
+            LiveFail::BaseMismatch => f.write_str("the base is not the file the room was opened on"),
+            LiveFail::Live(e) => write!(f, "the live session did not start: {e}"),
+        }
+    }
 }
 
 /// What running a command did.
@@ -148,25 +158,12 @@ impl<H: Hub> GridLive<H> {
     }
 
     fn start_inner(hub: H, room: &str, base: &BaseFile, access: Access, uid: &str, session: &mut Session, hash: StyleHash) -> Result<Self, LiveFail> {
-        let sha: [u8; 32] = Sha256::digest(base.bytes).into();
-        if base.expected_sha256.is_some_and(|want| want != sha) {
-            return Err(LiveFail::BaseMismatch);
-        }
-        let (wb, warnings) = gridcraft_engine::io::open_bytes(base.name, base.bytes).map_err(|e| LiveFail::Open(e.to_string()))?;
-        if !warnings.is_empty() {
-            log::info!("gridcraft-live: opening the base gave {} warnings", warnings.len());
-        }
-        let seed = GridSeed { base_sha256: sha, sheets: u32::try_from(wb.sheets.len()).unwrap_or(u32::MAX) };
+        let (wb, seed) = crate::seed::open_base(base)?;
         let (hub, joins) = Tracked::new(hub);
         let core = LiveEditing::<Tracked<H>, Grid>::start(hub, room, &seed, access).map_err(LiveFail::Live)?;
         let title = std::path::Path::new(base.name).file_name().map_or_else(|| base.name.to_owned(), |n| n.to_string_lossy().into_owned());
-        session.add_document(DocState::new(wb, None, title, Trust::FromFile));
-        let (doc, wb) = session.active().map(|d| (d.uid, d.wb.clone())).ok_or(LiveFail::Open("no workbook".into()))?;
-        let replica = GridDoc::seeded(&seed).map_err(LiveFail::Live)?;
-        let vol = LiveVolatile::new(&replica, &wb);
-        let layout = Layout::from_doc(&replica, &wb);
-        let layout_rev = vol.update_layout(layout.clone());
-        let map = Mapping::new(doc, wb, layout, layout_rev, uid, hash, vol);
+        let map = crate::seed::seat(session, wb, &seed, title, uid, hash)?;
+        let doc = map.doc;
         let observed = Arc::new(std::sync::atomic::AtomicU64::new(doc));
         let mut live = GridLive {
             core,
@@ -415,6 +412,9 @@ impl<H: Hub> GridLive<H> {
                 if self.deferred.take().is_some() {
                     // It never ran: nothing was changed or shared.
                     self.map.notices.push(LOCK_LOST_UNRUN_TEXT.to_owned());
+                } else if matches!(self.core.status(), LiveStatus::Broken(_)) {
+                    // The replica broke: the edit will never be ordered, and nothing resends it.
+                    self.map.notices.push(LOCK_LOST_BROKEN_TEXT.to_owned());
                 } else {
                     // It ran and was shared without the lock. Until the relay refuses such an edit
                     // (the fencing follow-up), the link resends it, so the engine and the room
@@ -508,6 +508,14 @@ impl<H: Hub> GridLive<H> {
         let mut app = GridApp { session, map: &mut self.map };
         LiveApp::reset(&mut app, space);
         LiveApp::resync(&mut app, &doc)
+    }
+
+    /// How many times an ordered change made the engine rebuild from the document instead of
+    /// applying the ops (for tests: it should stay 0).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn ordered_rebuilds(&self) -> u32 {
+        self.map.rebuilds
     }
 
     /// How many op-log entries the engine has applied (equal to the log's length when it is

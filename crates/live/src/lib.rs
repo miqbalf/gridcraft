@@ -24,6 +24,7 @@ pub mod ordered;
 mod remote;
 pub mod reprint;
 pub mod schema;
+mod seed;
 pub mod session;
 pub mod split;
 pub mod styles;
@@ -42,7 +43,7 @@ pub use ops::{LINES_MAX, TOO_MANY_TEXT};
 pub use ordered::Tracked;
 pub use session::{BaseFile, GridLive, LiveFail, Peer, Ran, schema, volatile_for, workbook_from_state};
 pub use volatile::LiveVolatile;
-pub use worker::GridWorkerLive;
+pub use worker::{GridWorkerLive, SERVICE_RESYNC_TEXT};
 
 /// Rows, for callers that name an axis without importing the formula crate.
 #[must_use]

@@ -354,12 +354,21 @@ fn the_largest_insert_and_delete_stay_under_the_cap() {
     }
 }
 
+/// A 40,000-line delete is 1.2 MB in one update, over the relay's cap.
+const _: () = assert!(LINES_MAX < 40_000);
+
 #[test]
 fn more_lines_than_the_cap_are_refused_and_nothing_changes() {
     let mut room = Room::new(2);
     let before = room.finger(0);
+    // 40,000 lines is what once went out in one update over the relay's cap: it stays refused.
     let over = LINES_MAX + 1;
-    for (id, p) in [("home.insertRows", json!({"rows": format!("1:{over}")})), ("home.deleteRows", json!({"rows": format!("1:{over}")}))] {
+    for (id, p) in [
+        ("home.insertRows", json!({"rows": format!("1:{over}")})),
+        ("home.deleteRows", json!({"rows": format!("1:{over}")})),
+        ("home.insertRows", json!({"rows": "1:40000"})),
+        ("home.deleteRows", json!({"rows": "1:40000"})),
+    ] {
         let told = match room.run(0, id, p) {
             Err(e) => e,
             Ok(_) => {
@@ -373,6 +382,7 @@ fn more_lines_than_the_cap_are_refused_and_nothing_changes() {
     assert_eq!(room.finger(0), before);
     assert_eq!(room.finger(1), before);
     assert_eq!(room.peers[0].live.replica().unwrap().ops_len(), 0);
+    assert!(room.peers[0].sizes.borrow().is_empty(), "nothing was sent");
 }
 
 /// Drives peer `i` until its ordered edit has run and gone out, but before the relay's answer
@@ -488,4 +498,62 @@ fn a_refused_ordered_edit_leaves_the_layout_the_engine_and_the_lock_as_before() 
     room.run(1, "home.deleteRows", json!({"rows": "3:3"})).unwrap();
     room.settle();
     same_everywhere(&room, "an edit after the refusal");
+}
+
+/// A far insert after earlier structure edits: the fill-only updates must not make receivers
+/// rebuild the engine.
+fn far_insert_after(earlier: &[(&str, Json)], what: &str) {
+    let mut room = Room::new(3);
+    for (id, p) in earlier {
+        room.run(0, id, p.clone()).unwrap();
+        room.settle();
+    }
+    let from = room.peers[0].sizes.borrow().len();
+    room.run(1, "home.insertRows", json!({"rows": "150000:150000"})).unwrap();
+    room.settle();
+    assert!(sent_since(&room, 1, from).len() > 1, "{what}: the fill went in parts");
+    assert_under_cap(&sent_since(&room, 1, from), what);
+    for (i, p) in room.peers.iter().enumerate() {
+        assert_eq!(p.live.ordered_rebuilds(), 0, "{what}: peer {i} rebuilt the engine");
+    }
+    let mut cmds: Vec<(&str, Json)> = earlier.to_vec();
+    cmds.push(("home.insertRows", json!({"rows": "150000:150000"})));
+    let want = reference(&room.bytes, &cmds);
+    for i in 0..3 {
+        assert_eq!(room.finger(i), want, "{what}: peer {i}");
+    }
+    same_everywhere(&room, what);
+}
+
+#[test]
+fn a_far_insert_after_an_earlier_insert_makes_no_receiver_rebuild() {
+    far_insert_after(&[("home.insertRows", json!({"rows": "3:3"}))], "prior insert");
+}
+
+#[test]
+fn a_far_insert_after_a_delete_in_the_filled_range_makes_no_receiver_rebuild() {
+    far_insert_after(&[("home.deleteRows", json!({"rows": "3:3"}))], "prior delete");
+}
+
+#[test]
+fn a_far_insert_after_an_insert_and_a_delete_makes_no_receiver_rebuild() {
+    far_insert_after(
+        &[("home.insertRows", json!({"rows": "2:2"})), ("home.deleteRows", json!({"rows": "6:7"})), ("home.insertRows", json!({"rows": "1:1"}))],
+        "prior insert and delete",
+    );
+}
+
+#[test]
+fn a_broken_link_after_the_edit_ran_does_not_claim_it_will_be_sent_again() {
+    let mut room = Room::new(2);
+    room.run(0, "home.insertRows", json!({"rows": "3:3"})).unwrap();
+    until_ran(&mut room, 0);
+    room.peers[0].live.core_mut().end("The service stopped.");
+    for _ in 0..4 {
+        room.pump(0);
+    }
+    let notices = room.notices_of(0);
+    let told = notices.iter().any(|n| n.contains("link to the room broke") && n.contains("may not have reached"));
+    assert!(told, "{notices:?}");
+    assert!(!notices.iter().any(|n| n.contains("sent again")), "{notices:?}");
 }

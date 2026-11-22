@@ -183,6 +183,7 @@ fn live_worker_cmd(args: &[String]) -> Result<(), String> {
         worker_secret.as_deref(),
     )?
     .with_max_rooms(std::env::var("CRAFT_WORKER_MAX_ROOMS").ok().as_deref())?;
+    live_worker::install_log();
     craft_live_worker::serve(cfg, live_worker::GridService)
 }
 
