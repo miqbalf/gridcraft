@@ -114,6 +114,8 @@ pub struct GridLive<H: Hub> {
     frames: u64,
     /// The unlock for a broken replica was sent.
     broken_sent: bool,
+    /// The room this session joined, to leave it by name.
+    room: String,
 }
 
 const NOT_ACTIVE: &str = "The live workbook is not open any more";
@@ -221,6 +223,7 @@ impl<H: Hub> GridLive<H> {
             started: None,
             frames: 0,
             broken_sent: false,
+            room: room.to_owned(),
         };
         if let Err(e) = live.bind(session) {
             // Do not leave the document open in the host's session.
@@ -610,6 +613,12 @@ impl<H: Hub> GridLive<H> {
         let (sheet, r, c) = self.map.editor?;
         let i = self.map.layout.sheet_index(sheet)?;
         Some((i, self.map.layout.cell_at(i, r, c)?))
+    }
+
+    /// The room this session joined.
+    #[must_use]
+    pub fn room(&self) -> &str {
+        &self.room
     }
 
     /// The engine document (`DocState::uid`) this session edits.

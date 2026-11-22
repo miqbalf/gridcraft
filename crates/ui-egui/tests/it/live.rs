@@ -61,7 +61,31 @@ impl Bob {
     }
 }
 
+/// Alice's hub, noting the rooms she told the relay she left.
+struct Spy {
+    inner: craft_live::testing::MemHub,
+    left: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl Hub for Spy {
+    fn send(&mut self, msg: ClientMsg) -> craft_collab::Result<()> {
+        if let ClientMsg::Leave { doc } = &msg {
+            self.left.lock().expect("lock").push(doc.clone());
+        }
+        self.inner.send(msg)
+    }
+
+    fn poll(&mut self) -> Vec<craft_collab::ServerMsg> {
+        self.inner.poll()
+    }
+
+    fn connected(&self) -> bool {
+        self.inner.connected()
+    }
+}
+
 struct Rig {
+    left: Arc<std::sync::Mutex<Vec<String>>>,
     relay: MemRelay,
     bytes: Vec<u8>,
     bob: Bob,
@@ -90,9 +114,11 @@ fn rig(alice_access: Access) -> (Rig, SheetApp) {
     let hub = relay.connect("alice", "Alice", alice_access == Access::Edit);
     let mut session = Session::new();
     let base = BaseFile { bytes: &bytes, name: FILE, expected_sha256: None };
+    let left = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let hub = Spy { inner: hub, left: Arc::clone(&left) };
     let live = GridLive::start(DynHub(Box::new(hub)), ROOM, &base, alice_access, "alice", &mut session).expect("starts");
     let app = crate::common::prepare(SheetApp::new(session, Services { live: Some(live), ..Default::default() }));
-    (Rig { relay, bytes, bob }, app)
+    (Rig { left, relay, bytes, bob }, app)
 }
 
 type Harness = crate::common::Harness;
@@ -415,7 +441,7 @@ fn a_session_attached_after_construction_edits_live() {
     };
     assert!(app.attach_live(second).is_err(), "a second session is refused");
     let mut h = harness(app);
-    let mut rig = Rig { relay, bytes, bob };
+    let mut rig = Rig { left: Arc::default(), relay, bytes, bob };
     settle(&mut rig, &mut h);
     h.state_mut().run("cell.set", json!({"cell": "B2", "input": "5"})).expect("runs through the session");
     settle(&mut rig, &mut h);
@@ -523,4 +549,67 @@ fn a_session_started_on_another_engine_session_is_refused() {
     let app = crate::common::prepare(SheetApp::new(own, Services { live: Some(live), ..Default::default() }));
     assert!(app.live().is_none());
     assert!(app.message.as_ref().is_some_and(|(_, m)| m.contains("not started")), "{:?}", app.message);
+}
+
+/// Hovers the control and returns whether the refusal reason shows as its tooltip.
+fn hover_shows_reason(h: &mut Harness, label: &str) -> bool {
+    h.get_by_label(label).hover();
+    for _ in 0..6 {
+        h.step();
+    }
+    h.query_by_label_contains(gridcraft_live::NOT_YET_TEXT).is_some()
+}
+
+#[test]
+fn a_refused_split_button_and_gallery_are_greyed_with_the_reason() {
+    let (mut rig, app) = rig(Access::Edit);
+    let mut h = harness(app);
+    settle(&mut rig, &mut h);
+    // The main part of the Merge & Center split button, gated by its command id.
+    assert!(h.state().live_gates("home.mergeCenter"), "the gate refuses it");
+    let merge = h.get_all_by_label("Merge & Center").next().expect("the control exists");
+    assert!(merge.accesskit_node().is_disabled(), "the split button is greyed");
+    assert!(hover_shows_reason(&mut h, "Merge & Center"), "its reason shows on hover");
+    // A gallery whose items carry no command of their own.
+    h.state_mut().ui.ribbon_tab = "Insert".into();
+    settle(&mut rig, &mut h);
+    assert!(h.state().live_gates("insert.shape"));
+    assert!(h.get_by_label("Shapes").accesskit_node().is_disabled(), "the Shapes gallery is greyed");
+    assert!(hover_shows_reason(&mut h, "Shapes"), "its reason shows on hover");
+    // A control the session shares stays enabled.
+    h.state_mut().ui.ribbon_tab = "Home".into();
+    settle(&mut rig, &mut h);
+    assert!(!h.get_by_label("Paste").accesskit_node().is_disabled());
+}
+
+#[test]
+fn the_notice_queue_is_capped_and_its_count_stays_true() {
+    let (mut rig, app) = rig(Access::Edit);
+    let mut h = harness(app);
+    settle(&mut rig, &mut h);
+    let live = h.state_mut().live_mut().expect("live").live_mut();
+    for i in 1..=30 {
+        live.core_mut().push_notice(format!("Note number {i}."));
+    }
+    settle(&mut rig, &mut h);
+    // 20 are kept, the oldest 10 went; one is on show and 19 wait.
+    let shown = notice_text(h.state());
+    assert!(shown.contains("Note number 11."), "{shown:?}");
+    assert!(shown.contains("+19 more"), "{shown:?}");
+    // Dismissing shows the next, and the count goes down with it.
+    h.state_mut().notice = None;
+    settle(&mut rig, &mut h);
+    let shown = notice_text(h.state());
+    assert!(shown.contains("Note number 12.") && shown.contains("+18 more"), "{shown:?}");
+}
+
+#[test]
+fn ending_live_editing_leaves_the_room_by_name() {
+    let (mut rig, app) = rig(Access::Edit);
+    let mut h = harness(app);
+    settle(&mut rig, &mut h);
+    assert!(rig.left.lock().expect("lock").is_empty(), "still in the room");
+    h.state_mut().run("file.close", json!({"force": true})).expect("closes");
+    settle(&mut rig, &mut h);
+    assert_eq!(*rig.left.lock().expect("lock"), vec![ROOM.to_owned()], "Alice told the relay she left, once");
 }

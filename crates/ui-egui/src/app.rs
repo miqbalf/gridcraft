@@ -29,7 +29,7 @@ impl SheetApp {
     /// Constructs a `SheetApp` with default UI, grid, printing, control and screenshot state and the caller's session and services.
     pub fn new(session: Session, mut services: Services) -> SheetApp {
         let mut live_refused = None;
-        let live = services.live.take().and_then(|live| match live::check_attached(&session, &live) {
+        let live = services.live.take().and_then(|live| match live::check_attached(&session, &live, i18n::Language::default()) {
             Ok(()) => Some(live::LiveUi::new(live)),
             Err(why) => {
                 live_refused = Some(why);
@@ -45,7 +45,7 @@ impl SheetApp {
             text_box_editor: None,
             dialog: None,
             backstage: None,
-            message: live_refused.map(|why| ("GridCraft".into(), format!("Live editing was not started. {why}"))),
+            message: live_refused.map(|why| ("GridCraft".into(), i18n::Language::default().tr_fill(live::NOT_STARTED_TEXT, &[("why", &why)]))),
             toast: None,
             notice: None,
             services,
