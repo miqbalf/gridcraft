@@ -11,6 +11,8 @@ mod junk;
 #[cfg(feature = "test-util")]
 mod ordered;
 #[cfg(feature = "test-util")]
+mod presence;
+#[cfg(feature = "test-util")]
 mod support;
 #[cfg(feature = "test-util")]
 mod undo;

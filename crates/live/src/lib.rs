@@ -21,6 +21,7 @@ mod local;
 pub mod op;
 mod ops;
 pub mod ordered;
+pub mod presence;
 mod remote;
 pub mod reprint;
 pub mod schema;
