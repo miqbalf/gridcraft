@@ -298,7 +298,8 @@ impl GridDoc {
     }
 
     fn drain_seen(&self) -> Vec<Seen> {
-        self.seen.lock().map(|mut s| std::mem::take(&mut *s)).unwrap_or_default()
+        // A poisoned lock still holds what the observers saw: take it, never drop it.
+        std::mem::take(&mut *self.seen.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
     }
 
     /// The room's metadata. Missing or unreadable fields read as empty or zero.
@@ -450,6 +451,15 @@ impl GridDoc {
             }
         }
         keys.into_iter().collect()
+    }
+
+    /// Every key written in the sheet's `"rinfo"` or `"cinfo"` (`"<id>/<p>"`), sorted, each once.
+    #[must_use]
+    pub fn written_lines(&self, sheet: Id, axis: AxisKind) -> Vec<String> {
+        let txn = self.y.doc().transact();
+        let mut keys: Vec<String> = self.roots.part_map(&txn, sheet, info_part(axis)).map(|m| m.keys(&txn).map(str::to_owned).collect()).unwrap_or_default();
+        keys.sort();
+        keys
     }
 
     /// Run `f` as one local transaction and return its update. Never in yrs undo (Ruling R3).
@@ -795,9 +805,7 @@ impl GridTxn<'_> {
 }
 
 fn push_seen(sink: &Mutex<Vec<Seen>>, found: Vec<Seen>) {
-    if let Ok(mut seen) = sink.lock() {
-        seen.extend(found);
-    }
+    sink.lock().unwrap_or_else(std::sync::PoisonError::into_inner).extend(found);
 }
 
 /// The keys a map event changed (none for other events).
