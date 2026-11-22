@@ -88,6 +88,13 @@ pub(crate) struct Observed {
 
 impl crate::DocState {
     /// Notes that the running command put an older workbook back.
+    /// Takes back the structural edits logged after the first `len` (when a length is given).
+    pub(crate) fn observe_truncate(&mut self, len: Option<usize>) {
+        if let (Some(o), Some(len)) = (self.observed.as_mut(), len) {
+            o.edits.truncate(len);
+        }
+    }
+
     pub(crate) fn note_restore(&mut self) {
         if let Some(o) = self.observed.as_mut() {
             o.restored = true;
@@ -105,6 +112,12 @@ impl Session {
                 d.observed = None;
             }
         }
+    }
+
+    /// How many structural edits the observed command on `doc` has logged so far.
+    pub(crate) fn observed_len(&self, doc: Option<u64>) -> Option<usize> {
+        let d = self.docs.iter().find(|d| Some(d.uid) == doc)?;
+        d.observed.as_ref().map(|o| o.edits.len())
     }
 
     pub(crate) fn observing(&self) -> bool {
