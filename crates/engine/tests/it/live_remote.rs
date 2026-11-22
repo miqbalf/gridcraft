@@ -271,3 +271,37 @@ fn bad_remote_styles_and_sizes_are_refused() {
     assert!(s.apply_remote(uid, |cx| cx.set_default_size(0, Axis::Cols, Some(0.0))).is_err());
     assert!(Arc::ptr_eq(&wb, &s.documents()[0].wb));
 }
+
+#[test]
+fn a_quiet_replace_during_an_open_group_is_refused_then_applies() {
+    let (mut s, uid) = open();
+    let token = s.group_begin("action").unwrap();
+    let wb = s.documents()[0].wb.clone();
+    let r = s.replace_workbook_quiet(uid, wb.clone());
+    assert!(matches!(r, Err(EngineError::RemoteBusy)), "{r:?}");
+    assert!(Arc::ptr_eq(&wb, &s.documents()[0].wb));
+    s.group_end(token).unwrap();
+    s.replace_workbook_quiet(uid, wb).unwrap();
+}
+
+#[test]
+fn a_hook_can_be_bound_to_a_named_document_and_ends_with_it() {
+    let (mut s, first) = open();
+    s.execute("file.new", json!({})).unwrap();
+    let second = s.active().unwrap().uid;
+    assert_ne!(first, second);
+    assert!(s.set_live_undo_hook_for(second + 1000, Some(Box::new(|_| true))).is_err());
+    assert_eq!(s.live_undo_doc(), None, "a refused call binds nothing");
+    // Bound to the first document while the second is active: the active one keeps snapshot undo.
+    s.set_live_undo_hook_for(first, Some(Box::new(|_| true))).unwrap();
+    assert_eq!(s.live_undo_doc(), Some(first));
+    s.execute("cell.set", json!({"cell": "A1", "input": "3"})).unwrap();
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.active().unwrap().wb.sheet(0).unwrap().input_text(at("A1")), "");
+    // Closing another document keeps the binding; closing the bound one drops it.
+    s.close_document(1);
+    assert_eq!(s.live_undo_doc(), Some(first));
+    s.close_document(0);
+    assert_eq!(s.live_undo_doc(), None);
+    assert!(!s.live_undo_failed());
+}

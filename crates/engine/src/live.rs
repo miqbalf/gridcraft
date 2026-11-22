@@ -471,7 +471,7 @@ pub(crate) type UndoHook = Box<dyn FnMut(bool) -> bool + Send>;
 /// once it panicked: undo and redo of that document then do nothing (snapshot undo would take
 /// other peers' cells back) until a hook is set again.
 pub(crate) struct LiveUndo {
-    doc: u64,
+    pub(crate) doc: u64,
     hook: Option<UndoHook>,
 }
 
@@ -606,7 +606,13 @@ impl Session {
 
     /// Puts `wb` in place of the document's workbook without an undo step or an observer call, and
     /// recalculates everything. The selection stays where it can.
+    ///
+    /// Refuses with [`EngineError::RemoteBusy`] while an undo group is open on `doc`, like
+    /// [`Session::apply_remote`]: the group's rollback would put the old workbook back.
     pub fn replace_workbook_quiet(&mut self, doc: u64, wb: Arc<Workbook>) -> Result<()> {
+        if self.in_group(doc) {
+            return Err(EngineError::RemoteBusy);
+        }
         let Some(d) = self.docs.iter_mut().find(|d| d.uid == doc) else { return Err(EngineError::NoDocument) };
         if wb.sheets.is_empty() {
             return refuse("a workbook needs at least one sheet");
@@ -641,6 +647,21 @@ impl Session {
     pub fn set_live_undo_hook(&mut self, hook: Option<Box<dyn FnMut(bool) -> bool + Send>>) {
         let doc = self.active().map_or(0, |d| d.uid);
         self.live_undo = hook.map(|h| LiveUndo { doc, hook: Some(h) });
+    }
+
+    /// [`Session::set_live_undo_hook`] bound to document `doc` instead of the active one. Refuses
+    /// an unknown document (`NoDocument`); `None` removes the hook.
+    pub fn set_live_undo_hook_for(&mut self, doc: u64, hook: Option<Box<dyn FnMut(bool) -> bool + Send>>) -> Result<()> {
+        if !self.docs.iter().any(|d| d.uid == doc) {
+            return Err(EngineError::NoDocument);
+        }
+        self.live_undo = hook.map(|h| LiveUndo { doc, hook: Some(h) });
+        Ok(())
+    }
+
+    /// The document the live undo hook is bound to (also after the hook panicked).
+    pub fn live_undo_doc(&self) -> Option<u64> {
+        self.live_undo.as_ref().map(|l| l.doc)
     }
 
     /// Whether the live undo hook panicked and was dropped.
