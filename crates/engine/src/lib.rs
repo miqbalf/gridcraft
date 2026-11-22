@@ -66,6 +66,10 @@ pub enum EngineError {
     /// Active content (a macro) asks to run; run it again with `approve: true` to allow it.
     #[error("approve: {0} (run again with `approve: true`)")]
     Approve(String),
+    /// A remote change arrived while an undo group was open on the document: the group's rollback
+    /// would take it back. Buffer it and apply it after the group ends.
+    #[error("an action is running on this workbook: apply the remote change after it ends")]
+    RemoteBusy,
     #[error("internal error in `{0}` (the workbook was kept as it was): {1}")]
     Internal(String, String),
 }
@@ -580,7 +584,7 @@ pub struct Session {
     observe_epoch: u64,
     /// Takes over `edit.undo` and `edit.redo` while set (H3): the argument is whether it is a redo,
     /// the answer whether anything was undone or redone.
-    live_undo: Option<live::UndoHook>,
+    live_undo: Option<live::LiveUndo>,
 }
 
 impl Session {

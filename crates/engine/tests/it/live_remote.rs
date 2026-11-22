@@ -161,7 +161,9 @@ fn remote_lines_and_sizes_apply_and_the_rest_is_quiet() {
     s.replace_workbook_quiet(uid, wb.clone()).unwrap();
     assert_eq!(*tap.0.lock().unwrap(), 0);
     assert_eq!(s.documents()[0].wb.sheet(0).unwrap().cols.get(&2), wb.sheet(0).unwrap().cols.get(&2));
-    assert!(s.replace_workbook_quiet(uid, Arc::new(Default::default())).is_err() || !s.documents()[0].wb.sheets.is_empty());
+    let mut empty = (*wb).clone();
+    empty.sheets.clear();
+    assert!(s.replace_workbook_quiet(uid, Arc::new(empty)).is_err());
 }
 
 #[test]
@@ -173,4 +175,99 @@ fn quiet_selection_is_clamped_and_never_empty() {
     assert!(sel.active.is_valid());
     assert!(!sel.ranges.is_empty() && sel.ranges.iter().all(|r| r.start.is_valid() && r.end.is_valid()));
     assert!(s.set_selection_quiet(uid + 1000, Selection::default()).is_err());
+}
+
+#[test]
+fn remote_apply_during_an_open_group_is_refused_then_applies() {
+    let (mut s, uid) = open();
+    let token = s.group_begin("action").unwrap();
+    let wb = s.documents()[0].wb.clone();
+    let r = s.apply_remote(uid, |cx| cx.set_cell(0, at("B2"), Some(number(5.0))));
+    assert!(matches!(r, Err(EngineError::RemoteBusy)), "{r:?}");
+    assert!(Arc::ptr_eq(&wb, &s.documents()[0].wb));
+    s.group_end(token).unwrap();
+    s.apply_remote(uid, |cx| cx.set_cell(0, at("B2"), Some(number(5.0)))).unwrap();
+    assert_eq!(text(&s, "B2"), "5");
+}
+
+#[test]
+fn the_live_hook_serves_only_its_own_document() {
+    let (mut s, _) = open();
+    let calls = Arc::new(Mutex::new(0usize));
+    let tap = calls.clone();
+    s.set_live_undo_hook(Some(Box::new(move |_| {
+        if let Ok(mut n) = tap.lock() {
+            *n += 1;
+        }
+        true
+    })));
+    s.execute("file.new", json!({})).unwrap();
+    s.execute("cell.set", json!({"cell": "A1", "input": "9"})).unwrap();
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(*calls.lock().unwrap(), 0, "the second workbook uses snapshot undo");
+    let second = s.active().unwrap().wb.sheet(0).unwrap().input_text(at("A1"));
+    assert_eq!(second, "");
+    s.set_active(0);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(*calls.lock().unwrap(), 1);
+}
+
+#[test]
+fn a_panicking_hook_turns_undo_off_instead_of_falling_back() {
+    let (mut s, uid) = open();
+    s.execute("cell.set", json!({"cell": "A1", "input": "1"})).unwrap();
+    s.set_live_undo_hook(Some(Box::new(|_| panic!("hook failed"))));
+    assert!(!s.live_undo_failed());
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(s.live_undo_failed());
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(text(&s, "A1"), "1", "no snapshot undo while live");
+    assert_eq!(s.documents()[0].undo.len(), 1);
+    s.apply_remote(uid, |_| Ok(())).unwrap();
+    s.set_live_undo_hook(None);
+    assert!(!s.live_undo_failed());
+}
+
+#[test]
+fn a_hook_answering_false_reports_nothing_undone() {
+    let (mut s, _) = open();
+    s.set_live_undo_hook(Some(Box::new(|_| false)));
+    let r = s.execute("edit.undo", json!({})).unwrap();
+    assert!(r["undone"].is_null());
+    let r = s.execute("edit.redo", json!({})).unwrap();
+    assert!(r["redone"].is_null());
+}
+
+#[test]
+fn a_remote_formula_follows_its_local_precedent() {
+    let (mut s, uid) = open();
+    let formula = {
+        let mut other = Session::new();
+        other.execute("file.new", json!({})).unwrap();
+        other.execute("cell.set", json!({"cell": "C1", "input": "=A1*2"})).unwrap();
+        other.documents()[0].wb.sheet(0).unwrap().cell(at("C1")).cloned().unwrap()
+    };
+    s.apply_remote(uid, |cx| cx.set_cell(0, at("C1"), Some(formula))).unwrap();
+    s.execute("cell.set", json!({"cell": "A1", "input": "4"})).unwrap();
+    // The same edits made locally give the same result.
+    let (mut l, _) = open();
+    l.execute("cell.set", json!({"cell": "C1", "input": "=A1*2"})).unwrap();
+    l.execute("cell.set", json!({"cell": "A1", "input": "4"})).unwrap();
+    let v = |s: &Session| s.documents()[0].wb.sheet(0).unwrap().cell(at("C1")).map(|c| c.value.clone());
+    assert_eq!(v(&s), v(&l));
+}
+
+#[test]
+fn bad_remote_styles_and_sizes_are_refused() {
+    let (mut s, uid) = open();
+    let wb = s.documents()[0].wb.clone();
+    let bad_style = Cell { style: gridcraft_engine::model::StyleId(u32::MAX), ..number(1.0) };
+    assert!(s.apply_remote(uid, |cx| cx.set_cell(0, at("A1"), Some(bad_style))).is_err());
+    let info = |size, style| LineInfo { size, style, ..LineInfo::default() };
+    let missing = Some(gridcraft_engine::model::StyleId(u32::MAX));
+    assert!(s.apply_remote(uid, |cx| cx.set_line(0, Axis::Rows, 0, Some(info(None, missing)))).is_err());
+    assert!(s.apply_remote(uid, |cx| cx.set_line(0, Axis::Rows, 0, Some(info(Some(f32::NAN), None)))).is_err());
+    assert!(s.apply_remote(uid, |cx| cx.set_line(0, Axis::Rows, 0, Some(info(Some(-1.0), None)))).is_err());
+    assert!(s.apply_remote(uid, |cx| cx.set_default_size(0, Axis::Cols, Some(0.0))).is_err());
+    assert!(Arc::ptr_eq(&wb, &s.documents()[0].wb));
 }

@@ -467,6 +467,14 @@ fn workbook_diff(b: &Workbook, a: &Workbook, u: &mut Vec<Unshared>) {
 /// anything.
 pub(crate) type UndoHook = Box<dyn FnMut(bool) -> bool + Send>;
 
+/// The live undo hook, bound to the document that was active when it was set. `hook` is `None`
+/// once it panicked: undo and redo of that document then do nothing (snapshot undo would take
+/// other peers' cells back) until a hook is set again.
+pub(crate) struct LiveUndo {
+    doc: u64,
+    hook: Option<UndoHook>,
+}
+
 fn refuse<T>(msg: impl Into<String>) -> Result<T> {
     Err(EngineError::Other(msg.into()))
 }
@@ -570,10 +578,17 @@ impl RemoteCtx<'_> {
 }
 
 impl Session {
-    /// Applies changes from other peers to document `doc`. No undo step, no journal entry, no
+    /// Applies changes from other peers to document `doc`. Callers apply one call per received
+    /// update or batch (each call copies the workbook and recalculates). While an undo group is
+    /// open on `doc` ([`Session::in_group`]) this refuses with [`EngineError::RemoteBusy`], because
+    /// the group's rollback would take the change back: buffer the update and retry after the
+    /// group ends. No undo step, no journal entry, no
     /// observer call; the changed cells are recalculated (everything after lines), and the
     /// selection stays. An `Err` leaves the workbook exactly as it was.
     pub fn apply_remote<R>(&mut self, doc: u64, f: impl FnOnce(&mut RemoteCtx) -> Result<R>) -> Result<R> {
+        if self.in_group(doc) {
+            return Err(EngineError::RemoteBusy);
+        }
         let Some(d) = self.docs.iter_mut().find(|d| d.uid == doc) else { return Err(EngineError::NoDocument) };
         let mut cx = RemoteCtx { wb: (*d.wb).clone(), changed: Vec::new(), recalc_all: false, _session: std::marker::PhantomData };
         let r = f(&mut cx)?;
@@ -618,29 +633,39 @@ impl Session {
         Ok(())
     }
 
-    /// Installs (or removes) the live undo hook (H3). While set, `edit.undo` and `edit.redo` call
-    /// it instead of the snapshot history, which stays as it is.
+    /// Installs (or removes) the live undo hook (H3), bound to the document that is active now.
+    /// While set, `edit.undo` and `edit.redo` on that document call it instead of the snapshot
+    /// history, which stays as it is; other documents keep their own undo. If the hook panics
+    /// (native builds; on wasm a panic aborts), undo and redo of the document do nothing until a
+    /// hook is set again, see [`Session::live_undo_failed`].
     pub fn set_live_undo_hook(&mut self, hook: Option<Box<dyn FnMut(bool) -> bool + Send>>) {
-        self.live_undo = hook;
+        let doc = self.active().map_or(0, |d| d.uid);
+        self.live_undo = hook.map(|h| LiveUndo { doc, hook: Some(h) });
     }
 
+    /// Whether the live undo hook panicked and was dropped.
+    pub fn live_undo_failed(&self) -> bool {
+        self.live_undo.as_ref().is_some_and(|l| l.hook.is_none())
+    }
+
+    /// Whether the active document's undo belongs to the live hook.
     pub(crate) fn has_live_undo(&self) -> bool {
-        self.live_undo.is_some()
+        self.live_undo.as_ref().is_some_and(|l| self.active().is_some_and(|d| d.uid == l.doc))
     }
 
-    /// Runs the hook; `None` when there is none. A panicking hook is dropped.
+    /// Runs the hook for the active document; `None` when its undo is not live.
     pub(crate) fn live_undo(&mut self, redo: bool) -> Option<bool> {
-        let mut hook = self.live_undo.take()?;
+        if !self.has_live_undo() {
+            return None;
+        }
+        let live = self.live_undo.as_mut()?;
+        let Some(hook) = live.hook.as_mut() else { return Some(false) };
         let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook(redo)));
         match done {
-            Ok(done) => {
-                if self.live_undo.is_none() {
-                    self.live_undo = Some(hook);
-                }
-                Some(done)
-            }
+            Ok(done) => Some(done),
             Err(_) => {
-                log::error!("the live undo hook panicked and was removed");
+                live.hook = None;
+                log::error!("the live undo hook panicked: undo and redo are off until a hook is set again");
                 Some(false)
             }
         }
