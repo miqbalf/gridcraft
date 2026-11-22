@@ -5,7 +5,7 @@
 //! and the op log ([`Op`]); [`GridLive`] is the session wrapper on top of `craft-live`: it maps the
 //! engine's edit reports onto free writes (cells, formats, sizes, hidden flags), applies the other
 //! editors' changes in one batch per update, and gates the commands ([`gate`]). Ordered edits
-//! (rows and columns) are G9, per-user undo is G11.
+//! (rows and columns) go through the structure lock; per-user undo and redo is [`undo`].
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
@@ -27,6 +27,7 @@ pub mod schema;
 pub mod session;
 pub mod split;
 pub mod styles;
+pub mod undo;
 pub mod volatile;
 
 pub use app::SentCommand;

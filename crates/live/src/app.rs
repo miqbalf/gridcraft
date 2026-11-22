@@ -21,10 +21,9 @@ use crate::remote::{Ctx, Targets, apply, build};
 use crate::reprint::RefIndex;
 use crate::split::{Plan, Put};
 use crate::styles::StyleHash;
+use crate::undo::{self, KeyWrite, Replay, Root, Step as UndoStep, UndoLog};
 use crate::volatile::LiveVolatile;
 
-/// Told when Undo or Redo is asked for: per-user undo comes with G11.
-pub const UNDO_NOT_YET_TEXT: &str = "Undo and Redo are not available while editing live yet";
 /// Told when a change cannot run now because an undo group is open.
 pub const BUSY_TEXT: &str = "Finish what you are doing, then try that change again.";
 /// The most ranges of a caret kept.
@@ -86,6 +85,16 @@ pub(crate) struct Mapping {
     pub lines_minted: u32,
     /// Entries a delete took away: (their uid, the cell, the value as text, `row` or `column`).
     pub removed: Vec<(String, String, String, &'static str)>,
+    /// This window's own undo and redo steps.
+    pub undo: UndoLog,
+    /// Ordered undos and redos taken off the stacks, for the session to put in the lock's queue.
+    pub replays: Vec<Replay>,
+    /// The ordered undo or redo running now: the command it runs lands on the other stack.
+    pub replay: Option<Replay>,
+    /// Keys each undo left alone, for one notice per undo: (the author's uid if known, where).
+    pub undo_skipped: Vec<Vec<(Option<String>, String)>>,
+    /// Changes a local call wrote that the engine has yet to take (an undo's writes).
+    pub landing: Vec<GridChange>,
 }
 
 /// One command as it went out: its group (shared by all its updates, see
@@ -252,7 +261,8 @@ impl GridApp<'_> {
                     resync |= planner.resync;
                 }
                 GridEdit::Command(_) => {}
-                GridEdit::Undo | GridEdit::Redo => m.notices.push(UNDO_NOT_YET_TEXT.to_owned()),
+                // Taken one by one in `local`, never here.
+                GridEdit::Undo | GridEdit::Redo => {}
                 GridEdit::CalculateNow => calculate = true,
                 GridEdit::Undelete { sheet, axis, ids } => {
                     let Some(i) = layout.sheet_index(*sheet) else { continue };
@@ -315,7 +325,10 @@ impl GridApp<'_> {
             }
         }
         let reserved: usize = steps.iter().map(Step::cost).sum();
+        let mut writes: Vec<KeyWrite> = Vec::new();
         for (n, chunk) in plan.split_reserving(reserved).into_iter().enumerate() {
+            let keys = chunk_keys(&chunk);
+            let befores: Vec<Entry<Value>> = keys.iter().map(|(r, s, k)| undo::read(replica, *r, *s, k)).collect();
             let update = replica
                 .write_grouped(group, |t| {
                     if n == 0 {
@@ -327,6 +340,12 @@ impl GridApp<'_> {
                 })
                 .map_err(|e| LocalError::Failed(e.to_string()))?;
             m.skipped += replica.write_skipped();
+            for ((root, sheet, key), before) in keys.into_iter().zip(befores) {
+                let after = undo::read(replica, root, sheet, &key);
+                if after != before {
+                    writes.push(KeyWrite { root, sheet, key, before, after });
+                }
+            }
             for w in &chunk.cells {
                 match &w.content {
                     crate::split::Put::Set(_) if m.mine.len() < MINE_MAX => {
@@ -350,6 +369,37 @@ impl GridApp<'_> {
                 }
             }
             updates.push(update);
+        }
+        // One command is one undo step, however many updates it took.
+        let replay = m.replay.take();
+        if let Some(Replay { step: UndoStep::Ordered { writes: old, .. }, .. }) = &replay
+            && !old.is_empty()
+        {
+            let r = revert(replica, m, group, old)?;
+            updates.extend(r.updates);
+            writes.extend(r.swapped);
+            if !r.skipped.is_empty() {
+                m.undo_skipped.push(r.skipped);
+            }
+            m.landing.extend(undo::changes_of(&r.keys));
+        }
+        let ops: Vec<Op> = steps.iter().filter_map(|s| if let Step::Op(op) = s { Some(op.clone()) } else { None }).collect();
+        let step = if ops.is_empty() {
+            (!writes.is_empty()).then_some(UndoStep::Free { writes })
+        } else {
+            match undo::ordered_step(&ops, &m.uid, writes) {
+                Ok(s) => s,
+                Err(()) => {
+                    // Not one op that can be taken back: nothing before it can be undone either.
+                    m.undo = UndoLog::default();
+                    None
+                }
+            }
+        };
+        match (step, &replay) {
+            (Some(s), Some(r)) => m.undo.record_replay(s, r.redo),
+            (Some(s), None) => m.undo.record(s),
+            (None, _) => {}
         }
         m.sent.push(SentCommand { group, updates: updates.len() });
         if ordered {
@@ -470,16 +520,225 @@ impl GridApp<'_> {
     }
 }
 
-impl LiveApp<Grid> for GridApp<'_> {
-    fn local(&mut self, replica: &mut GridDoc, edits: &[GridEdit]) -> Result<Vec<Vec<u8>>, LocalError> {
+impl GridApp<'_> {
+    /// A run of edits with no undo or redo among them.
+    fn local_run(&mut self, replica: &mut GridDoc, edits: &[GridEdit]) -> Result<Vec<Vec<u8>>, LocalError> {
         let before = self.map.layout.clone();
         let out = self.local_inner(replica, edits);
         if out.is_err() {
             // Nothing of an ordered edit was kept: the layout and the index go back.
             self.map.set_layout(before);
             self.map.index.clear();
+            self.map.landing.clear();
+            return out;
+        }
+        let landing = std::mem::take(&mut self.map.landing);
+        if !landing.is_empty() {
+            self.apply(replica, &landing).map_err(LocalError::Failed)?;
         }
         out
+    }
+
+    /// One undo (or redo). A free step is written now, as a new edit of this editor's own keys
+    /// only; an ordered one is handed to the session, which runs it through the structure lock.
+    fn undo_one(&mut self, replica: &mut GridDoc, redo: bool) -> Result<Vec<Vec<u8>>, LocalError> {
+        let m = &mut *self.map;
+        let Some(step) = m.undo.take(redo) else { return Ok(Vec::new()) };
+        let writes = match step {
+            UndoStep::Free { writes } => writes,
+            ordered @ UndoStep::Ordered { .. } => {
+                m.replays.push(Replay { redo, step: ordered });
+                return Ok(Vec::new());
+            }
+        };
+        if m.space == 0 {
+            m.undo.put_back(UndoStep::Free { writes }, redo);
+            return Err(LocalError::Refused(crate::gate::NOT_YET_TEXT.to_owned()));
+        }
+        m.group += 1;
+        let group = m.group;
+        let r = revert(replica, m, group, &writes)?;
+        if !r.skipped.is_empty() {
+            m.undo_skipped.push(r.skipped);
+        }
+        if !r.swapped.is_empty() {
+            m.undo.record_replay(UndoStep::Free { writes: r.swapped }, redo);
+        }
+        if !r.updates.is_empty() {
+            m.sent.push(SentCommand { group, updates: r.updates.len() });
+        }
+        let changes = undo::changes_of(&r.keys);
+        if !changes.is_empty() {
+            self.apply(replica, &changes).map_err(LocalError::Failed)?;
+        }
+        Ok(r.updates)
+    }
+}
+
+/// What taking a step's writes back did.
+#[derive(Default)]
+struct Reverted {
+    updates: Vec<Vec<u8>>,
+    /// The writes made, as a step the other way.
+    swapped: Vec<KeyWrite>,
+    /// Keys left alone: (the author's uid if known, where).
+    skipped: Vec<(Option<String>, String)>,
+    /// Every key written.
+    keys: Vec<(Root, Id, String)>,
+}
+
+/// Writes each key's `before` back where the key still holds `after`, in updates of `group`
+/// within the relay's cap. A cell put back is signed by this editor and names the content it
+/// replaced, as any other write does.
+fn revert(replica: &mut GridDoc, m: &mut Mapping, group: u64, writes: &[KeyWrite]) -> Result<Reverted, LocalError> {
+    let mut out = Reverted::default();
+    let mut todo: Vec<(&KeyWrite, Entry<Value>, Entry<Value>)> = Vec::new();
+    for w in writes.iter().rev() {
+        let now = undo::read(replica, w.root, w.sheet, &w.key);
+        if now != w.after {
+            let who = match (w.root, &now) {
+                (Root::Cells, Entry::Set(v)) => v.get("u").and_then(Value::as_str).map(str::to_owned),
+                _ => None,
+            };
+            let at = place(&m.layout, w.root, w.sheet, &w.key);
+            match out.skipped.iter_mut().find(|(_, p)| *p == at) {
+                Some(seen) => {
+                    if seen.0.is_none() {
+                        seen.0 = who;
+                    }
+                }
+                None => out.skipped.push((who, at)),
+            }
+            continue;
+        }
+        let target = match (w.root, &w.before) {
+            (Root::Cells, Entry::Set(Value::Object(o))) => {
+                let seen = match &now {
+                    Entry::Set(v) => serde_json::from_value::<CellContent>(v.clone()).map_or_else(|_| "0".to_owned(), |c| c.fingerprint()),
+                    _ => "0".to_owned(),
+                };
+                let mut o = o.clone();
+                o.insert("u".into(), Value::String(m.uid.clone()));
+                o.insert("p".into(), Value::String(seen));
+                Entry::Set(Value::Object(o))
+            }
+            _ => w.before.clone(),
+        };
+        todo.push((w, now, target));
+    }
+    let mut start = 0;
+    while start < todo.len() {
+        let mut used = 0;
+        let mut end = start;
+        while let Some((w, _, _)) = todo.get(end) {
+            let c = undo::cost(w);
+            if end > start && used + c > crate::split::CHUNK_BUDGET_BYTES {
+                break;
+            }
+            used += c;
+            end += 1;
+        }
+        let part = todo.get(start..end).unwrap_or_default();
+        let update = replica
+            .write_grouped(group, |t| {
+                for (w, _, target) in part {
+                    undo::write(t, w.root, w.sheet, &w.key, target);
+                }
+            })
+            .map_err(|e| LocalError::Failed(e.to_string()))?;
+        m.skipped += replica.write_skipped();
+        for (w, now, _) in part {
+            let after = undo::read(replica, w.root, w.sheet, &w.key);
+            if w.root == Root::Cells {
+                let k = (w.sheet, w.key.clone());
+                match replica.cell(w.sheet, &w.key) {
+                    Entry::Set(c) if m.mine.len() < MINE_MAX => {
+                        m.recent.insert(k.clone(), c.clone());
+                        m.mine.insert(k, c);
+                    }
+                    _ => {
+                        m.mine.remove(&k);
+                        m.recent.remove(&k);
+                    }
+                }
+            }
+            out.keys.push((w.root, w.sheet, w.key.clone()));
+            out.swapped.push(KeyWrite { root: w.root, sheet: w.sheet, key: w.key.clone(), before: now.clone(), after });
+        }
+        out.updates.push(update);
+        start = end;
+    }
+    Ok(out)
+}
+
+/// The keys one update writes, where an undo will look for them.
+fn chunk_keys(chunk: &crate::split::Chunk) -> Vec<(Root, Id, String)> {
+    let mut out = Vec::new();
+    for w in &chunk.cells {
+        if !matches!(w.content, Put::Keep) {
+            out.push((Root::Cells, w.sheet, w.key.clone()));
+        }
+        if !matches!(w.fmt, Put::Keep) {
+            out.push((Root::Fmt, w.sheet, w.key.clone()));
+        }
+    }
+    for ((sheet, axis, key), put) in &chunk.lines {
+        if !matches!(put, Put::Keep) {
+            out.push((Root::Line(*axis), *sheet, key.clone()));
+        }
+    }
+    for ((sheet, name), _) in &chunk.props {
+        out.push((Root::Prop, *sheet, (*name).to_owned()));
+    }
+    out
+}
+
+/// A key's name for the user: `B7` for a cell, `row 7` or `column B` for a line.
+fn place(layout: &Layout, root: Root, sheet: Id, key: &str) -> String {
+    let i = layout.sheet_index(sheet);
+    match root {
+        Root::Cells | Root::Fmt => {
+            parse_cell_key(key).and_then(|(r, c)| i.and_then(|i| layout.cell_at(i, r, c))).map_or_else(|| key.to_owned(), |c| c.a1())
+        }
+        Root::Line(axis) => {
+            let pos = key.split_once('/').and_then(|(id, _)| Id::parse(id)).and_then(|id| match layout.sheets.get(i?)?.axis(axis).pos_of(id) {
+                gridcraft_formula::ids::Lookup::At(p) => Some(p),
+                _ => None,
+            });
+            match (axis, pos) {
+                (crate::axis::AxisKind::Rows, Some(p)) => format!("row {}", p + 1),
+                (_, Some(p)) => format!("column {}", CellRef::new(0, p).a1().trim_end_matches(|ch: char| ch.is_ascii_digit())),
+                _ => "a row or column".to_owned(),
+            }
+        }
+        Root::Prop => match key {
+            "defw" => "the default column width".to_owned(),
+            "defh" => "the default row height".to_owned(),
+            _ => "a sheet setting".to_owned(),
+        },
+    }
+}
+
+impl LiveApp<Grid> for GridApp<'_> {
+    fn local(&mut self, replica: &mut GridDoc, edits: &[GridEdit]) -> Result<Vec<Vec<u8>>, LocalError> {
+        // Undo and redo are taken one at a time, after the edits before them are written.
+        let mut out = Vec::new();
+        let mut rest = edits;
+        while !rest.is_empty() {
+            let n = rest.iter().position(|e| matches!(e, GridEdit::Undo | GridEdit::Redo)).unwrap_or(rest.len());
+            let (run, tail) = rest.split_at(n);
+            if !run.is_empty() {
+                out.extend(self.local_run(replica, run)?);
+            }
+            rest = match tail.split_first() {
+                Some((e, tail)) => {
+                    out.extend(self.undo_one(replica, matches!(e, GridEdit::Redo))?);
+                    tail
+                }
+                None => tail,
+            };
+        }
+        Ok(out)
     }
 
     fn landed(&mut self) -> Landed {

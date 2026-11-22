@@ -673,6 +673,25 @@ impl GridTxn<'_> {
         }
     }
 
+    /// Remove a sheet property: the base file's shows again. A part's name is refused as in
+    /// [`set_sheet_prop`](Self::set_sheet_prop).
+    pub fn reset_sheet_prop(&mut self, sheet: Id, name: &str) {
+        if SHEET_PARTS.contains(&name) {
+            self.skipped += 1;
+            log::warn!("gridcraft-live: sheet property {name} names a part of the sheet; not removed");
+            return;
+        }
+        match self.roots.sheet(&self.txn, sheet) {
+            Some(m) => {
+                m.remove(&mut self.txn, name);
+            }
+            None => {
+                self.skipped += 1;
+                log::warn!("gridcraft-live: no sheet {} in the document; a property removal was skipped", sheet.text());
+            }
+        }
+    }
+
     pub fn put_style(&mut self, key: &str, style: Value) {
         self.roots.styles.insert(&mut self.txn, key, to_any(&style));
     }

@@ -49,6 +49,8 @@ pub(crate) struct Pending {
     pub count: u32,
     /// An undelete: the sheet, the axis and the ids to bring back.
     pub undelete: Option<(Id, AxisKind, Vec<Id>)>,
+    /// The undo or redo this edit runs, if it is one.
+    pub undo: Option<crate::undo::Replay>,
 }
 
 fn axis_of(command: &str) -> Option<(AxisKind, bool)> {
@@ -101,7 +103,7 @@ pub(crate) fn request(session: &Session, layout: &Layout, command: &str, params:
             return Err(TOO_MANY_TEXT.to_owned());
         }
         let line = sl.axis(axis).id_at(a).ok_or_else(|| "the change lies outside the worksheet".to_owned())?;
-        return Ok(Pending { command: command.to_owned(), anchors: vec![make(line)], count, undelete: None });
+        return Ok(Pending { command: command.to_owned(), anchors: vec![make(line)], count, undelete: None, undo: None });
     }
     let spans: Vec<(u32, u32)> = match (count_param, spans.first()) {
         (Some(c), Some((a, _))) => vec![(*a, a.saturating_add(c.max(1) - 1))],
@@ -114,7 +116,7 @@ pub(crate) fn request(session: &Session, layout: &Layout, command: &str, params:
         }
         anchors.extend((a..=b).filter_map(|p| sl.axis(axis).id_at(p)).map(make));
     }
-    Ok(Pending { command: command.to_owned(), anchors, count: 0, undelete: None })
+    Ok(Pending { command: command.to_owned(), anchors, count: 0, undelete: None, undo: None })
 }
 
 fn name_of(axis: AxisKind, a: u32, b: u32) -> String {

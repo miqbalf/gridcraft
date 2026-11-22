@@ -196,6 +196,11 @@ impl<H: Hub> GridLive<H> {
             removed: Vec::new(),
             sent: Vec::new(),
             group: 0,
+            undo: crate::undo::UndoLog::default(),
+            replays: Vec::new(),
+            replay: None,
+            undo_skipped: Vec::new(),
+            landing: Vec::new(),
         };
         let observed = Arc::new(std::sync::atomic::AtomicU64::new(doc));
         let mut live = GridLive {
@@ -315,9 +320,58 @@ impl<H: Hub> GridLive<H> {
             let who = self.names.get(&uid).cloned().unwrap_or(uid);
             self.map.notices.push(format!("{who} deleted the {what} where you had typed {value}. Your entry in {cell} was removed."));
         }
+        for skipped in std::mem::take(&mut self.map.undo_skipped) {
+            let named: Vec<(Option<String>, String)> =
+                skipped.into_iter().map(|(uid, at)| (uid.map(|u| self.names.get(&u).cloned().unwrap_or(u)), at)).collect();
+            self.map.notices.push(crate::undo::skipped_text(&named));
+        }
+        self.start_replays();
         for n in std::mem::take(&mut self.map.notices) {
             self.core.push_notice(n);
         }
+    }
+
+    /// Puts the ordered undos and redos the last flush took off the stacks into the lock's queue,
+    /// unless someone else already built on their lines.
+    fn start_replays(&mut self) {
+        for r in std::mem::take(&mut self.map.replays) {
+            if let Some(text) = self.replay_refusal(&r) {
+                self.map.notices.push(text);
+                continue;
+            }
+            let crate::undo::Step::Ordered { inverse, region: (sheet, axis, ids), .. } = &r.step else { continue };
+            let pending = match &**inverse {
+                crate::op::Op::Undelete { .. } => Pending {
+                    command: String::new(),
+                    anchors: Vec::new(),
+                    count: 0,
+                    undelete: Some((*sheet, *axis, ids.clone())),
+                    undo: Some(r.clone()),
+                },
+                _ => Pending {
+                    command: if *axis == AxisKind::Rows { "home.deleteRows" } else { "home.deleteColumns" }.to_owned(),
+                    anchors: ids.iter().map(|line| crate::ordered::Slot { sheet: *sheet, axis: *axis, line: *line }).collect(),
+                    count: 0,
+                    undelete: None,
+                    undo: Some(r.clone()),
+                },
+            };
+            if let Err(text) = self.enqueue(pending) {
+                self.map.undo.put_back(r.step, r.redo);
+                self.map.notices.push(text);
+            }
+        }
+    }
+
+    /// "Alice changed these rows since; not undone" when a later op by someone else touched the
+    /// lines an ordered undo would change.
+    fn replay_refusal(&self, r: &crate::undo::Replay) -> Option<String> {
+        let crate::undo::Step::Ordered { op, region, .. } = &r.step else { return None };
+        let log = self.core.live().doc()?.ops_from(0);
+        let uid = crate::undo::touched_by(&log, op, region, &self.map.uid)?;
+        let who = self.names.get(&uid).cloned().unwrap_or(uid);
+        let what = if region.1 == AxisKind::Rows { "rows" } else { "columns" };
+        Some(format!("{who} changed these {what} since; not undone"))
     }
 
     /// The gate: LOCAL and FREE commands run now; an ORDERED one waits for the lock (G9: refused
@@ -367,7 +421,7 @@ impl<H: Hub> GridLive<H> {
         if !self.core.editable() {
             return Err(self.core.not_editable());
         }
-        self.enqueue(Pending { command: String::new(), anchors: Vec::new(), count: 0, undelete: Some((sheet, axis, ids)) })
+        self.enqueue(Pending { command: String::new(), anchors: Vec::new(), count: 0, undelete: Some((sheet, axis, ids)), undo: None })
     }
 
     fn enqueue(&mut self, pending: Pending) -> Result<Ran, String> {
@@ -486,18 +540,28 @@ impl<H: Hub> GridLive<H> {
             self.map.notices.push(e);
             return;
         }
+        if let Some(r) = &p.undo {
+            // Checked again now the lock is held: an op may have come in while it waited.
+            if let Some(text) = self.replay_refusal(r) {
+                self.map.notices.push(text);
+                return;
+            }
+        }
+        // The command an undo runs lands on the other stack and does not clear redo.
+        self.map.replay = p.undo.clone();
         if let Some((sheet, axis, ids)) = p.undelete {
             self.core.queue().push(GridEdit::Undelete { sheet, axis, ids });
             self.flush(session);
-            return;
+        } else {
+            match resolve(&p, &self.map.layout) {
+                Err(text) => self.map.notices.push(text),
+                Ok(params) => match session.execute(&p.command, params) {
+                    Ok(_) => self.flush(session),
+                    Err(e) => self.map.notices.push(e.to_string()),
+                },
+            }
         }
-        match resolve(&p, &self.map.layout) {
-            Err(text) => self.map.notices.push(text),
-            Ok(params) => match session.execute(&p.command, params) {
-                Ok(_) => self.flush(session),
-                Err(e) => self.map.notices.push(e.to_string()),
-            },
-        }
+        self.map.replay = None;
     }
 
     fn flush(&mut self, session: &mut Session) {

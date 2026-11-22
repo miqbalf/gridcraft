@@ -113,15 +113,15 @@ fn base_mismatch_refuses_the_start() {
 }
 
 #[test]
-fn undo_is_told_not_available_and_stop_unhooks_the_engine() {
+fn undo_goes_through_the_room_and_stop_unhooks_the_engine() {
     let mut room = Room::new(2);
     room.run(0, "cell.set", json!({"cell": "D5", "input": "1"})).unwrap();
     room.settle();
     let seq = room.relay.seq();
     room.run(0, "edit.undo", json!({})).unwrap();
     room.settle();
-    assert_eq!(room.relay.seq(), seq, "undo shares nothing yet");
-    assert!(room.notices_of(0).iter().any(|n| n.contains("Undo")), "{:?}", room.notices_of(0));
+    assert!(room.relay.seq() > seq, "the undo is shared as a new edit");
+    assert!(room.wb(1).sheet(0).unwrap().cell(a1("D5")).is_none(), "and reached the other peer");
     assert_eq!(room.finger(0), room.finger(1));
     let mut p = room.peers.remove(0);
     p.live.stop(&mut p.session);

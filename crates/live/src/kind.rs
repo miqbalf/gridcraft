@@ -17,7 +17,7 @@ pub struct Grid;
 pub enum GridEdit {
     /// A top-level command that changed the workbook, as the engine reported it.
     Command(Box<EditReport>),
-    /// The user asked for Undo. Per-user undo is G11; until then it is told so and does nothing.
+    /// The user asked for Undo: this editor's own last change is taken back ([`crate::undo`]).
     Undo,
     /// The user asked for Redo (see [`GridEdit::Undo`]).
     Redo,
