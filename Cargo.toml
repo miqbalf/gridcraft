@@ -116,6 +116,13 @@ todo = "warn"
 opt-level = 2
 debug = false
 
+# yrs debug-asserts on values it decodes (a client id wider than 53 bits) and adds decoded
+# clocks unchecked, so hostile update bytes would panic a debug build, and abort a debug wasm
+# build, where a release build refuses them. Debug builds of yrs behave as release ones here.
+[profile.dev.package.yrs]
+debug-assertions = false
+overflow-checks = false
+
 [profile.dev]
 opt-level = 1
 debug = "line-tables-only"
