@@ -622,6 +622,15 @@ impl Session {
     pub fn document_mut(&mut self, uid: u64) -> Option<&mut DocState> {
         self.docs.iter_mut().find(|d| d.uid == uid)
     }
+    /// Makes the open workbook with this [`DocState::uid`] take the numbers of `RAND`,
+    /// `RANDBETWEEN` and `RANDARRAY` from `source` by cell identity (`None`: this process's own),
+    /// and recalculates so the formulas show them at once.
+    pub fn set_volatile_source(&mut self, doc: u64, source: Option<std::sync::Arc<dyn gridcraft_calc::VolatileSource>>) -> Result<()> {
+        let d = self.document_mut(doc).ok_or(EngineError::NoDocument)?;
+        d.calc.set_volatile_source(source);
+        d.calc.recalc_all(Arc::make_mut(&mut d.wb));
+        Ok(())
+    }
     pub fn doc(&self) -> Result<&DocState> {
         self.active().ok_or(EngineError::NoDocument)
     }

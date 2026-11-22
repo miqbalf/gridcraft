@@ -17,6 +17,9 @@ const MAX_ITERATION_WORK: usize = 10_000_000;
 /// A block's results by last row: its sum and count, or `None` when it can't be summed from constants.
 type BlockSums = std::collections::BTreeMap<u32, Option<(f64, u64)>>;
 
+/// The largest `f64` below 1.
+const MAX_BELOW_ONE: f64 = 1.0 - f64::EPSILON / 2.0;
+
 pub(super) struct PassHost<'a> {
     wb: &'a Workbook,
     exprs: &'a HashMap<Key, std::sync::Arc<Expr>>,
@@ -31,6 +34,10 @@ pub(super) struct PassHost<'a> {
     /// every row, so once per sheet rather than once per range read.
     used: HashMap<usize, Option<RangeRef>>,
     rng: &'a mut u64,
+    /// Where `RAND` gets its numbers when it is not this pass's own generator.
+    pub(super) volatile: Option<&'a dyn super::VolatileSource>,
+    /// The formula being evaluated and the random draws it has made so far (restarts per cell).
+    current: Option<(Key, u32)>,
     /// Who held a spill before the calculation; unset: every formula did (reading order decides).
     pub(super) standing: Option<&'a super::Standing>,
     now: f64,
@@ -101,6 +108,8 @@ impl<'a> PassHost<'a> {
             spill_index: SpillIndex::default(),
             used: HashMap::default(),
             rng,
+            volatile: None,
+            current: None,
             standing: None,
             now,
             cycle: false,
@@ -329,10 +338,12 @@ impl PassHost<'_> {
         }
         let expr = std::sync::Arc::clone(expr);
         let outer_out_of_stack = std::mem::replace(&mut self.out_of_stack, false);
+        let outer_cell = self.current.replace((k, 0));
         let v = {
             let mut ev = Evaluator::new(self, k.0, k.1);
             ev.value(&expr)
         };
+        self.current = outer_cell;
         let out_of_stack = std::mem::replace(&mut self.out_of_stack, outer_out_of_stack);
         if out_of_stack && self.depth > 1 && self.suspend.is_none() {
             // It ran out of the stack left below the formulas that read it: it is calculated
@@ -771,6 +782,16 @@ impl Host for PassHost<'_> {
         self.now
     }
     fn random(&mut self) -> f64 {
+        if let Some(source) = self.volatile {
+            // With a source, the number is the source's, never this process's generator: no
+            // formula being evaluated (not reachable through `calculate`) gives 0.0, and a
+            // value outside [0, 1) or NaN is pulled into range, so peers cannot disagree.
+            let Some((k, draw)) = self.current.as_mut() else { return 0.0 };
+            let n = *draw;
+            *draw = draw.saturating_add(1);
+            let x = source.random(k.0, k.1, n);
+            return if x.is_nan() { 0.0 } else { x.clamp(0.0, MAX_BELOW_ONE) };
+        }
         // xorshift64*
         let mut x = *self.rng;
         x ^= x >> 12;

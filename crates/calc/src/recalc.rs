@@ -38,11 +38,25 @@ pub use graph::{FxHasher, Graph, Key};
 use graph::{HashMap, HashSet, Node, Taken};
 use pass_host::{PassHost, spills_as_before};
 
+/// Where the volatile functions get their numbers from, when something other than this process
+/// decides them (a shared session: every peer must see the same `RAND`).
+pub trait VolatileSource: Send + Sync + std::fmt::Debug {
+    /// In [0, 1) (anything else is clamped, NaN becomes 0). `draw` counts the random draws made while evaluating this cell (RANDARRAY: per element).
+    fn random(&self, sheet: usize, cell: CellRef, draw: u32) -> f64;
+    /// `None`: the system clock (NOW/TODAY stay local while live).
+    fn now(&self) -> Option<f64> {
+        None
+    }
+}
+
 /// Calculation state kept beside a workbook.
 #[derive(Clone, Debug)]
 pub struct Calc {
     pub graph: Graph,
     rng: u64,
+    /// Set: `RAND` and friends take their numbers from it, by cell identity; unset: the
+    /// generator and clock of this process.
+    volatile: Option<std::sync::Arc<dyn VolatileSource>>,
     /// Fixed "now" for deterministic tests; `None` = system clock.
     pub fixed_now: Option<f64>,
     /// Cells whose formulas have errors from cycles.
@@ -158,6 +172,7 @@ impl Default for Calc {
         Calc {
             graph: Graph::default(),
             rng: 0x9E37_79B9_7F4A_7C15,
+            volatile: None,
             fixed_now: None,
             circular: vec![],
             last_recalc_cells: 0,
@@ -240,7 +255,16 @@ impl Calc {
         if let Some(n) = self.fixed_now {
             return n;
         }
+        if let Some(n) = self.volatile.as_ref().and_then(|s| s.now()) {
+            return n;
+        }
         now_serial()
+    }
+
+    /// Takes the numbers of `RAND`, `RANDBETWEEN` and `RANDARRAY` (and `NOW`, if the source gives
+    /// one) from `source`; `None` goes back to this process's own. The next calculation uses it.
+    pub fn set_volatile_source(&mut self, source: Option<std::sync::Arc<dyn VolatileSource>>) {
+        self.volatile = source;
     }
 
     /// Rebuilds the graph from scratch.
@@ -596,6 +620,7 @@ impl Calc {
             let tp = prof_now();
             let (results, spills, cycles) = {
                 let mut host = PassHost::new(wb, &exprs, &mut rng, now).with_python(python);
+                host.volatile = self.volatile.as_deref();
                 host.standing = Some(&self.standing);
                 host.iterate = wb.calc.iterative;
                 for k in &dirty {
