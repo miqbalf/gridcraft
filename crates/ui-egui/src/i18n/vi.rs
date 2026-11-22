@@ -258,6 +258,8 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Action\nJournal" => "Nhật ký\nthao tác",
         "About\nGridCraft" => "Giới thiệu\nGridCraft",
         "Share" => "Chia sẻ",
+        "No Nextcloud connected" => "Chưa kết nối Nextcloud",
+        "Share in Nextcloud" => "Chia sẻ trong Nextcloud",
         "Add Chart\nElement" => "Thêm thành phần\nbiểu đồ",
         "Change\nChart Type" => "Đổi kiểu\nbiểu đồ",
         "Switch\nRow/Column" => "Đổi\nhàng/cột",

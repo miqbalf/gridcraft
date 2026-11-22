@@ -5,6 +5,8 @@ type OpenUrl = Box<dyn Fn(&str)>;
 type CopyHtml = Box<dyn FnMut(&str, &str) -> Result<(), String>>;
 type Download = Box<dyn Fn(&str, &[u8])>;
 type PrintPdf = Box<dyn Fn(&[u8])>;
+type HostShare = Box<dyn Fn() -> Result<(), String>>;
+type ShareRoute = Box<dyn Fn(&std::path::Path) -> craft_share::ShareRoute>;
 
 /// Host services the platform shell provides (file pickers, opening URLs).
 #[derive(Default)]
@@ -44,6 +46,16 @@ pub struct Services {
     /// Web: hand PDF bytes to the browser's print flow directly (no download,
     /// no intermediate file) — opens the system print dialog on that PDF.
     pub print: Option<PrintPdf>,
+    /// Web: the page hosting GridCraft shares files itself (`gridcraft:host` with `share: true`).
+    /// Share posts `gridcraft:share` to it, for the workbook it opened ([`Services::host_doc`]).
+    pub host_share: Option<HostShare>,
+    /// Web: the id (`DocState::uid`) of the workbook the hosting page opened in the frame
+    /// ([`crate::SheetApp::note_host_open`]). Share asks the page only while that workbook is the
+    /// active one, whatever it is named.
+    pub host_doc: Option<u64>,
+    /// Desktop: where Share goes for a workbook saved at a path (`craft_share::desktop_route`:
+    /// Nextcloud sharing in the browser for a file in a folder the Nextcloud client syncs).
+    pub share_route: Option<ShareRoute>,
 }
 
 /// Shared queue of files read asynchronously (browser file picker, drag and drop).

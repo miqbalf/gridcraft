@@ -205,6 +205,12 @@ fn services() -> Services {
             dialog.save_file().and_then(|p| p.to_str().map(str::to_string))
         })),
         open_url: Some(Box::new(|url: &str| open_with_system(url))),
+        // Share: Nextcloud sharing in the browser for a workbook in a folder the Nextcloud client
+        // syncs; anywhere else "No Nextcloud connected".
+        // A workbook opened by a relative path is matched by its absolute one.
+        share_route: Some(Box::new(|path: &std::path::Path| {
+            gridcraft_ui_egui::craft_share::desktop_route(&std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()))
+        })),
         printers: Some(print::discover()),
         print_native: Some(print::submit()),
         ..Default::default()

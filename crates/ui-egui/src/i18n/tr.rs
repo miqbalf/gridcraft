@@ -364,6 +364,8 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Action\nJournal" => "İşlem\nGünlüğü",
         "About\nGridCraft" => "GridCraft\nHakkında",
         "Share" => "Paylaş",
+        "No Nextcloud connected" => "Bağlı Nextcloud yok",
+        "Share in Nextcloud" => "Nextcloud'da paylaş",
         "Add Chart\nElement" => "Grafik Öğesi\nEkle",
         "Change\nChart Type" => "Grafik Türünü\nDeğiştir",
         "Switch\nRow/Column" => "Satır/Sütun\nDeğiştir",

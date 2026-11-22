@@ -15,6 +15,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!(noundo "file.close", "Close", ["File"], Some("Cmd+W"), "{force?: bool, document?: bool} (closes the active window, or with `document` the workbook and all its windows; the workbook closes with its last window)", has_doc, close),
         cmd!(noundo "file.exportCsv", "Export as CSV", ["File", "Export"], None, "{path, sheet?, values?: bool} → {path, bytes}: writes the cells as displayed, like Excel's Save As CSV; `values: true` writes raw values instead (full-precision numbers, ISO 8601 dates and times, TRUE/FALSE)", has_doc, |s, p| export(s, p, "csv")),
         cmd!(noundo "file.exportHtml", "Save as Web Page", ["File", "Export"], None, "{path}", has_doc, |s, p| export(s, p, "html")),
+        cmd!(noundo "file.share", "Share", ["File"], None, "{} → {shared: \"host\"|\"browser\"|false}: Nextcloud sharing for the active workbook, done by the GridCraft window (the hosting Nextcloud page, or the browser for a file in a folder the Nextcloud client syncs); anywhere else it says \"No Nextcloud connected\" and does nothing. The engine alone has no window and refuses it", has_doc, share),
         cmd!("file.properties", "Properties", ["File"], None, "{title?, subject?, author?, company?, keywords?, description?}", has_doc, properties),
         cmd!(
             query "file.options",
@@ -29,6 +30,12 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!(noundo "window.close", "Close Window", ["Window"], None, "{window?, doc?, force?: bool} → {closed, document}: closes a window (the active one by default); its workbook closes with its last window, asking first when it has unsaved changes unless `force`", has_doc, close_window),
         cmd!(query "window.list", "Windows", ["Window"], None, "{} → [{window, doc, index, title, dirty, active, hidden}]", always, |s, _| Ok(s.window_list())),
     ]
+}
+
+/// Share is the window's (`gridcraft-ui-egui` runs `file.share` before the engine): headless
+/// callers have no Nextcloud page or browser to share through.
+fn share(_: &mut Session, _: &Json) -> Result<Json> {
+    Err(bad("file.share", "Share needs the GridCraft window: it opens Nextcloud sharing there"))
 }
 
 fn new_workbook(s: &mut Session, p: &Json) -> Result<Json> {

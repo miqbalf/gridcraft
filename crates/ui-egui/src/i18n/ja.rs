@@ -259,6 +259,8 @@ pub(super) const CORE: &[(&str, &str)] = &[
     ("Action\nJournal", "操作ジャーナル"),
     ("About\nGridCraft", "GridCraft について"),
     ("Share", "共有"),
+    ("No Nextcloud connected", "Nextcloud に接続されていません"),
+    ("Share in Nextcloud", "Nextcloud で共有"),
     ("Add Chart\nElement", "グラフ要素を追加"),
     ("Change\nChart Type", "グラフの種類の変更"),
     ("Switch\nRow/Column", "行/列の切り替え"),

@@ -350,6 +350,8 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Action\nJournal" => "Ιστορικό\nενεργειών",
         "About\nGridCraft" => "Πληροφορίες για\nτο GridCraft",
         "Share" => "Κοινή χρήση",
+        "No Nextcloud connected" => "Δεν υπάρχει συνδεδεμένο Nextcloud",
+        "Share in Nextcloud" => "Κοινή χρήση στο Nextcloud",
         "Add Chart\nElement" => "Προσθήκη στοιχείου\nγραφήματος",
         "Change\nChart Type" => "Αλλαγή τύπου\nγραφήματος",
         "Switch\nRow/Column" => "Εναλλαγή\nγραμμής/στήλης",

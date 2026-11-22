@@ -25,6 +25,11 @@
 //! - `gridcraft:fonts` (from the host) is ignored: GridCraft has no user-font path on the web
 //!   (no system fonts, and a font file cannot be bound to a family there), so nothing is lost by
 //!   a host sending it.
+//! - Share (`?host=parent` only): `gridcraft:ready` also says `shareButton: true`, so the page
+//!   shows no Share button of its own. When the page's `gridcraft:host` says `share: true`, the
+//!   title bar's Share (and every other Share entry point) posts `gridcraft:share {}` to the page,
+//!   which opens its sharing for the file it opened, while that workbook is the active one.
+//!   Otherwise Share says "No Nextcloud connected" and does nothing else.
 //! - `gridcraft:dirty` whenever unsaved changes appear or go away, `gridcraft:failed` when the
 //!   app couldn't start.
 //!
@@ -32,7 +37,7 @@
 //! exports are handed to the page rather than downloaded, and `?author=` names the user for new
 //! notes and comments.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use craft_web_host::web::{FileData, Host, Message};
@@ -64,6 +69,12 @@ pub struct Bridge {
     answers: Rc<RefCell<Vec<Answer>>>,
     /// The name of the file the host sent: a save under another name is a new file.
     opened: Rc<RefCell<Option<String>>>,
+    /// The host said `share: true`: it opens Nextcloud sharing on `gridcraft:share`.
+    share: Rc<Cell<bool>>,
+    /// Files the host sent that are not yet bound to a workbook ([`SheetApp::note_host_open`]).
+    host_opens: Rc<RefCell<Vec<String>>>,
+    /// The workbooks open at the end of the last frame: a host file opens as a new one.
+    known: Rc<RefCell<Vec<u64>>>,
 }
 
 impl Bridge {
@@ -90,6 +101,9 @@ impl Bridge {
             receipts: Rc::default(),
             answers: Rc::default(),
             opened: Rc::default(),
+            share: Rc::default(),
+            host_opens: Rc::default(),
+            known: Rc::default(),
         })
     }
 
@@ -114,7 +128,9 @@ impl Bridge {
     }
 
     pub fn post_ready(&self) {
-        let _ = self.host.post_ready(env!("CARGO_PKG_VERSION"), false);
+        // Framed, GridCraft's title bar has its own Share button: the page shows none.
+        let share_button = self.host.mode() == Mode::Parent;
+        let _ = self.host.post_ready_with(env!("CARGO_PKG_VERSION"), false, share_button);
     }
 
     pub fn post_failed(&self, error: &str) {
@@ -127,6 +143,8 @@ impl Bridge {
     pub fn sync(&self, app: &mut SheetApp) {
         let saved = std::mem::take(&mut *self.saved.borrow_mut());
         sync_saved(&saved, app);
+        self.bind_host_opens(app);
+        self.apply_share(app);
         let answers = std::mem::take(&mut *self.answers.borrow_mut());
         {
             let mut receipts = self.receipts.borrow_mut();
@@ -138,6 +156,25 @@ impl Bridge {
             }
         }
         self.host.post_dirty(app.session.documents().iter().any(|d| d.is_dirty()));
+    }
+
+    /// The workbook each host open produced becomes the page's (by its id, not its name).
+    fn bind_host_opens(&self, app: &mut SheetApp) {
+        let known = self.known.borrow().clone();
+        self.host_opens.borrow_mut().retain(|name| !app.note_host_open(name, &known));
+        *self.known.borrow_mut() = app.session.documents().iter().map(|d| d.uid).collect();
+    }
+
+    /// Share asks the page once it said `share: true` (parent mode only), for the workbook it
+    /// opened (also under a new name the page gave it).
+    fn apply_share(&self, app: &mut SheetApp) {
+        if !self.share.get() || self.host.mode() != Mode::Parent {
+            return;
+        }
+        if app.services.host_share.is_none() {
+            let host = self.host.clone();
+            app.services.host_share = Some(Box::new(move || host.post_share()));
+        }
     }
 
     fn post_save(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
@@ -169,9 +206,18 @@ impl Bridge {
             Message::Open { name, data } => {
                 if deliver_open(&inbox, &ctx, &name, &data) {
                     *bridge.opened.borrow_mut() = Some(open_name(&name));
+                    bridge.host_opens.borrow_mut().push(open_name(&name));
                 }
             }
-            Message::Host { saves: true, .. } => bridge.receipts.borrow_mut().set_confirms(),
+            Message::Host { saves, share, .. } => {
+                if saves {
+                    bridge.receipts.borrow_mut().set_confirms();
+                }
+                if share {
+                    bridge.share.set(true);
+                    ctx.request_repaint();
+                }
+            }
             Message::Saved { id, name } => {
                 bridge.answers.borrow_mut().push(Answer::Saved { id, name });
                 ctx.request_repaint();

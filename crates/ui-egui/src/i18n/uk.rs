@@ -246,6 +246,8 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Action\nJournal" => "Журнал\nдій",
         "About\nGridCraft" => "Про\nGridCraft",
         "Share" => "Поділитися",
+        "No Nextcloud connected" => "Nextcloud не під'єднано",
+        "Share in Nextcloud" => "Поділитися в Nextcloud",
         "Add Chart\nElement" => "Додати елемент\nдіаграми",
         "Change\nChart Type" => "Змінити тип\nдіаграми",
         "Switch\nRow/Column" => "Поміняти\nрядки/стовпці",

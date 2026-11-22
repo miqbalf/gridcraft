@@ -117,6 +117,7 @@ pub fn title_bar(app: &mut SheetApp, ui: &mut Ui) {
                 if ui.button("Print…").clicked() {
                     app.print_now(json!({}));
                 }
+                ui.menu_button("Export", |ui| export_items(app, ui));
             });
             let left_end = ui.min_rect().right();
             let right = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -129,19 +130,10 @@ pub fn title_bar(app: &mut SheetApp, ui: &mut Ui) {
                 if __k.clicked() {
                     app.open_dialog("commandSearch", json!({}));
                 }
-                let share = small_button(ui, Icon::Share, "Share", "Share: export or save a copy", true);
-                egui::Popup::menu(&share).show(|ui| {
-                    if ui.button("Export as PDF…").clicked() {
-                        app.run_or_alert("file.exportPdf", json!({}));
-                    }
-                    for (label, fmt) in
-                        [("Save a Copy as Excel Workbook (.xlsx)…", "xlsx"), ("Export as CSV…", "csv"), ("Export as Web Page (.html)…", "html")]
-                    {
-                        if ui.button(label).clicked() {
-                            app.open_dialog("saveCopy", json!({"format": fmt}));
-                        }
-                    }
-                });
+                // Share is Nextcloud sharing only (`file.share`); copies are under Export.
+                if small_button(ui, Icon::Share, "Share", "Share in Nextcloud", false).clicked() {
+                    app.run_or_alert("file.share", json!({}));
+                }
                 let __k = icon_button(ui, Icon::Comment, t.text_dim, "Comments", vec2(28.0, ch));
                 control_keytip(app, ui, &__k, "comments");
                 if __k.clicked() {
@@ -321,6 +313,19 @@ pub fn window_frame(app: &mut SheetApp, ctx: &egui::Context) {
         app.run_or_alert("ui.window.beginResize", json!({"direction": direction}));
     }
     app.flush_viewport_commands(ctx);
+}
+
+/// The title bar's Export menu: a PDF, or a copy as a workbook, CSV or web page.
+fn export_items(app: &mut SheetApp, ui: &mut egui::Ui) {
+    if ui.button("Export as PDF…").clicked() {
+        app.run_or_alert("file.exportPdf", json!({}));
+    }
+    for (label, fmt) in [("Save a Copy as Excel Workbook (.xlsx)…", "xlsx"), ("Export as CSV…", "csv"), ("Export as Web Page (.html)…", "html")]
+    {
+        if ui.button(label).clicked() {
+            app.open_dialog("saveCopy", json!({"format": fmt}));
+        }
+    }
 }
 
 #[cfg(test)]

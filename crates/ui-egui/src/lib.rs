@@ -80,6 +80,9 @@ mod services;
 mod state;
 
 pub use clock::{monotonic_ms, now_ms};
+/// The shared Share hook (`ShareRoute`, `desktop_route`, `sharing_url`, `NO_NEXTCLOUD`), at the
+/// revision this crate pins, for the desktop and web shells.
+pub use craft_share;
 pub use services::{Chrome, Inbox, Services};
 pub use state::{NoticeKind, OpenWindow, SaveAnswer, SheetView};
 pub mod desktop_theme;
@@ -250,6 +253,9 @@ pub struct SheetApp {
     pub backstage: Option<backstage::Backstage>,
     pub message: Option<(String, String)>,
     pub toast: Option<(String, f64)>,
+    /// Desktop: each workbook's Share route for the path it was worked out for, looked up when
+    /// a workbook is opened, saved under a new path or switched to, not on every frame.
+    pub(crate) share_routes: HashMap<u64, (String, craft_share::ShareRoute)>,
     /// Dismissible info bar under the ribbon (open-time notices).
     pub notice: Option<Notice>,
     pub services: Services,

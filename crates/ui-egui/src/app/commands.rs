@@ -186,6 +186,7 @@ impl SheetApp {
                 self.viewport_commands.push(egui::ViewportCommand::BeginResize(direction));
                 Ok(Json::Null)
             }
+            "file.share" => self.share(),
             "app.checkForUpdates" | "help.checkForUpdates" => {
                 self.check_for_updates();
                 Ok(Json::Null)

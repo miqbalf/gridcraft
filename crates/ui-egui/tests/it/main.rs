@@ -105,6 +105,7 @@ mod selection;
 mod selection_fill;
 mod selection_glide;
 mod selection_scroll;
+mod share;
 mod sheet_navigator;
 mod sheet_tab_rename;
 mod sheet_tabs;

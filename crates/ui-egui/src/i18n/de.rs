@@ -404,6 +404,8 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Action\nJournal" => "Aktions-\nprotokoll",
         "About\nGridCraft" => "Über\nGridCraft",
         "Share" => "Teilen",
+        "No Nextcloud connected" => "Keine Nextcloud verbunden",
+        "Share in Nextcloud" => "In Nextcloud teilen",
         "Add Chart\nElement" => "Diagrammelement\nhinzufügen",
         "Change\nChart Type" => "Diagrammtyp\nändern",
         "Switch\nRow/Column" => "Zeile/Spalte\nwechseln",

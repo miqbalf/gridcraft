@@ -250,6 +250,8 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Action\nJournal" => "Registro\nazioni",
         "About\nGridCraft" => "Informazioni su\nGridCraft",
         "Share" => "Condividi",
+        "No Nextcloud connected" => "Nessun Nextcloud collegato",
+        "Share in Nextcloud" => "Condividi in Nextcloud",
         "Add Chart\nElement" => "Aggiungi\nelemento grafico",
         "Change\nChart Type" => "Cambia tipo\ndi grafico",
         "Switch\nRow/Column" => "Inverti\nriga/colonna",
