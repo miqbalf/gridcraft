@@ -60,6 +60,8 @@ pub(crate) struct Mapping {
     pub resync_wanted: bool,
     /// Writes the last batch skipped, for `landed`.
     pub skipped: usize,
+    /// Times an ordered change fell back to a rebuild from the document.
+    pub rebuilds: u32,
     /// Style keys a cell named before the style arrived.
     pub unresolved: BTreeSet<String>,
     /// This peer's own cell content writes, to tell it when another's replaced one.
@@ -457,6 +459,7 @@ impl GridApp<'_> {
             Err(e) => {
                 log::warn!("gridcraft-live: an ordered edit did not land ({e}); rebuilding from the document");
                 m.removed.clear();
+                m.rebuilds = m.rebuilds.saturating_add(1);
                 self.resync(replica)
             }
         }

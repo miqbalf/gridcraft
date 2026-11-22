@@ -236,3 +236,39 @@ fn axis_replicas_agree_under_serialised_ops() {
         }
     }
 }
+
+/// What a fill-only update does to an axis: the base ids up to a line are spelled out.
+fn filled(axis: &Axis, upto: u64) -> Axis {
+    let mut explicit = axis.explicit().to_vec();
+    let from = explicit.iter().filter(|i| i.space() == 0).map(|i| i.0).max().unwrap_or(0) + 1;
+    explicit.extend((from..=upto).map(Id));
+    Axis::from_parts(explicit, axis.deleted().clone(), axis.limit())
+}
+
+#[test]
+fn spelling_out_the_base_tail_is_the_same_layout_whatever_came_before() {
+    let fresh = Axis::base(1_048_576);
+    assert!(fresh.equivalent(&filled(&fresh, 5000)));
+    // After an insert at row 3 the prefix is [1, 2, N]; the fill continues with 3...
+    let mut after_insert = Axis::base(1_048_576);
+    after_insert.insert(2, &[Id::minted(3, 1)]);
+    assert_eq!(after_insert.explicit().len(), 3);
+    assert!(after_insert.equivalent(&filled(&after_insert, 5000)));
+    assert!(filled(&after_insert, 5000).equivalent(&after_insert), "both ways");
+    // A deleted base id inside the filled range.
+    let mut after_delete = Axis::base(1_048_576);
+    after_delete.delete(&[Id(3)]);
+    assert!(after_delete.equivalent(&filled(&after_delete, 5000)));
+    // Both together.
+    let mut both = after_insert.clone();
+    both.delete(&[Id(4)]);
+    assert!(both.equivalent(&filled(&both, 5000)));
+    // Real differences stay different.
+    let mut other = after_insert.clone();
+    other.insert(1, &[Id::minted(3, 2)]);
+    assert!(!after_insert.equivalent(&other));
+    assert!(!after_delete.equivalent(&after_insert));
+    let mut gone = filled(&after_insert, 100);
+    gone.delete(&[Id(50)]);
+    assert!(!gone.equivalent(&filled(&after_insert, 100)), "a delete is a difference");
+}
