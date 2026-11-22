@@ -27,7 +27,7 @@ pub mod schema;
 pub mod session;
 pub mod split;
 pub mod styles;
-pub mod undo;
+pub(crate) mod undo;
 pub mod volatile;
 
 pub use app::SentCommand;

@@ -204,6 +204,8 @@ impl<H: Hub> GridLive<H> {
             replay: None,
             undo_skipped: Vec::new(),
             landing: Vec::new(),
+            replay_busy: false,
+            held: Vec::new(),
         };
         let observed = Arc::new(std::sync::atomic::AtomicU64::new(doc));
         let mut live = GridLive {
@@ -328,6 +330,9 @@ impl<H: Hub> GridLive<H> {
                 skipped.into_iter().map(|(uid, at)| (uid.map(|u| self.names.get(&u).cloned().unwrap_or(u)), at)).collect();
             self.map.notices.push(crate::undo::skipped_text(&named));
         }
+        if self.map.undo.take_trimmed() {
+            self.map.notices.push(crate::undo::UNDO_TRIMMED_TEXT.to_owned());
+        }
         self.start_replays();
         for n in std::mem::take(&mut self.map.notices) {
             self.core.push_notice(n);
@@ -340,6 +345,7 @@ impl<H: Hub> GridLive<H> {
         for r in std::mem::take(&mut self.map.replays) {
             if let Some(text) = self.replay_refusal(&r) {
                 self.map.notices.push(text);
+                self.replay_over();
                 continue;
             }
             let crate::undo::Step::Ordered { inverse, region: (sheet, axis, ids), .. } = &r.step else { continue };
@@ -359,10 +365,31 @@ impl<H: Hub> GridLive<H> {
                     undo: Some(r.clone()),
                 },
             };
-            if let Err(text) = self.enqueue(pending) {
-                self.map.undo.put_back(r.step, r.redo);
-                self.map.notices.push(text);
+            match self.enqueue(pending) {
+                Ok(_) => self.map.replay_busy = true,
+                Err(text) => {
+                    self.map.undo.put_back(r.step, r.redo);
+                    self.map.notices.push(text);
+                    self.replay_over();
+                }
             }
+        }
+    }
+
+    /// The ordered undo or redo is over (run, refused or given up): the undos and redos asked
+    /// for meanwhile are queued again, in order, for the next flush.
+    fn replay_over(&mut self) {
+        self.map.replay_busy = false;
+        for redo in std::mem::take(&mut self.map.held) {
+            self.core.queue().push(if redo { GridEdit::Redo } else { GridEdit::Undo });
+        }
+    }
+
+    /// An ordered undo or redo that never ran (nothing was written) goes back on its stack.
+    fn replay_unrun(&mut self, p: &Pending) {
+        if let Some(r) = &p.undo {
+            self.map.undo.put_back(r.step.clone(), r.redo);
+            self.replay_over();
         }
     }
 
@@ -370,11 +397,16 @@ impl<H: Hub> GridLive<H> {
     /// lines an ordered undo would change.
     fn replay_refusal(&self, r: &crate::undo::Replay) -> Option<String> {
         let crate::undo::Step::Ordered { op, region, .. } = &r.step else { return None };
-        let log = self.core.live().doc()?.ops_from(0);
-        let uid = crate::undo::touched_by(&log, op, region, &self.map.uid)?;
-        let who = self.names.get(&uid).cloned().unwrap_or(uid);
+        let log = self.core.live().doc().map(|d| d.ops_from(0)).unwrap_or_default();
         let what = if region.1 == AxisKind::Rows { "rows" } else { "columns" };
-        Some(format!("{who} changed these {what} since; not undone"))
+        match crate::undo::touched_by(&log, op, region, &self.map.uid) {
+            crate::undo::Touched::No => None,
+            crate::undo::Touched::By(uid) => {
+                let who = self.names.get(&uid).cloned().unwrap_or(uid);
+                Some(format!("{who} changed these {what} since; not undone"))
+            }
+            crate::undo::Touched::Unknown => Some(format!("These {what} may have been changed since; not undone")),
+        }
     }
 
     /// The gate: LOCAL and FREE commands run now; an ORDERED one waits for the lock (G9: refused
@@ -494,13 +526,15 @@ impl<H: Hub> GridLive<H> {
         match polled {
             Polled::Nothing => {}
             Polled::Run(p) => self.run_pending(session, p),
-            Polled::GaveUp { holder, .. } => {
+            Polled::GaveUp { holder, item } => {
+                self.replay_unrun(&item);
                 let who = self.holder_name(&holder);
                 self.map.notices.push(format!("{who} is still changing the sheet's structure. Your change was not made; try again in a moment."));
             }
             Polled::LockLost { .. } => {
-                if self.deferred.take().is_some() {
+                if let Some(p) = self.deferred.take() {
                     // It never ran: nothing was changed or shared.
+                    self.replay_unrun(&p);
                     self.map.notices.push(LOCK_LOST_UNRUN_TEXT.to_owned());
                 } else if matches!(self.core.status(), LiveStatus::Broken(_)) {
                     // The replica broke: the edit will never be ordered, and nothing resends it.
@@ -535,6 +569,7 @@ impl<H: Hub> GridLive<H> {
         if !self.core.editable() {
             let why = self.core.not_editable();
             self.map.notices.push(why);
+            self.replay_unrun(&p);
             return;
         }
         if !self.map.pending.is_empty() || self.map.restore.is_some() {
@@ -544,14 +579,18 @@ impl<H: Hub> GridLive<H> {
         }
         if let Err(e) = self.activate(session) {
             self.map.notices.push(e);
+            self.replay_unrun(&p);
             return;
         }
         if let Some(r) = &p.undo {
             // Checked again now the lock is held: an op may have come in while it waited.
             if let Some(text) = self.replay_refusal(r) {
                 self.map.notices.push(text);
+                self.replay_over();
                 return;
             }
+            // Anything else queued goes out first, so it is not taken into the undo's step.
+            self.flush(session);
         }
         // The command an undo runs lands on the other stack and does not clear redo.
         self.map.replay = p.undo.clone();
@@ -568,6 +607,9 @@ impl<H: Hub> GridLive<H> {
             }
         }
         self.map.replay = None;
+        if p.undo.is_some() {
+            self.replay_over();
+        }
     }
 
     fn flush(&mut self, session: &mut Session) {

@@ -267,3 +267,122 @@ fn undo_of_an_ordered_edit_waits_for_the_structure_lock() {
     }
     same_everywhere(&room, "after the locked undo");
 }
+
+#[test]
+fn two_undos_of_my_own_edits_to_one_cell_chain() {
+    let mut room = Room::new(2);
+    let start = room.finger(0);
+    room.run(0, "cell.set", json!({"cell": "D4", "input": "1"})).unwrap();
+    room.settle();
+    room.run(0, "cell.set", json!({"cell": "D4", "input": "2"})).unwrap();
+    room.settle();
+    let two = room.finger(0);
+    undo(&mut room, 0);
+    for i in 0..2 {
+        assert_eq!(value_at(&room, i, "D4"), Value::Number(1.0), "peer {i}");
+    }
+    undo(&mut room, 0);
+    for i in 0..2 {
+        assert_eq!(room.finger(i), start, "peer {i}: both of my edits are undone:\n{}", diff(&room.finger(i), &start));
+    }
+    redo(&mut room, 0);
+    redo(&mut room, 0);
+    for i in 0..2 {
+        assert_eq!(room.finger(i), two, "peer {i}: and both come back");
+    }
+    assert!(room.notices_of(0).iter().all(|n| !n.contains("not undone")), "{:?}", room.notices_of(0));
+    same_everywhere(&room, "after chained undos");
+}
+
+#[test]
+fn a_second_undo_waits_for_a_pending_ordered_undo() {
+    let mut room = Room::with(2, base_with_ref(), None);
+    let start = room.finger(0);
+    room.run(0, "cell.set", json!({"cell": "E2", "input": "=SUM(B2:B9)"})).unwrap();
+    room.settle();
+    // The delete shrinks E2's range end: E2 is one of its writes too.
+    room.run(0, "home.deleteRows", json!({"rows": "9:9"})).unwrap();
+    room.settle();
+    let mut carol = room.relay.connect("carol", "Carol", true);
+    carol.send(ClientMsg::Lock { doc: ROOM.into(), scope: "grid/struct".into() }).unwrap();
+    room.settle();
+    // Two quick Ctrl+Z while the first (the delete's) waits for Carol's lock.
+    room.run(0, "edit.undo", json!({})).unwrap();
+    room.run(0, "edit.undo", json!({})).unwrap();
+    room.settle();
+    assert_ne!(room.finger(0), start, "nothing ran while the lock was held");
+    carol.send(ClientMsg::Unlock { doc: ROOM.into(), scope: "grid/struct".into() }).unwrap();
+    room.settle();
+    room.settle();
+    for i in 0..2 {
+        assert_eq!(room.finger(i), start, "peer {i}: both undone, in order:\n{}", diff(&room.finger(i), &start));
+    }
+    assert!(room.notices_of(0).iter().all(|n| !n.contains("not undone")), "{:?}", room.notices_of(0));
+    same_everywhere(&room, "after the held undo");
+}
+
+#[test]
+fn a_batch_with_an_undo_and_a_refused_edit_still_sends_what_it_wrote() {
+    let mut room = Room::new(2);
+    room.run(0, "cell.set", json!({"cell": "D4", "input": "1"})).unwrap();
+    room.settle();
+    // The host hands one flush an undo, then two edits the room refuses as one part (the second
+    // inserts too many rows).
+    let s = &mut room.peers[0].session;
+    s.execute("edit.undo", json!({})).unwrap();
+    s.execute("cell.set", json!({"cell": "E5", "input": "5"})).unwrap();
+    s.execute("home.insertRows", json!({"rows": format!("2:{}", gridcraft_live::LINES_MAX + 2)})).unwrap();
+    room.settle();
+    for i in 0..2 {
+        assert_eq!(value_at(&room, i, "D4"), Value::Empty, "peer {i}: the undo went out");
+        assert_eq!(value_at(&room, i, "E5"), Value::Empty, "peer {i}: the refused part is gone everywhere");
+        assert_eq!(value_at(&room, i, "A2"), Value::Number(2.0), "peer {i}: the refused insert is not there");
+    }
+    assert!(room.notices_of(0).iter().any(|n| n.contains("cannot be changed at once")), "{:?}", room.notices_of(0));
+    same_everywhere(&room, "after the mixed batch");
+}
+
+#[test]
+fn a_replaced_replica_clears_the_undo_history() {
+    let mut room = Room::new(2);
+    room.run(0, "home.insertRows", json!({"rows": "3:3"})).unwrap();
+    room.run(0, "cell.set", json!({"cell": "D4", "input": "1"})).unwrap();
+    room.settle();
+    let state = room.replica_state(0);
+    let p = &mut room.peers[0];
+    p.live.apply_checkpoint(&mut p.session, &state).unwrap();
+    room.settle();
+    let before = room.finger(0);
+    undo(&mut room, 0);
+    undo(&mut room, 0);
+    for i in 0..2 {
+        assert_eq!(room.finger(i), before, "peer {i}: nothing from before the swap is undone");
+    }
+    same_everywhere(&room, "after the swap");
+}
+
+#[test]
+fn an_ordered_undo_that_gave_up_can_be_asked_again() {
+    let mut room = Room::new(2);
+    let start = room.finger(0);
+    let now = std::sync::Arc::new(std::sync::Mutex::new(0.0f64));
+    let clock = now.clone();
+    room.peers[0].live.set_clock(Box::new(move || *clock.lock().unwrap()));
+    room.run(0, "home.insertRows", json!({"rows": "3:3"})).unwrap();
+    room.settle();
+    let inserted = room.finger(0);
+    let mut carol = room.relay.connect("carol", "Carol", true);
+    carol.send(ClientMsg::Lock { doc: ROOM.into(), scope: "grid/struct".into() }).unwrap();
+    room.settle();
+    undo(&mut room, 0);
+    *now.lock().unwrap() = 11_000.0;
+    room.settle();
+    assert!(room.notices_of(0).iter().any(|n| n.contains("Carol") && n.contains("was not made")), "{:?}", room.notices_of(0));
+    assert_eq!(room.finger(0), inserted);
+    carol.send(ClientMsg::Unlock { doc: ROOM.into(), scope: "grid/struct".into() }).unwrap();
+    room.settle();
+    undo(&mut room, 0);
+    for i in 0..2 {
+        assert_eq!(room.finger(i), start, "peer {i}: the step was kept and undone on the second ask");
+    }
+}

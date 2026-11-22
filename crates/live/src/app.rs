@@ -97,6 +97,10 @@ pub(crate) struct Mapping {
     pub undo_skipped: Vec<Vec<(Option<String>, String)>>,
     /// Changes a local call wrote that the engine has yet to take (an undo's writes).
     pub landing: Vec<GridChange>,
+    /// An ordered undo or redo is queued for the lock or running: later ones wait behind it.
+    pub replay_busy: bool,
+    /// Undos (`false`) and redos (`true`) asked for while one waited, in order.
+    pub held: Vec<bool>,
 }
 
 /// One command as it went out: its group (shared by all its updates, see
@@ -386,6 +390,7 @@ impl GridApp<'_> {
             m.landing.extend(undo::changes_of(&r.keys));
         }
         let ops: Vec<Op> = steps.iter().filter_map(|s| if let Step::Op(op) = s { Some(op.clone()) } else { None }).collect();
+        let writes = undo::merged(writes);
         let step = if ops.is_empty() {
             (!writes.is_empty()).then_some(UndoStep::Free { writes })
         } else {
@@ -394,6 +399,7 @@ impl GridApp<'_> {
                 Err(()) => {
                     // Not one op that can be taken back: nothing before it can be undone either.
                     m.undo = UndoLog::default();
+                    m.notices.push(undo::UNDO_CLEARED_TEXT.to_owned());
                     None
                 }
             }
@@ -546,6 +552,11 @@ impl GridApp<'_> {
     /// only; an ordered one is handed to the session, which runs it through the structure lock.
     fn undo_one(&mut self, replica: &mut GridDoc, redo: bool) -> Result<Vec<Vec<u8>>, LocalError> {
         let m = &mut *self.map;
+        if m.replay_busy || !m.replays.is_empty() {
+            // An ordered undo waits for the lock: this one goes after it, in order.
+            m.held.push(redo);
+            return Ok(Vec::new());
+        }
         let Some(step) = m.undo.take(redo) else { return Ok(Vec::new()) };
         let writes = match step {
             UndoStep::Free { writes } => writes,
@@ -629,6 +640,7 @@ fn revert(replica: &mut GridDoc, m: &mut Mapping, group: u64, writes: &[KeyWrite
         };
         todo.push((w, now, target));
     }
+    let mut rewrites: Vec<(KeyWrite, Entry<Value>)> = Vec::new();
     let mut start = 0;
     while start < todo.len() {
         let mut used = 0;
@@ -666,11 +678,13 @@ fn revert(replica: &mut GridDoc, m: &mut Mapping, group: u64, writes: &[KeyWrite
                 }
             }
             out.keys.push((w.root, w.sheet, w.key.clone()));
+            rewrites.push(((*w).clone(), after.clone()));
             out.swapped.push(KeyWrite { root: w.root, sheet: w.sheet, key: w.key.clone(), before: now.clone(), after });
         }
         out.updates.push(update);
         start = end;
     }
+    undo::follow_rewrites(&mut m.undo, &rewrites);
     Ok(out)
 }
 
@@ -725,21 +739,31 @@ fn place(layout: &Layout, root: Root, sheet: Id, key: &str) -> String {
 impl LiveApp<Grid> for GridApp<'_> {
     fn local(&mut self, replica: &mut GridDoc, edits: &[GridEdit]) -> Result<Vec<Vec<u8>>, LocalError> {
         // Undo and redo are taken one at a time, after the edits before them are written.
+        // Once a part is written into the replica it must be sent: when a later part fails, what
+        // was written goes out, the rest is told, and the engine is rebuilt from the replica (it
+        // ran the refused commands already).
         let mut out = Vec::new();
         let mut rest = edits;
         while !rest.is_empty() {
             let n = rest.iter().position(|e| matches!(e, GridEdit::Undo | GridEdit::Redo)).unwrap_or(rest.len());
             let (run, tail) = rest.split_at(n);
-            if !run.is_empty() {
-                out.extend(self.local_run(replica, run)?);
-            }
-            rest = match tail.split_first() {
-                Some((e, tail)) => {
-                    out.extend(self.undo_one(replica, matches!(e, GridEdit::Redo))?);
-                    tail
-                }
-                None => tail,
+            let (part, next) = match tail.split_first() {
+                Some((e, tail)) if run.is_empty() => (self.undo_one(replica, matches!(e, GridEdit::Redo)), tail),
+                _ => (self.local_run(replica, run), tail),
             };
+            match part {
+                Ok(updates) => out.extend(updates),
+                Err(e) if out.is_empty() => return Err(e),
+                Err(e) => {
+                    match e {
+                        LocalError::Refused(why) => self.map.notices.push(why),
+                        LocalError::Failed(why) => log::warn!("gridcraft-live: part of a batch did not land ({why}); rebuilding"),
+                    }
+                    self.map.resync_wanted = true;
+                    return Ok(out);
+                }
+            }
+            rest = next;
         }
         Ok(out)
     }
@@ -853,6 +877,12 @@ impl LiveApp<Grid> for GridApp<'_> {
         m.pending.clear();
         m.unresolved.clear();
         m.index.clear();
+        // The steps name keys and ops of the replica that was replaced: none can be trusted.
+        m.undo = UndoLog::default();
+        m.replays.clear();
+        m.replay = None;
+        m.held.clear();
+        m.replay_busy = false;
     }
 
     fn set_space(&mut self, space: u32) {
