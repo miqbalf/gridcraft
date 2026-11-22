@@ -171,7 +171,12 @@ impl GridApp<'_> {
     /// Retries what an open undo group held back; call at the start of each pump.
     pub(crate) fn retry(&mut self, replica: Option<&GridDoc>) -> Result<(), String> {
         if let Some(wb) = self.map.restore.take() {
-            self.install(wb)?;
+            // Remote changes may have landed since `wb` was taken: rebuild from the replica
+            // (which holds them) and not from the stale copy.
+            match replica {
+                Some(doc) => self.resync(doc)?,
+                None => self.install(wb)?,
+            }
         }
         if !self.map.pending.is_empty()
             && let Some(doc) = replica
