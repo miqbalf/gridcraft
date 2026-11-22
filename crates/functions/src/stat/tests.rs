@@ -2,6 +2,7 @@ use super::descriptive::{kth, median, percentile_exc, percentile_inc, sorted};
 use super::{MAX_REGRESSORS, aggregate_values, aggregate_values_k, check_regression_size};
 use crate::util::R;
 use crate::util::testutil::*;
+use gridcraft_core::fmath;
 use gridcraft_core::{CellError, Value};
 
 const D7: f64 = 1e-6;
@@ -600,16 +601,16 @@ fn linest_drops_collinear_columns() {
 fn logest_is_linest_of_ln_y() {
     // y = 5·2^x: m = 2, b = 5.
     let x = [0.0, 1.0, 2.0, 3.0, 4.0];
-    let y: Vec<f64> = x.iter().map(|v| 5.0 * 2f64.powf(*v)).collect();
+    let y: Vec<f64> = x.iter().map(|v| 5.0 * fmath::pow(2f64, *v)).collect();
     let l = rows_of(&ev("LOGEST", vec![c(&y), c(&x)]));
     close_tol(l[0][0].clone(), 2.0, 1e-12);
     close_tol(l[0][1].clone(), 5.0, 1e-12);
     // The statistics are those of the fit on ln y, untransformed.
-    let ln: Vec<f64> = y.iter().map(|v| v.ln()).collect();
+    let ln: Vec<f64> = y.iter().map(|v| fmath::ln(*v)).collect();
     let ls = rows_of(&ev("LOGEST", vec![c(&y), c(&x), b(true), b(true)]));
     let ns = rows_of(&ev("LINEST", vec![c(&ln), c(&x), b(true), b(true)]));
     assert_eq!(ls[1..], ns[1..]);
-    close_tol(ls[0][0].clone(), ns[0][0].as_f64().unwrap().exp(), 1e-14);
+    close_tol(ls[0][0].clone(), fmath::exp(ns[0][0].as_f64().unwrap()), 1e-14);
 }
 
 // #2177: one predictor row of 16,384 columns built three 16,384² matrices (6 GB) and an O(k³)
@@ -875,8 +876,8 @@ fn gamma_density_at_zero_shape_one_is_num() {
     is_err(ev("GAMMA.DIST", vec![n(0.0), n(0.5), n(1.0), b(false)]), CellError::Num);
     close_tol(ev("GAMMA.DIST", vec![n(0.0), n(2.0), n(1.0), b(false)]), 0.0, 0.0);
     close_tol(ev("GAMMA.DIST", vec![n(0.0), n(1.0), n(2.0), b(true)]), 0.0, 0.0);
-    close_tol(ev("GAMMA.DIST", vec![n(2.0), n(1.0), n(2.0), b(false)]), 0.5 * (-1.0f64).exp(), 1e-15);
-    close_tol(ev("GAMMA.DIST", vec![n(2.0), n(1.0), n(2.0), b(true)]), 1.0 - (-1.0f64).exp(), 1e-15);
+    close_tol(ev("GAMMA.DIST", vec![n(2.0), n(1.0), n(2.0), b(false)]), 0.5 * fmath::exp(-1.0f64), 1e-15);
+    close_tol(ev("GAMMA.DIST", vec![n(2.0), n(1.0), n(2.0), b(true)]), 1.0 - fmath::exp(-1.0f64), 1e-15);
     is_err(ev("GAMMA.DIST", vec![n(-0.1), n(1.0), n(2.0), b(false)]), CellError::Num);
 }
 
@@ -886,8 +887,8 @@ fn weibull_density_at_zero_is_zero() {
         close_tol(ev("WEIBULL.DIST", vec![n(0.0), n(shape), n(1.0), b(false)]), 0.0, 0.0);
         close_tol(ev("WEIBULL.DIST", vec![n(0.0), n(shape), n(1.0), b(true)]), 0.0, 0.0);
     }
-    close_tol(ev("WEIBULL.DIST", vec![n(1.0), n(1.0), n(1.0), b(false)]), (-1.0f64).exp(), 1e-15);
-    close_tol(ev("WEIBULL.DIST", vec![n(1.0), n(1.0), n(1.0), b(true)]), 1.0 - (-1.0f64).exp(), 1e-15);
+    close_tol(ev("WEIBULL.DIST", vec![n(1.0), n(1.0), n(1.0), b(false)]), fmath::exp(-1.0f64), 1e-15);
+    close_tol(ev("WEIBULL.DIST", vec![n(1.0), n(1.0), n(1.0), b(true)]), 1.0 - fmath::exp(-1.0f64), 1e-15);
     is_err(ev("WEIBULL.DIST", vec![n(-0.1), n(1.0), n(1.0), b(false)]), CellError::Num);
 }
 
@@ -1097,7 +1098,7 @@ fn allowed(want: f64) -> f64 {
     if want == 0.0 {
         return 1e-300;
     }
-    1e-13 + 2e-16 * want.abs().ln().abs()
+    1e-13 + 2e-16 * fmath::ln(want.abs()).abs()
 }
 
 #[test]
@@ -1148,7 +1149,7 @@ fn binom_and_poisson_edge_cases() {
     close(ev("POISSON.DIST", vec![n(0.0), n(0.0), b(false)]), 1.0);
     close(ev("POISSON.DIST", vec![n(4.0), n(0.0), b(false)]), 0.0);
     close(ev("POISSON.DIST", vec![n(4.0), n(0.0), b(true)]), 1.0);
-    close_tol(ev("POISSON.DIST", vec![n(0.0), n(3.0), b(true)]), (-3.0f64).exp(), 1e-15);
+    close_tol(ev("POISSON.DIST", vec![n(0.0), n(3.0), b(true)]), fmath::exp(-3.0f64), 1e-15);
     // Fractions truncate as before.
     close(ev("BINOM.DIST", vec![n(6.9), n(10.9), n(0.5), b(false)]), 0.205078125);
     // The 10,000 trial switch of the method no longer shows: neighbours agree to 1e-14.

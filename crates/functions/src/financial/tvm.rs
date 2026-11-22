@@ -1,4 +1,5 @@
 use super::{Arg, CellError, Ctx, R, Value, array_numbers, as_array, flatten, num, num_val, numbers, opt_num, type_arg};
+use gridcraft_core::fmath;
 
 // ---------------------------------------------------------------------------------------------
 // Time value of money
@@ -16,8 +17,8 @@ fn pmt_calc(rate: f64, nper: f64, pv: f64, fv: f64, typ: f64) -> f64 {
     if rate <= -1.0 {
         return f64::NAN;
     }
-    let l = nper * rate.ln_1p();
-    let m = l.exp_m1();
+    let l = nper * fmath::ln_1p(rate);
+    let m = fmath::exp_m1(l);
     let k = 1.0 + rate * typ;
     if m > 0.0 {
         // (fv + pv*p) / (p - 1) = pv + (pv + fv) / (p - 1), without the cancellation in p - 1.
@@ -28,7 +29,7 @@ fn pmt_calc(rate: f64, nper: f64, pv: f64, fv: f64, typ: f64) -> f64 {
         -(rate * (pv + fv + pv * m)) / (k * m)
     } else {
         // p well below 1: m nears -1 and pv*m would swallow pv + fv, so use p itself.
-        -(rate * (fv + pv * l.exp())) / (k * m)
+        -(rate * (fv + pv * fmath::exp(l))) / (k * m)
     }
 }
 
@@ -36,7 +37,7 @@ fn fv_calc(rate: f64, nper: f64, pmt: f64, pv: f64, typ: f64) -> f64 {
     if rate == 0.0 {
         return -(pv + pmt * nper);
     }
-    let p = (1.0 + rate).powf(nper);
+    let p = fmath::pow(1.0 + rate, nper);
     -(pv * p + pmt * (1.0 + rate * typ) * (p - 1.0) / rate)
 }
 
@@ -44,7 +45,7 @@ fn pv_calc(rate: f64, nper: f64, pmt: f64, fv: f64, typ: f64) -> f64 {
     if rate == 0.0 {
         return -(fv + pmt * nper);
     }
-    let p = (1.0 + rate).powf(nper);
+    let p = fmath::pow(1.0 + rate, nper);
     -(fv + pmt * (1.0 + rate * typ) * (p - 1.0) / rate) / p
 }
 
@@ -85,7 +86,7 @@ pub(super) fn nper(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     if q <= 0.0 || rate <= -1.0 {
         return Err(CellError::Num);
     }
-    num_val(q.ln() / (1.0 + rate).ln())
+    num_val(fmath::ln(q) / fmath::ln(1.0 + rate))
 }
 
 fn ipmt_calc(rate: f64, per: f64, nper: f64, pv: f64, fv: f64, typ: f64) -> f64 {
@@ -225,7 +226,7 @@ fn rate_equation(r: f64, np: f64, pmt: f64, pv: f64, fv: f64, typ: f64) -> (f64,
     if r == 0.0 {
         return (pv + pmt * np + fv, pv.abs() + (pmt * np).abs() + fv.abs());
     }
-    let p = (1.0 + r).powf(np);
+    let p = fmath::pow(1.0 + r, np);
     let (a, b) = (pv * p, pmt * (1.0 / r + typ) * (p - 1.0));
     (a + b + fv, a.abs() + b.abs() + fv.abs())
 }
@@ -345,7 +346,7 @@ fn dated_flows(values: &Value, dates: &Value) -> R<(Vec<f64>, Vec<f64>)> {
 
 fn xnpv_calc(rate: f64, v: &[f64], d: &[f64]) -> f64 {
     let d0 = d.first().copied().unwrap_or(0.0);
-    v.iter().zip(d).map(|(x, t)| x / (1.0 + rate).powf((t - d0) / 365.0)).sum()
+    v.iter().zip(d).map(|(x, t)| x / fmath::pow(1.0 + rate, (t - d0) / 365.0)).sum()
 }
 
 pub(super) fn xnpv(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
@@ -403,7 +404,7 @@ pub(super) fn mirr(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     if neg == 0.0 {
         return Err(CellError::Div0);
     }
-    let r = (-pos * (1.0 + rr).powf(n - 1.0) / neg).powf(1.0 / (n - 1.0)) - 1.0;
+    let r = fmath::pow(-pos * fmath::pow(1.0 + rr, n - 1.0) / neg, 1.0 / (n - 1.0)) - 1.0;
     num_val(r)
 }
 
@@ -426,7 +427,7 @@ pub(super) fn effect(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     if nom <= 0.0 || n < 1.0 {
         return Err(CellError::Num);
     }
-    num_val((1.0 + nom / n).powf(n) - 1.0)
+    num_val(fmath::pow(1.0 + nom / n, n) - 1.0)
 }
 
 pub(super) fn nominal(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
@@ -434,7 +435,7 @@ pub(super) fn nominal(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     if eff <= 0.0 || n < 1.0 {
         return Err(CellError::Num);
     }
-    num_val(n * ((1.0 + eff).powf(1.0 / n) - 1.0))
+    num_val(n * (fmath::pow(1.0 + eff, 1.0 / n) - 1.0))
 }
 
 pub(super) fn ispmt(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
@@ -450,7 +451,7 @@ pub(super) fn pduration(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     if rate <= 0.0 || pv <= 0.0 || fv <= 0.0 {
         return Err(CellError::Num);
     }
-    num_val((fv.ln() - pv.ln()) / (1.0 + rate).ln())
+    num_val((fmath::ln(fv) - fmath::ln(pv)) / fmath::ln(1.0 + rate))
 }
 
 pub(super) fn rri(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
@@ -458,7 +459,7 @@ pub(super) fn rri(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     if np <= 0.0 || pv == 0.0 {
         return Err(CellError::Num);
     }
-    num_val((fv / pv).powf(1.0 / np) - 1.0)
+    num_val(fmath::pow(fv / pv, 1.0 / np) - 1.0)
 }
 
 fn dollar_digits(fraction: f64) -> R<f64> {
@@ -468,7 +469,7 @@ fn dollar_digits(fraction: f64) -> R<f64> {
     if fraction < 1.0 {
         return Err(CellError::Div0);
     }
-    Ok(10f64.powf(fraction.log10().ceil()))
+    Ok(fmath::pow(10f64, fmath::log10(fraction).ceil()))
 }
 
 pub(super) fn dollarde(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {

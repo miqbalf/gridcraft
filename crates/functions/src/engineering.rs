@@ -1,6 +1,7 @@
 //! Engineering functions: base conversion, bit operations, unit conversion, error function,
 //! complex numbers and Bessel functions.
 
+use gridcraft_core::fmath;
 use std::f64::consts::PI;
 
 use gridcraft_core::{CellError, Value, number_to_text};
@@ -257,10 +258,10 @@ use complex::{Cx, ONE, complex, im_unary, imabs, imaginary, imargument, imdiv, i
 use units::convert;
 
 im1!(imconjugate, |z: Cx| Ok(Cx::new(z.re, -z.im)));
-im1!(imexp, |z: Cx| Ok(z.exp()));
-im1!(imln, |z: Cx| z.ln());
-im1!(imlog10, |z: Cx| z.ln().map(|l| Cx::new(l.re / std::f64::consts::LN_10, l.im / std::f64::consts::LN_10)));
-im1!(imlog2, |z: Cx| z.ln().map(|l| Cx::new(l.re / std::f64::consts::LN_2, l.im / std::f64::consts::LN_2)));
+im1!(imexp, |z: Cx| Ok(z.cexp()));
+im1!(imln, |z: Cx| z.cln());
+im1!(imlog10, |z: Cx| z.cln().map(|l| Cx::new(l.re / std::f64::consts::LN_10, l.im / std::f64::consts::LN_10)));
+im1!(imlog2, |z: Cx| z.cln().map(|l| Cx::new(l.re / std::f64::consts::LN_2, l.im / std::f64::consts::LN_2)));
 // Excel takes the polar route, so IMSQRT("-4") is 1.22514845490862E-16+2i, not 2i. Its cosine
 // reduces its argument with a 64-bit-mantissa pi, which is PI/2 + 2.5e-20 and shows up as the
 // stray real part. `+ 0.0` turns a -0 imaginary part into +0, so the angle stays +pi.
@@ -276,22 +277,22 @@ im1!(imsqrt, |z: Cx| {
                 std::f64::consts::FRAC_PI_2.copysign(im)
             }
         }
-        x if x > 0.0 => (im / x).atan(),
-        x => (im / x).atan() + if im < 0.0 { -std::f64::consts::PI } else { std::f64::consts::PI },
+        x if x > 0.0 => fmath::atan(im / x),
+        x => fmath::atan(im / x) + if im < 0.0 { -std::f64::consts::PI } else { std::f64::consts::PI },
     };
     let (half, root) = (theta / 2.0, z.abs().sqrt());
-    Ok(Cx::new(root * (half.cos() + HALF_PI_EXCESS * half.abs().sin()), root * half.sin()))
+    Ok(Cx::new(root * (fmath::cos(half) + HALF_PI_EXCESS * fmath::sin(half.abs())), root * fmath::sin(half)))
 });
-im1!(imsin, |z: Cx| Ok(z.sin()));
-im1!(imcos, |z: Cx| Ok(z.cos()));
-im1!(imtan, |z: Cx| z.sin().div(z.cos()));
-im1!(imcot, |z: Cx| z.cos().div(z.sin()));
-im1!(imsec, |z: Cx| ONE.div(z.cos()));
-im1!(imcsc, |z: Cx| ONE.div(z.sin()));
-im1!(imsinh, |z: Cx| Ok(z.sinh()));
-im1!(imcosh, |z: Cx| Ok(z.cosh()));
-im1!(imsech, |z: Cx| ONE.div(z.cosh()));
-im1!(imcsch, |z: Cx| ONE.div(z.sinh()));
+im1!(imsin, |z: Cx| Ok(z.csin()));
+im1!(imcos, |z: Cx| Ok(z.ccos()));
+im1!(imtan, |z: Cx| z.csin().div(z.ccos()));
+im1!(imcot, |z: Cx| z.ccos().div(z.csin()));
+im1!(imsec, |z: Cx| ONE.div(z.ccos()));
+im1!(imcsc, |z: Cx| ONE.div(z.csin()));
+im1!(imsinh, |z: Cx| Ok(z.csinh()));
+im1!(imcosh, |z: Cx| Ok(z.ccosh()));
+im1!(imsech, |z: Cx| ONE.div(z.ccosh()));
+im1!(imcsch, |z: Cx| ONE.div(z.csinh()));
 
 pub(crate) fn specs() -> Vec<FnSpec> {
     vec![

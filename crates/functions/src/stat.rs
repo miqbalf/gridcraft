@@ -1,6 +1,7 @@
 //! Statistical functions: aggregates, order statistics, regression and probability
 //! distributions (with their inverses).
 
+use gridcraft_core::fmath;
 use gridcraft_core::{CellError, Value};
 
 use crate::special::{
@@ -704,7 +705,9 @@ pub(crate) fn specs() -> Vec<FnSpec> {
         f!("Z.TEST", 2, 3, Statistical, S_PRANK, "Z.TEST(array, x, [sigma])", "One-tailed probability of a z-test.", z_test),
         f!("ZTEST", 2, 3, Compatibility, S_PRANK, "ZTEST(array, x, [sigma])", "One-tailed probability of a z-test.", z_test),
         f!("FISHER", 1, 1, Statistical, S, "FISHER(x)", "Fisher transformation.", fisher),
-        f!("FISHERINV", 1, 1, Statistical, S, "FISHERINV(y)", "Inverse of the Fisher transformation.", |a: &[Arg], _c: C| num_val(num(a, 0)?.tanh())),
+        f!("FISHERINV", 1, 1, Statistical, S, "FISHERINV(y)", "Inverse of the Fisher transformation.", |a: &[Arg], _c: C| num_val(fmath::tanh(num(
+            a, 0
+        )?))),
         f!("PHI", 1, 1, Statistical, S, "PHI(x)", "Standard normal density.", |a: &[Arg], _c: C| num_val(norm_pdf(num(a, 0)?))),
         f!("GAUSS", 1, 1, Statistical, S, "GAUSS(z)", "Probability that a standard normal value falls between the mean and z.", gauss),
     ]

@@ -3,6 +3,7 @@ use super::{
     Arg, C, CellError, R, Value, arg, as_array, boolean, erf, gamma, has, invert, ln_beta, ln_gamma, norm_cdf, norm_inv, norm_pdf, num, num_val,
     reg_gamma_p, reg_gamma_q, reg_gamma_q_front, reg_inc_beta, reg_inc_beta_front,
 };
+use gridcraft_core::fmath;
 
 // ---------------------------------------------------------------------------------------------
 // Distributions
@@ -25,11 +26,11 @@ fn t_pdf(t: f64, v: f64) -> f64 {
     let z = v / 2.0;
     let log_gamma_ratio = if z >= 16.0 {
         let inv_z = 1.0 / z;
-        0.5 * z.ln() - inv_z / 8.0 + inv_z.powi(3) / 192.0 - inv_z.powi(5) / 640.0 + 17.0 * inv_z.powi(7) / 14_336.0
+        0.5 * fmath::ln(z) - inv_z / 8.0 + inv_z.powi(3) / 192.0 - inv_z.powi(5) / 640.0 + 17.0 * inv_z.powi(7) / 14_336.0
     } else {
         ln_gamma(z + 0.5) - ln_gamma(z)
     };
-    (log_gamma_ratio - 0.5 * (v.ln() + std::f64::consts::PI.ln()) - (v + 1.0) / 2.0 * (t * t / v).ln_1p()).exp()
+    fmath::exp(log_gamma_ratio - 0.5 * (fmath::ln(v) + fmath::ln(std::f64::consts::PI)) - (v + 1.0) / 2.0 * fmath::ln_1p(t * t / v))
 }
 
 /// t ≥ 0 with P(T > t) = q, q in (0, 0.5].
@@ -88,7 +89,11 @@ fn f_pdf(x: f64, d1: f64, d2: f64) -> f64 {
             0.0
         };
     }
-    ((d1 / 2.0) * (d1 / d2).ln() + (d1 / 2.0 - 1.0) * x.ln() - ((d1 + d2) / 2.0) * (1.0 + d1 * x / d2).ln() - ln_beta(d1 / 2.0, d2 / 2.0)).exp()
+    fmath::exp(
+        (d1 / 2.0) * fmath::ln(d1 / d2) + (d1 / 2.0 - 1.0) * fmath::ln(x)
+            - ((d1 + d2) / 2.0) * fmath::ln(1.0 + d1 * x / d2)
+            - ln_beta(d1 / 2.0, d2 / 2.0),
+    )
 }
 
 const MAX_BINOM_TRIALS: f64 = 2_147_483_646.0;
@@ -158,7 +163,7 @@ fn bd0(x: f64, np: f64) -> f64 {
             s = s1;
         }
     }
-    x * (x / np).ln() + np - x
+    x * fmath::ln(x / np) + np - x
 }
 
 /// `(1 - p)^e` with the rounding error of `1 - p` (it is not exact for `p < 1/2`) folded back in,
@@ -166,9 +171,9 @@ fn bd0(x: f64, np: f64) -> f64 {
 fn pow_one_minus(p: f64, e: f64) -> f64 {
     let hi = 1.0 - p;
     let lo = (1.0 - hi) - p;
-    let r = hi.powf(e) * (e * (lo / hi).ln_1p()).exp();
+    let r = fmath::pow(hi, e) * fmath::exp(e * fmath::ln_1p(lo / hi));
     // An exponent so large that the two factors under- and overflow: the plain form is enough.
-    if r.is_nan() { (e * (-p).ln_1p()).exp() } else { r }
+    if r.is_nan() { fmath::exp(e * fmath::ln_1p(-p)) } else { r }
 }
 
 /// `C(n, k)` for a small `k` as a product of `k` ratios.
@@ -198,12 +203,12 @@ fn binom_pmf(k: f64, n: f64, p: f64) -> f64 {
         return if n == 0.0 { 1.0 } else { pow_one_minus(p, n) };
     }
     if k == n {
-        return p.powf(n);
+        return fmath::pow(p, n);
     }
     // A few successes or a few failures: the product form has no large cancelling terms.
     // (Not for astronomically large n, or when either power underflows: the
     // saddle-point form below handles those through logs.)
-    if n < 1e30 && p.powf(k) > 1e-280 {
+    if n < 1e30 && fmath::pow(p, k) > 1e-280 {
         if k < 16.0 {
             let rest = pow_one_minus(p, n - k);
             if rest >= f64::MIN_POSITIVE {
@@ -211,13 +216,13 @@ fn binom_pmf(k: f64, n: f64, p: f64) -> f64 {
             }
         }
         if n - k < 16.0 {
-            return choose_small(n, n - k) * p.powf(k) * pow_one_minus(p, n - k);
+            return choose_small(n, n - k) * fmath::pow(p, k) * pow_one_minus(p, n - k);
         }
     }
     let q = 1.0 - p;
     let lc = stirlerr(n) - stirlerr(k) - stirlerr(n - k) - bd0(k, n * p) - bd0(n - k, n * q);
-    let lf = std::f64::consts::TAU.ln() + k.ln() + (-k / n).ln_1p();
-    (lc - 0.5 * lf).exp()
+    let lf = fmath::ln(std::f64::consts::TAU) + fmath::ln(k) + fmath::ln_1p(-k / n);
+    fmath::exp(lc - 0.5 * lf)
 }
 
 /// Sum of the binomial masses 0..=k for `n <= 10_000`: starts at the term nearest the mode
@@ -283,9 +288,9 @@ fn poisson_pmf(x: f64, m: f64) -> f64 {
         return if x == 0.0 { 1.0 } else { 0.0 };
     }
     if x == 0.0 {
-        return (-m).exp();
+        return fmath::exp(-m);
     }
-    (-stirlerr(x) - bd0(x, m)).exp() / (std::f64::consts::TAU * x).sqrt()
+    fmath::exp(-stirlerr(x) - bd0(x, m)) / (std::f64::consts::TAU * x).sqrt()
 }
 
 fn poisson_cdf(x: f64, m: f64) -> f64 {
@@ -479,7 +484,7 @@ pub(super) fn chisq_dist(a: &[Arg], _: C) -> R<Value> {
             num_val(0.0)
         };
     }
-    num_val(((v / 2.0 - 1.0) * x.ln() - x / 2.0 - (v / 2.0) * 2f64.ln() - ln_gamma(v / 2.0)).exp())
+    num_val(fmath::exp((v / 2.0 - 1.0) * fmath::ln(x) - x / 2.0 - (v / 2.0) * fmath::ln(2f64) - ln_gamma(v / 2.0)))
 }
 
 pub(super) fn chisq_dist_rt(a: &[Arg], _: C) -> R<Value> {
@@ -673,7 +678,7 @@ pub(super) fn expon_dist(a: &[Arg], _: C) -> R<Value> {
     if x < 0.0 || l <= 0.0 {
         return Err(CellError::Num);
     }
-    num_val(if cum { -(-l * x).exp_m1() } else { l * (-l * x).exp() })
+    num_val(if cum { -fmath::exp_m1(-l * x) } else { l * fmath::exp(-l * x) })
 }
 
 pub(super) fn gamma_fn(a: &[Arg], _: C) -> R<Value> {
@@ -696,7 +701,7 @@ pub(super) fn gamma_dist(a: &[Arg], _: C) -> R<Value> {
     if x == 0.0 {
         return if al <= 1.0 { Err(CellError::Num) } else { num_val(0.0) };
     }
-    num_val(((al - 1.0) * x.ln() - x / be - al * be.ln() - ln_gamma(al)).exp())
+    num_val(fmath::exp((al - 1.0) * fmath::ln(x) - x / be - al * fmath::ln(be) - ln_gamma(al)))
 }
 
 pub(super) fn gamma_inv(a: &[Arg], _: C) -> R<Value> {
@@ -744,9 +749,9 @@ pub(super) fn beta_dist(a: &[Arg], _: C) -> R<Value> {
         let base = if z == 0.0 { al } else { be };
         if base == 1.0 { -ln_beta(al, be) } else { f64::NEG_INFINITY }
     } else {
-        (al - 1.0) * z.ln() + (be - 1.0) * (1.0 - z).ln() - ln_beta(al, be)
+        (al - 1.0) * fmath::ln(z) + (be - 1.0) * fmath::ln(1.0 - z) - ln_beta(al, be)
     };
-    num_val(lp.exp() / (hi - lo))
+    num_val(fmath::exp(lp) / (hi - lo))
 }
 
 pub(super) fn betadist_legacy(a: &[Arg], _: C) -> R<Value> {
@@ -780,7 +785,7 @@ pub(super) fn lognorm_dist(a: &[Arg], _: C) -> R<Value> {
     if x <= 0.0 || sd <= 0.0 {
         return Err(CellError::Num);
     }
-    let z = (x.ln() - m) / sd;
+    let z = (fmath::ln(x) - m) / sd;
     num_val(if cum { norm_cdf(z) } else { norm_pdf(z) / (x * sd) })
 }
 
@@ -789,7 +794,7 @@ pub(super) fn lognorm_inv(a: &[Arg], _: C) -> R<Value> {
     if !(p > 0.0 && p < 1.0) || sd <= 0.0 {
         return Err(CellError::Num);
     }
-    num_val((m + sd * norm_inv(p)).exp())
+    num_val(fmath::exp(m + sd * norm_inv(p)))
 }
 
 pub(super) fn weibull_dist(a: &[Arg], _: C) -> R<Value> {
@@ -800,8 +805,8 @@ pub(super) fn weibull_dist(a: &[Arg], _: C) -> R<Value> {
     if x == 0.0 {
         return num_val(0.0);
     }
-    let t = (x / be).powf(al);
-    num_val(if cum { -(-t).exp_m1() } else { al / be.powf(al) * x.powf(al - 1.0) * (-t).exp() })
+    let t = fmath::pow(x / be, al);
+    num_val(if cum { -fmath::exp_m1(-t) } else { al / fmath::pow(be, al) * fmath::pow(x, al - 1.0) * fmath::exp(-t) })
 }
 
 pub(super) fn hypgeom_dist(a: &[Arg], _: C) -> R<Value> {
@@ -813,7 +818,7 @@ pub(super) fn hypgeom_dist(a: &[Arg], _: C) -> R<Value> {
     if k < 0.0 || n <= 0.0 || kk <= 0.0 || nn <= 0.0 || n > nn || kk > nn || k > n.min(kk) || k < (n - nn + kk).max(0.0) {
         return Err(CellError::Num);
     }
-    let pmf = |i: f64| (ln_comb(kk, i) + ln_comb(nn - kk, n - i) - ln_comb(nn, n)).exp();
+    let pmf = |i: f64| fmath::exp(ln_comb(kk, i) + ln_comb(nn - kk, n - i) - ln_comb(nn, n));
     if !cum {
         return num_val(pmf(k));
     }
@@ -846,7 +851,7 @@ pub(super) fn negbinom_dist(a: &[Arg], _: C) -> R<Value> {
     if p == 0.0 || p == 1.0 {
         return num_val(if p == 1.0 && f == 0.0 { 1.0 } else { 0.0 });
     }
-    num_val((ln_comb(f + s - 1.0, s - 1.0) + s * p.ln() + f * (1.0 - p).ln()).exp())
+    num_val(fmath::exp(ln_comb(f + s - 1.0, s - 1.0) + s * fmath::ln(p) + f * fmath::ln(1.0 - p)))
 }
 
 pub(super) fn confidence_norm(a: &[Arg], _: C) -> R<Value> {
@@ -887,7 +892,7 @@ pub(super) fn fisher(a: &[Arg], _: C) -> R<Value> {
     if x <= -1.0 || x >= 1.0 {
         return Err(CellError::Num);
     }
-    num_val(0.5 * ((1.0 + x) / (1.0 - x)).ln())
+    num_val(0.5 * fmath::ln((1.0 + x) / (1.0 - x)))
 }
 
 pub(super) fn gauss(a: &[Arg], _: C) -> R<Value> {

@@ -1,6 +1,7 @@
 //! Math & trigonometry functions, plus the criteria aggregates (SUMIF(S), COUNTIF(S),
 //! AVERAGEIF(S), MAXIFS, MINIFS).
 
+use gridcraft_core::fmath;
 use std::f64::consts::PI;
 
 use gridcraft_core::{Array, CellError, Value};
@@ -368,20 +369,20 @@ fn power_of(x: f64, y: f64) -> R<f64> {
     if x < 0.0 && y.fract() != 0.0 {
         return Err(CellError::Num);
     }
-    let r = x.powf(y);
+    let r = fmath::pow(x, y);
     if r.is_finite() { Ok(r) } else { Err(CellError::Num) }
 }
 fn power(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     num_val(power_of(num(a, 0)?, num(a, 1)?)?)
 }
 fn exp(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    unary(a, |x| Ok(x.exp()))
+    unary(a, |x| Ok(fmath::exp(x)))
 }
 fn ln(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    unary(a, |x| if x <= 0.0 { Err(CellError::Num) } else { Ok(x.ln()) })
+    unary(a, |x| if x <= 0.0 { Err(CellError::Num) } else { Ok(fmath::ln(x)) })
 }
 fn log10(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    unary(a, |x| if x <= 0.0 { Err(CellError::Num) } else { Ok(x.log10()) })
+    unary(a, |x| if x <= 0.0 { Err(CellError::Num) } else { Ok(fmath::log10(x)) })
 }
 fn log(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     let x = num(a, 0)?;
@@ -393,11 +394,11 @@ fn log(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
         return Err(CellError::Div0);
     }
     let r = if base == 10.0 {
-        x.log10()
+        fmath::log10(x)
     } else if base == 2.0 {
-        x.log2()
+        fmath::log2(x)
     } else {
-        x.ln() / base.ln()
+        fmath::ln(x) / fmath::ln(base)
     };
     num_val(r)
 }
@@ -464,7 +465,7 @@ fn combin_of(n: f64, k: f64) -> R<f64> {
     }
     let k = k.min(n - k);
     if k > 1e7 {
-        let r = (crate::special::ln_gamma(n + 1.0) - crate::special::ln_gamma(k + 1.0) - crate::special::ln_gamma(n - k + 1.0)).exp();
+        let r = fmath::exp(crate::special::ln_gamma(n + 1.0) - crate::special::ln_gamma(k + 1.0) - crate::special::ln_gamma(n - k + 1.0));
         return if r.is_finite() { Ok(r) } else { Err(CellError::Num) };
     }
     let mut r = 1.0f64;
@@ -512,7 +513,7 @@ fn permutationa(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     if n < 0.0 || k < 0.0 {
         return Err(CellError::Num);
     }
-    num_val(n.powf(k))
+    num_val(fmath::pow(n, k))
 }
 
 fn integer_args(a: &[Arg]) -> R<Vec<u64>> {
@@ -574,71 +575,71 @@ fn multinomial(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
 // Trigonometry
 
 fn sin(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    unary(a, |x| Ok(trig_arg(x)?.sin()))
+    unary(a, |x| Ok(fmath::sin(trig_arg(x)?)))
 }
 fn cos(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    unary(a, |x| Ok(trig_arg(x)?.cos()))
+    unary(a, |x| Ok(fmath::cos(trig_arg(x)?)))
 }
 fn tan(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    unary(a, |x| Ok(trig_arg(x)?.tan()))
+    unary(a, |x| Ok(fmath::tan(trig_arg(x)?)))
 }
 fn asin(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    unary(a, |x| if x.abs() > 1.0 { Err(CellError::Num) } else { Ok(x.asin()) })
+    unary(a, |x| if x.abs() > 1.0 { Err(CellError::Num) } else { Ok(fmath::asin(x)) })
 }
 fn acos(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    unary(a, |x| if x.abs() > 1.0 { Err(CellError::Num) } else { Ok(x.acos()) })
+    unary(a, |x| if x.abs() > 1.0 { Err(CellError::Num) } else { Ok(fmath::acos(x)) })
 }
 fn atan(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    unary(a, |x| Ok(x.atan()))
+    unary(a, |x| Ok(fmath::atan(x)))
 }
 fn atan2(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     let (x, y) = (num(a, 0)?, num(a, 1)?);
     if x == 0.0 && y == 0.0 {
         return Err(CellError::Div0);
     }
-    num_val(y.atan2(x))
+    num_val(fmath::atan2(y, x))
 }
 fn sinh(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    unary(a, |x| Ok(x.sinh()))
+    unary(a, |x| Ok(fmath::sinh(x)))
 }
 fn cosh(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    unary(a, |x| Ok(x.cosh()))
+    unary(a, |x| Ok(fmath::cosh(x)))
 }
 fn tanh(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    unary(a, |x| Ok(x.tanh()))
+    unary(a, |x| Ok(fmath::tanh(x)))
 }
 fn asinh(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    unary(a, |x| Ok(x.asinh()))
+    unary(a, |x| Ok(fmath::asinh(x)))
 }
 fn acosh(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    unary(a, |x| if x < 1.0 { Err(CellError::Num) } else { Ok(x.acosh()) })
+    unary(a, |x| if x < 1.0 { Err(CellError::Num) } else { Ok(fmath::acosh(x)) })
 }
 fn atanh(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    unary(a, |x| if x.abs() >= 1.0 { Err(CellError::Num) } else { Ok(x.atanh()) })
+    unary(a, |x| if x.abs() >= 1.0 { Err(CellError::Num) } else { Ok(fmath::atanh(x)) })
 }
 fn cot(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    unary(a, |x| Ok(1.0 / nonzero(trig_arg(x)?)?.tan()))
+    unary(a, |x| Ok(1.0 / fmath::tan(nonzero(trig_arg(x)?)?)))
 }
 fn coth(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    unary(a, |x| Ok(1.0 / nonzero(trig_arg(x)?)?.tanh()))
+    unary(a, |x| Ok(1.0 / fmath::tanh(nonzero(trig_arg(x)?)?)))
 }
 fn csc(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    unary(a, |x| Ok(1.0 / nonzero(trig_arg(x)?)?.sin()))
+    unary(a, |x| Ok(1.0 / fmath::sin(nonzero(trig_arg(x)?)?)))
 }
 fn csch(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    unary(a, |x| Ok(1.0 / nonzero(trig_arg(x)?)?.sinh()))
+    unary(a, |x| Ok(1.0 / fmath::sinh(nonzero(trig_arg(x)?)?)))
 }
 fn sec(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    unary(a, |x| Ok(1.0 / trig_arg(x)?.cos()))
+    unary(a, |x| Ok(1.0 / fmath::cos(trig_arg(x)?)))
 }
 fn sech(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    unary(a, |x| Ok(1.0 / trig_arg(x)?.cosh()))
+    unary(a, |x| Ok(1.0 / fmath::cosh(trig_arg(x)?)))
 }
 fn acot(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    unary(a, |x| Ok(PI / 2.0 - x.atan()))
+    unary(a, |x| Ok(PI / 2.0 - fmath::atan(x)))
 }
 fn acoth(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    unary(a, |x| if x.abs() <= 1.0 { Err(CellError::Num) } else { Ok(0.5 * ((x + 1.0) / (x - 1.0)).ln()) })
+    unary(a, |x| if x.abs() <= 1.0 { Err(CellError::Num) } else { Ok(0.5 * fmath::ln((x + 1.0) / (x - 1.0))) })
 }
 fn degrees(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     unary(a, |x| Ok(x * 180.0 / PI))

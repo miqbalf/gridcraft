@@ -1,4 +1,5 @@
 use super::{Arg, CellError, Ctx, R, Value, flatten, has, num, num_val, number_to_text, scalar, text, text_val};
+use gridcraft_core::fmath;
 
 // ---------------------------------------------------------------------------------------------
 // Complex numbers
@@ -30,40 +31,40 @@ impl Cx {
         Ok(Cx::new((self.re * o.re + self.im * o.im) / d, (self.im * o.re - self.re * o.im) / d))
     }
     pub(super) fn abs(self) -> f64 {
-        self.re.hypot(self.im)
+        fmath::hypot(self.re, self.im)
     }
     fn arg(self) -> f64 {
-        self.im.atan2(self.re)
+        fmath::atan2(self.im, self.re)
     }
-    pub(super) fn exp(self) -> Cx {
-        let e = self.re.exp();
-        Cx::new(e * self.im.cos(), e * self.im.sin())
+    pub(super) fn cexp(self) -> Cx {
+        let e = fmath::exp(self.re);
+        Cx::new(e * fmath::cos(self.im), e * fmath::sin(self.im))
     }
-    pub(super) fn ln(self) -> R<Cx> {
+    pub(super) fn cln(self) -> R<Cx> {
         if self.re == 0.0 && self.im == 0.0 {
             return Err(CellError::Num);
         }
-        Ok(Cx::new(self.abs().ln(), self.arg()))
+        Ok(Cx::new(fmath::ln(self.abs()), self.arg()))
     }
-    pub(super) fn sin(self) -> Cx {
-        Cx::new(self.re.sin() * self.im.cosh(), self.re.cos() * self.im.sinh())
+    pub(super) fn csin(self) -> Cx {
+        Cx::new(fmath::sin(self.re) * fmath::cosh(self.im), fmath::cos(self.re) * fmath::sinh(self.im))
     }
-    pub(super) fn cos(self) -> Cx {
-        Cx::new(self.re.cos() * self.im.cosh(), -self.re.sin() * self.im.sinh())
+    pub(super) fn ccos(self) -> Cx {
+        Cx::new(fmath::cos(self.re) * fmath::cosh(self.im), -fmath::sin(self.re) * fmath::sinh(self.im))
     }
-    pub(super) fn sinh(self) -> Cx {
-        Cx::new(self.re.sinh() * self.im.cos(), self.re.cosh() * self.im.sin())
+    pub(super) fn csinh(self) -> Cx {
+        Cx::new(fmath::sinh(self.re) * fmath::cos(self.im), fmath::cosh(self.re) * fmath::sin(self.im))
     }
-    pub(super) fn cosh(self) -> Cx {
-        Cx::new(self.re.cosh() * self.im.cos(), self.re.sinh() * self.im.sin())
+    pub(super) fn ccosh(self) -> Cx {
+        Cx::new(fmath::cosh(self.re) * fmath::cos(self.im), fmath::sinh(self.re) * fmath::sin(self.im))
     }
-    fn powf(self, n: f64) -> R<Cx> {
+    fn cpow(self, n: f64) -> R<Cx> {
         if self.re == 0.0 && self.im == 0.0 {
             return if n > 0.0 { Ok(Cx::new(0.0, 0.0)) } else { Err(CellError::Num) };
         }
-        let r = self.abs().powf(n);
+        let r = fmath::pow(self.abs(), n);
         let t = self.arg() * n;
-        Ok(Cx::new(r * t.cos(), r * t.sin()))
+        Ok(Cx::new(r * fmath::cos(t), r * fmath::sin(t)))
     }
 }
 
@@ -237,7 +238,7 @@ pub(super) fn impower(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
         }
         if n < 0.0 { ONE.div(acc)? } else { acc }
     } else {
-        z.powf(n)?
+        z.cpow(n)?
     };
     fmt_complex(r, s.unwrap_or('i'))
 }

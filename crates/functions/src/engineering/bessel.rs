@@ -1,4 +1,5 @@
 use super::{Arg, CellError, Ctx, PI, R, Value, num, num_val};
+use gridcraft_core::fmath;
 
 // ---------------------------------------------------------------------------------------------
 // Bessel functions
@@ -18,7 +19,7 @@ fn bessel_j(n: u32, x: f64) -> Option<f64> {
     let mut sum = 0.0;
     for k in 0..m {
         let t = k as f64 * h;
-        sum += (nf * t - x * t.sin()).cos();
+        sum += fmath::cos(nf * t - x * fmath::sin(t));
     }
     Some(sum / m as f64)
 }
@@ -50,8 +51,8 @@ fn hankel(n: u32, x: f64) -> Option<(f64, f64)> {
     }
     let chi = x - (n as f64 / 2.0 + 0.25) * PI;
     let f = (2.0 / (PI * x)).sqrt();
-    let j = f * (p * chi.cos() - q * chi.sin());
-    let y = f * (p * chi.sin() + q * chi.cos());
+    let j = f * (p * fmath::cos(chi) - q * fmath::sin(chi));
+    let y = f * (p * fmath::sin(chi) + q * fmath::cos(chi));
     if j.is_finite() && y.is_finite() { Some((j, y)) } else { None }
 }
 
@@ -98,7 +99,7 @@ fn bessel_y01(x: f64) -> Option<(f64, f64)> {
     }
     let j = bessel_j_all(x);
     let jj = |k: usize| j.get(k).copied().unwrap_or(0.0);
-    let l = (x / 2.0).ln() + EULER;
+    let l = fmath::ln(x / 2.0) + EULER;
     // Y0 = (2/π)(L J0) − (4/π) Σ (−1)^k J_{2k}/k
     // Y1 = −Y0' = −(2/π)(J0/x − L J1) + (2/π) Σ (−1)^k (J_{2k−1} − J_{2k+1})/k
     let mut s0 = 0.0;
@@ -139,7 +140,7 @@ fn bessel_i(n: u32, x: f64) -> Option<f64> {
     }
     let ax = x.abs();
     let nf = n as f64;
-    let ln_t0 = nf * (ax / 2.0).ln() - crate::special::ln_gamma(nf + 1.0);
+    let ln_t0 = nf * fmath::ln(ax / 2.0) - crate::special::ln_gamma(nf + 1.0);
     let q = ax * ax / 4.0;
     let mut term = 1.0;
     let mut sum = 1.0;
@@ -155,7 +156,7 @@ fn bessel_i(n: u32, x: f64) -> Option<f64> {
             return None;
         }
     }
-    let r = (ln_t0 + sum.ln()).exp();
+    let r = fmath::exp(ln_t0 + fmath::ln(sum));
     let r = if x < 0.0 && n % 2 == 1 { -r } else { r };
     if r.is_finite() { Some(r) } else { None }
 }
@@ -165,12 +166,12 @@ fn bessel_i(n: u32, x: f64) -> Option<f64> {
 fn bessel_k(n: u32, x: f64) -> Option<f64> {
     let k_int = |nu: f64| -> f64 {
         let h: f64 = 0.02;
-        let mut sum = 0.5 * (-x).exp();
+        let mut sum = 0.5 * fmath::exp(-x);
         let mut t: f64 = h;
         while t < 800.0 {
-            let v = (-x * t.cosh() + (nu * t).ln_cosh_safe()).exp();
+            let v = fmath::exp(-x * fmath::cosh(t) + (nu * t).ln_cosh_safe());
             sum += v;
-            if v < 1e-18 * sum && x * t.cosh() > 50.0 {
+            if v < 1e-18 * sum && x * fmath::cosh(t) > 50.0 {
                 break;
             }
             t += h;
@@ -202,7 +203,7 @@ impl LnCosh for f64 {
     /// ln(cosh(x)) without overflow.
     fn ln_cosh_safe(self) -> f64 {
         let a = self.abs();
-        a + (-2.0 * a).exp().ln_1p() - std::f64::consts::LN_2
+        a + fmath::ln_1p(fmath::exp(-2.0 * a)) - std::f64::consts::LN_2
     }
 }
 

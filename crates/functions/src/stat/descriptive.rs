@@ -1,4 +1,5 @@
 use super::{Arg, C, CellError, R, Value, arg, array_numbers, array_val, as_array, has, num, num_val, opt_num};
+use gridcraft_core::fmath;
 
 // ---------------------------------------------------------------------------------------------
 // Basic helpers over number lists
@@ -479,7 +480,7 @@ pub(super) fn geomean(v: &[f64]) -> R<f64> {
     if v.is_empty() || v.iter().any(|&x| x <= 0.0) {
         return Err(CellError::Num);
     }
-    Ok((v.iter().map(|x| x.ln()).sum::<f64>() / v.len() as f64).exp())
+    Ok(fmath::exp(v.iter().map(|x| fmath::ln(*x)).sum::<f64>() / v.len() as f64))
 }
 
 pub(super) fn harmean(v: &[f64]) -> R<f64> {

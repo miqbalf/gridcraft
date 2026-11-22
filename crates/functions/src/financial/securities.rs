@@ -1,5 +1,6 @@
 use super::day_count::{basis_arg, coup_daybs, coup_days, coup_daysnc, coupons, date, day_count, freq_arg, shift_months, year_basis, year_frac, ymd};
 use super::{Arg, CellError, Ctx, DateSystem, R, Value, days_in_month, has, num, num_val, opt_bool};
+use gridcraft_core::fmath;
 
 // ---------------------------------------------------------------------------------------------
 // Securities
@@ -219,10 +220,10 @@ fn bond_price(b: &Bond, rate: f64, yld: f64, red: f64) -> f64 {
     }
     let base = 1.0 + yld / f;
     let frac = b.dsc / b.e;
-    let mut sum = red / base.powf(b.n - 1.0 + frac);
+    let mut sum = red / fmath::pow(base, b.n - 1.0 + frac);
     let mut k = 1.0;
     while k <= b.n {
-        sum += coupon / base.powf(k - 1.0 + frac);
+        sum += coupon / fmath::pow(base, k - 1.0 + frac);
         k += 1.0;
     }
     sum - accrued
@@ -286,7 +287,7 @@ fn duration_calc(a: &[Arg], sys: DateSystem) -> R<(f64, f64, f64)> {
     while k <= b.n {
         let t = k - 1.0 + frac;
         let cf = if k == b.n { c + 100.0 } else { c };
-        let pv = cf / y.powf(t);
+        let pv = cf / fmath::pow(y, t);
         wsum += t * pv;
         psum += pv;
         k += 1.0;
@@ -389,10 +390,10 @@ fn odd_first_price(t: &OddFirst, rate: f64, yld: f64, red: f64) -> f64 {
     let coupon = 100.0 * rate / t.freq;
     let base = 1.0 + yld / t.freq;
     let lead = t.nq + t.frac;
-    let mut p = red / base.powf(t.n + lead) + coupon * t.dc / base.powf(lead);
+    let mut p = red / fmath::pow(base, t.n + lead) + coupon * t.dc / fmath::pow(base, lead);
     let mut k = 1.0;
     while k <= t.n {
-        p += coupon / base.powf(k + lead);
+        p += coupon / fmath::pow(base, k + lead);
         k += 1.0;
     }
     p - coupon * t.acc

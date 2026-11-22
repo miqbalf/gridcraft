@@ -1,5 +1,6 @@
 use super::descriptive::{arg_pairs, intercept, moments, slope};
 use super::{Arg, C, CellError, R, Value, arg, array_val, as_array, boolean, has, num, num_val};
+use gridcraft_core::fmath;
 
 pub(super) fn forecast(a: &[Arg], _: C) -> R<Value> {
     let x = num(a, 0)?;
@@ -314,12 +315,12 @@ pub(super) fn linest_impl(a: &[Arg], log: bool) -> R<Value> {
         if xy.y.iter().any(|&v| v <= 0.0) {
             return Err(CellError::Num);
         }
-        xy.y.iter_mut().for_each(|v| *v = v.ln());
+        xy.y.iter_mut().for_each(|v| *v = fmath::ln(*v));
     }
     let constant = const_arg(a, 2)?;
     let stats = if has(a, 3) { boolean(a, 3)? } else { false };
     let fit = regress(&xy.y, &xy.x, xy.k, constant)?;
-    let tr = |v: f64| if log { v.exp() } else { v };
+    let tr = |v: f64| if log { fmath::exp(v) } else { v };
     let cols = xy.k + 1;
     let mut data: Vec<Value> = Vec::new();
     for c in fit.coef.iter().rev() {
@@ -355,13 +356,13 @@ pub(super) fn trend_impl(a: &[Arg], log: bool) -> R<Value> {
         if xy.y.iter().any(|&v| v <= 0.0) {
             return Err(CellError::Num);
         }
-        xy.y.iter_mut().for_each(|v| *v = v.ln());
+        xy.y.iter_mut().for_each(|v| *v = fmath::ln(*v));
     }
     let constant = const_arg(a, 3)?;
     let fit = regress(&xy.y, &xy.x, xy.k, constant)?;
     let predict = |row: &[f64]| -> Value {
         let v = fit.b + fit.coef.iter().zip(row).map(|(c, x)| c * x).sum::<f64>();
-        Value::number(if log { v.exp() } else { v })
+        Value::number(if log { fmath::exp(v) } else { v })
     };
     match opt_value(a, 2) {
         None => {
