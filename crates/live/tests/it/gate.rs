@@ -136,3 +136,21 @@ fn a_remote_change_waits_for_an_open_undo_group_then_lands() {
     room.settle();
     assert_eq!(room.finger(0), room.finger(1), "applied once the group ended");
 }
+
+#[test]
+fn a_held_restore_does_not_wipe_remote_changes_that_landed_meanwhile() {
+    let mut room = Room::new(2);
+    let merges = room.wb(1).sheet(0).unwrap().merges.clone();
+    let token = room.peers[1].session.group_begin("macro").unwrap();
+    // A bypassed edit inside the group: the put-back is held until the group ends.
+    room.peers[1].session.execute("home.mergeCells", json!({"range": "A1:B1"})).unwrap();
+    room.pump(1);
+    room.peers[1].session.group_end(token).unwrap();
+    // A remote change now lands in the same pump that retries the held put-back.
+    room.run(0, "cell.set", json!({"cell": "D6", "input": "from alice"})).unwrap();
+    room.settle();
+    room.assert_all_live("held restore");
+    assert_eq!(room.wb(1).sheet(0).unwrap().merges, merges, "the merge was put back");
+    assert!(room.wb(1).sheet(0).unwrap().cell(a1("D6")).is_some(), "the remote change survived the restore");
+    assert_eq!(room.finger(0), room.finger(1));
+}
