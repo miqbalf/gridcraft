@@ -14,7 +14,7 @@
 //!
 //! Drawing the other editors' selections is [`crate::grid::presence`].
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -64,6 +64,8 @@ const POLL: Duration = Duration::from_millis(100);
 pub const EDITOR_GONE_TEXT: &str = "The row or column of the cell you were editing was deleted by another editor.";
 /// The same, with the entry kept.
 pub const EDITOR_GONE_DRAFT_TEXT: &str = "The row or column of the cell you were editing was deleted by another editor. Your entry was: {draft}";
+/// Told when the live workbook is closed.
+pub const LIVE_ENDED_TEXT: &str = "Live editing ended because the workbook was closed.";
 /// Longest draft the info bar shows; a longer one is also shown whole in a message box.
 const DRAFT_SHOWN: usize = 160;
 
@@ -82,14 +84,17 @@ pub struct LiveUi {
     viewers: HashSet<String>,
     /// Ribbon names of the commands the gate refuses.
     blocked: Arc<BTreeSet<String>>,
+    /// Notices not shown yet, oldest first: the info bar shows one at a time.
+    queue: VecDeque<(String, NoticeKind)>,
 }
 
 impl LiveUi {
-    /// Wraps a started session; `doc` is the workbook it edits.
+    /// Wraps a started session. The workbook it edits is the session's own.
     #[must_use]
-    pub fn new(live: Live, doc: u64) -> LiveUi {
+    pub fn new(live: Live) -> LiveUi {
+        let doc = live.doc();
         let blocked = Arc::new(blocked_names(&live));
-        LiveUi { live, doc, peers: Vec::new(), bar: PresenceBar::new(), moved: HashMap::new(), viewers: HashSet::new(), blocked }
+        LiveUi { live, doc, peers: Vec::new(), bar: PresenceBar::new(), moved: HashMap::new(), viewers: HashSet::new(), blocked, queue: VecDeque::new() }
     }
 
     #[must_use]
@@ -184,7 +189,7 @@ impl LiveUi {
     fn refresh(&mut self, mut peers: Vec<Peer>, now: f64, lang: Language, names: &dyn Fn(usize) -> String) {
         // A caret on an id this window does not know yet is not drawn until it is known.
         for p in &mut peers {
-            p.caret = p.caret.take().filter(|c| !c.hidden);
+            p.caret = p.caret.take().filter(|c| !c.unknown);
         }
         self.moved.retain(|id, _| peers.iter().any(|p| &p.id == id));
         for p in &peers {
@@ -213,6 +218,22 @@ impl LiveUi {
         let badges = self.badges(lang, names);
         self.bar.set(badges);
     }
+}
+
+/// Whether `live` was started on `session`: its workbook is open there and carries the session's
+/// edit hook. A session started elsewhere would let this window edit with nothing shared.
+///
+/// # Errors
+/// What is wrong, as text for the user.
+pub fn check_attached(session: &gridcraft_engine::Session, live: &Live) -> Result<(), String> {
+    let doc = live.doc();
+    if session.document_index(doc).is_none() {
+        return Err("The live session was started on a workbook this window does not have open".into());
+    }
+    if session.live_undo_doc() != Some(doc) {
+        return Err("The live session was started on another engine session".into());
+    }
+    Ok(())
 }
 
 /// The ribbon names (catalog labels) of the commands the gate refuses. A label shared with a
@@ -250,17 +271,17 @@ impl SheetApp {
     }
 
     /// Attaches a live session started on the active workbook, for a host that has it only after
-    /// the window exists (the web host). The session must have been started on the session's
-    /// active document, which `GridLive::start` leaves active.
+    /// the window exists (the web host). The session must have been started on this window's
+    /// engine session (it carries the session's edit hook).
     ///
     /// # Errors
-    /// The window is already live, or has no workbook open.
+    /// The window is already live, or the session was not started on this window's engine session.
     pub fn attach_live(&mut self, live: Live) -> Result<(), String> {
         if self.live.is_some() {
             return Err("This window is already editing live".into());
         }
-        let doc = self.session.active().map(|d| d.uid).ok_or_else(|| "There is no workbook to edit live".to_owned())?;
-        self.live = Some(LiveUi::new(live, doc));
+        check_attached(&self.session, &live)?;
+        self.live = Some(LiveUi::new(live));
         Ok(())
     }
 
@@ -280,8 +301,13 @@ impl SheetApp {
 
     /// Runs a command on the workbook: through the live session when there is one (the gate
     /// decides), else on the engine.
+    ///
+    /// Only a command whose target is the live workbook goes through the session: it makes the
+    /// live workbook active, so a command for another open workbook (a new one, a dropped file)
+    /// would otherwise be written into the live one and shared. Those run on their own workbook.
     pub(crate) fn engine_run(&mut self, id: &str, params: Json) -> Result<Json, String> {
-        match self.live.as_mut() {
+        let target = self.session.active().map(|d| d.uid);
+        match self.live.as_mut().filter(|lu| target == Some(lu.doc)) {
             Some(lu) => match lu.live.run(&mut self.session, id, params)? {
                 Ran::Done(done) => Ok(done),
                 Ran::Queued => Ok(json!({"queued": true})),
@@ -290,10 +316,23 @@ impl SheetApp {
         }
     }
 
+    /// Ends the live session (its workbook was closed): the engine's hooks come off, and the
+    /// window goes on with its other workbooks.
+    fn end_live(&mut self, ctx: &egui::Context, lu: LiveUi) {
+        ctx.data_mut(|d| d.remove_temp::<Arc<BTreeSet<String>>>(egui::Id::NULL.with(BLOCKED_ID)));
+        lu.live.stop(&mut self.session);
+        let lang = self.ui.language;
+        self.notice = Some(Notice { text: lang.tr(LIVE_ENDED_TEXT).to_owned(), kind: NoticeKind::Info, action: None });
+    }
+
     /// One frame of a live window: anchors the open editor, takes in the room, moves the editor
     /// with its row, and shows what the room told.
     pub(crate) fn live_frame(&mut self, ctx: &egui::Context) {
         let Some(mut lu) = self.live.take() else { return };
+        if self.session.document_index(lu.doc).is_none() {
+            self.end_live(ctx, lu);
+            return;
+        }
         let now = ctx.input(|i| i.time);
         let lang = self.ui.language;
         let slot = self.live_editor_slot(lu.doc);
@@ -301,7 +340,13 @@ impl SheetApp {
         // Only an anchor that resolves can be lost: one that never took (a cell outside the
         // layout) must not close the editor.
         let tracked = slot.is_some() && lu.live.editor_at(&self.session).is_some();
+        // Running a queued row or column change makes the live workbook active: put the view back
+        // on the workbook the user is in.
+        let viewing = self.session.active().map(|d| d.uid);
         let peers = lu.live.pump(&mut self.session);
+        if let Some(i) = viewing.filter(|uid| self.session.active().map(|d| d.uid) != Some(*uid)).and_then(|uid| self.session.document_index(uid)) {
+            self.session.set_active(i);
+        }
         let gone = tracked.then(|| self.follow_live_editor(&lu)).flatten();
         let doc = lu.doc;
         let names = |sheet: usize| {
@@ -319,13 +364,20 @@ impl SheetApp {
             .filter(|left| *left > 0.0)
             .fold(None, |a: Option<f64>, left| Some(a.map_or(left, |a| a.min(left))));
         ctx.request_repaint_after(due.map_or(POLL, |left| POLL.min(Duration::from_secs_f64(left.max(0.01)))));
-        self.live = Some(lu);
+        for text in notes {
+            lu.queue.push_back((lang.tr(&text).to_owned(), NoticeKind::Info));
+        }
         if let Some(draft) = gone {
-            self.tell_editor_gone(draft);
+            self.tell_editor_gone(&mut lu, draft);
         }
-        if let Some(text) = notes.last() {
-            self.notice = Some(Notice { text: lang.tr(text).to_owned(), kind: NoticeKind::Info, action: None });
+        // One notice at a time in the info bar, the next when it is dismissed; none is dropped.
+        if self.notice.is_none()
+            && let Some((text, kind)) = lu.queue.pop_front()
+        {
+            let text = if lu.queue.is_empty() { text } else { lang.tr_fill("{text} (+{count} more)", &[("text", &text), ("count", &lu.queue.len().to_string())]) };
+            self.notice = Some(Notice { text, kind, action: None });
         }
+        self.live = Some(lu);
     }
 
     /// The sheet index and cell of the open cell editor when it is on the live workbook.
@@ -360,21 +412,21 @@ impl SheetApp {
         }
     }
 
-    /// Says the cell being edited was deleted, and shows the entry so it is not lost.
-    fn tell_editor_gone(&mut self, draft: Option<String>) {
+    /// Says the cell being edited was deleted, and shows the entry whole in a message box (so it
+    /// is not lost, whatever its length) as well as in the notice queue.
+    fn tell_editor_gone(&mut self, lu: &mut LiveUi, draft: Option<String>) {
         let lang = self.ui.language;
-        let text = match &draft {
-            None => lang.tr(EDITOR_GONE_TEXT).to_owned(),
-            Some(d) => {
-                let shown: String =
-                    if d.chars().count() > DRAFT_SHOWN { d.chars().take(DRAFT_SHOWN).chain(std::iter::once('…')).collect() } else { d.clone() };
-                lang.tr_fill(EDITOR_GONE_DRAFT_TEXT, &[("draft", &shown)])
-            }
+        let Some(d) = draft else {
+            lu.queue.push_back((lang.tr(EDITOR_GONE_TEXT).to_owned(), NoticeKind::Warning));
+            return;
         };
-        self.notice = Some(Notice { text, kind: NoticeKind::Warning, action: None });
-        if let Some(d) = draft.filter(|d| d.chars().count() > DRAFT_SHOWN) {
-            self.message = Some(("GridCraft".into(), lang.tr_fill(EDITOR_GONE_DRAFT_TEXT, &[("draft", &d)])));
-        }
+        let shown: String = if d.chars().count() > DRAFT_SHOWN { d.chars().take(DRAFT_SHOWN).chain(std::iter::once('…')).collect() } else { d.clone() };
+        lu.queue.push_back((lang.tr_fill(EDITOR_GONE_DRAFT_TEXT, &[("draft", &shown)]), NoticeKind::Warning));
+        let whole = lang.tr_fill(EDITOR_GONE_DRAFT_TEXT, &[("draft", &d)]);
+        self.message = Some(match self.message.take() {
+            Some((title, earlier)) => (title, format!("{earlier}\n\n{whole}")),
+            None => ("GridCraft".into(), whole),
+        });
     }
 
     /// Selects the cell another editor is on (a click on their badge), going to their sheet first.

@@ -61,12 +61,17 @@ fn gated<R>(ui: &mut Ui, tip: &str, f: impl FnOnce(&mut Ui) -> R) -> R {
     if !crate::live::tip_blocked(ui.ctx(), tip) {
         return f(ui);
     }
-    let out = ui.scope(|ui| {
+    let reason = crate::live::blocked_tip(ui.ctx());
+    ui.scope(|ui| {
         ui.disable();
-        f(ui)
-    });
-    out.response.on_hover_text(crate::live::blocked_tip(ui.ctx()));
-    out.inner
+        let out = f(ui);
+        // A disabled control shows no tooltip of its own: this one, laid over it and disabled
+        // too, shows the reason.
+        let over = ui.interact(ui.min_rect(), ui.scope_id().with("live-gated"), Sense::hover());
+        over.on_disabled_hover_text(reason);
+        out
+    })
+    .inner
 }
 
 /// A flat square icon button with hover highlight and tooltip.
@@ -120,7 +125,7 @@ fn toggle_button_ungated(ui: &mut Ui, icon: Icon, on: bool, tip: &str) -> Respon
 
 /// Large ribbon button: 32px icon over a one- or two-line label.
 pub fn big_button(ui: &mut Ui, icon: Icon, label: &str, tip: &str, dropdown: bool) -> Response {
-    gated(ui, tip, |ui| big_button_ungated(ui, icon, label, tip, dropdown))
+    gated(ui, if dropdown { "" } else { tip }, |ui| big_button_ungated(ui, icon, label, tip, dropdown))
 }
 
 fn big_button_ungated(ui: &mut Ui, icon: Icon, label: &str, tip: &str, dropdown: bool) -> Response {
@@ -145,7 +150,7 @@ fn big_button_ungated(ui: &mut Ui, icon: Icon, label: &str, tip: &str, dropdown:
 /// arrow open the menu. Returns the (main, arrow) responses; their accessible names are the label
 /// and "<label> options".
 pub fn big_split_button(ui: &mut Ui, icon: Icon, label: &str, tip: &str) -> (Response, Response) {
-    gated(ui, tip, |ui| big_split_button_ungated(ui, icon, label, tip))
+    big_split_button_ungated(ui, icon, label, tip)
 }
 
 fn big_split_button_ungated(ui: &mut Ui, icon: Icon, label: &str, tip: &str) -> (Response, Response) {
@@ -219,7 +224,7 @@ pub fn small_button(ui: &mut Ui, icon: Icon, label: &str, tip: &str, dropdown: b
 /// Small ribbon button whose icon takes an accent colour (see [`icons::paint_accent`]); `None`
 /// draws it like [`small_button`]. A labelled button reports its label to accessibility.
 pub fn small_button_accent(ui: &mut Ui, icon: Icon, accent: Option<Color32>, label: &str, tip: &str, dropdown: bool) -> Response {
-    gated(ui, tip, |ui| small_button_accent_ungated(ui, icon, accent, label, tip, dropdown))
+    gated(ui, if dropdown { "" } else { tip }, |ui| small_button_accent_ungated(ui, icon, accent, label, tip, dropdown))
 }
 
 fn small_button_accent_ungated(ui: &mut Ui, icon: Icon, accent: Option<Color32>, label: &str, tip: &str, dropdown: bool) -> Response {
@@ -282,7 +287,7 @@ fn small_toggle_button_ungated(ui: &mut Ui, icon: Icon, label: &str, tip: &str, 
 /// A split button: main part runs the default action, the arrow opens a menu.
 /// Returns (main clicked, arrow response).
 pub fn split_button(ui: &mut Ui, icon: Icon, accent: Option<Color32>, tip: &str) -> (bool, Response) {
-    gated(ui, tip, |ui| split_button_ungated(ui, icon, accent, tip))
+    split_button_ungated(ui, icon, accent, tip)
 }
 
 fn split_button_ungated(ui: &mut Ui, icon: Icon, accent: Option<Color32>, tip: &str) -> (bool, Response) {
@@ -307,7 +312,7 @@ fn split_button_ungated(ui: &mut Ui, icon: Icon, accent: Option<Color32>, tip: &
 /// A small ribbon split button with a label (Error Checking): the icon and label run the default
 /// action, the arrow at the right opens a menu. Returns (main response, arrow response).
 pub fn small_split_button(ui: &mut Ui, icon: Icon, label: &str, tip: &str) -> (Response, Response) {
-    gated(ui, tip, |ui| small_split_button_ungated(ui, icon, label, tip))
+    small_split_button_ungated(ui, icon, label, tip)
 }
 
 fn small_split_button_ungated(ui: &mut Ui, icon: Icon, label: &str, tip: &str) -> (Response, Response) {
