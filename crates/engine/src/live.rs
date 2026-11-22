@@ -8,12 +8,13 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use gridcraft_core::CellRef;
+use gridcraft_calc::Key;
+use gridcraft_core::{CellRef, MAX_COLS, MAX_ROWS, RangeRef};
 use gridcraft_formula::adjust::{Axis, Edit};
-use gridcraft_model::{LineInfo, Sheet, StyleId, Workbook};
+use gridcraft_model::{Cell, DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, LineInfo, Sheet, Style, StyleId, Workbook};
 use serde_json::Value as Json;
 
-use crate::Session;
+use crate::{EngineError, Result, Selection, Session};
 
 /// Hears every top-level command that changed a document ([`Session::set_observer`]).
 pub trait EditObserver: Send {
@@ -458,6 +459,190 @@ fn workbook_diff(b: &Workbook, a: &Workbook, u: &mut Vec<Unshared>) {
     for (name, differs) in checks {
         if differs {
             push_once(u, Unshared::Workbook(name));
+        }
+    }
+}
+
+/// Takes over Undo and Redo of a live session (H3): `true` for a redo; answers whether it did
+/// anything.
+pub(crate) type UndoHook = Box<dyn FnMut(bool) -> bool + Send>;
+
+fn refuse<T>(msg: impl Into<String>) -> Result<T> {
+    Err(EngineError::Other(msg.into()))
+}
+
+/// Changes that arrive from other peers (H2), applied to a copy of the workbook that
+/// [`Session::apply_remote`] puts in place only when all of them succeed. Nothing here checks
+/// what the local user may edit: a peer's change was allowed where it was made.
+pub struct RemoteCtx<'a> {
+    wb: Workbook,
+    changed: Vec<Key>,
+    /// Lines or sizes changed: every formula is recalculated.
+    recalc_all: bool,
+    _session: std::marker::PhantomData<&'a mut Session>,
+}
+
+impl RemoteCtx<'_> {
+    pub fn workbook(&self) -> &Workbook {
+        &self.wb
+    }
+
+    /// Puts `cell` at `at` (`None` clears it). The cell and its dependents are recalculated.
+    pub fn set_cell(&mut self, sheet: usize, at: CellRef, cell: Option<Cell>) -> Result<()> {
+        if !at.is_valid() {
+            return refuse("a remote cell lies outside the grid");
+        }
+        if cell.as_ref().is_some_and(|c| usize::try_from(c.style.0).map_or(true, |n| n >= self.wb.styles.len())) {
+            return refuse("a remote cell names a style that does not exist");
+        }
+        let Some(sh) = self.wb.sheet_mut(sheet) else { return refuse("a remote change names a sheet that does not exist") };
+        match cell {
+            Some(c) => sh.set_cell(at, c),
+            None => {
+                sh.remove_cell(at);
+            }
+        }
+        self.changed.push((sheet, at));
+        Ok(())
+    }
+
+    /// Sets (or with `None` removes) the information of one row or column.
+    pub fn set_line(&mut self, sheet: usize, axis: Axis, index: u32, info: Option<LineInfo>) -> Result<()> {
+        let limit = if axis == Axis::Rows { MAX_ROWS } else { MAX_COLS };
+        if index >= limit {
+            return refuse("a remote line lies outside the grid");
+        }
+        if let Some(i) = &info {
+            if i.size.is_some_and(|s| !s.is_finite() || s < 0.0) {
+                return refuse("a remote line has an invalid size");
+            }
+            if i.style.is_some_and(|s| usize::try_from(s.0).map_or(true, |n| n >= self.wb.styles.len())) {
+                return refuse("a remote line names a style that does not exist");
+            }
+        }
+        let Some(sh) = self.wb.sheet_mut(sheet) else { return refuse("a remote change names a sheet that does not exist") };
+        let lines = if axis == Axis::Rows { &mut sh.rows } else { &mut sh.cols };
+        match info {
+            Some(i) => {
+                lines.insert(index, i);
+            }
+            None => {
+                lines.remove(&index);
+            }
+        }
+        self.recalc_all = true;
+        Ok(())
+    }
+
+    /// Sets (or with `None` resets) the default row height or column width.
+    pub fn set_default_size(&mut self, sheet: usize, axis: Axis, size: Option<f32>) -> Result<()> {
+        if size.is_some_and(|s| !s.is_finite() || s <= 0.0) {
+            return refuse("a remote default size is invalid");
+        }
+        let Some(sh) = self.wb.sheet_mut(sheet) else { return refuse("a remote change names a sheet that does not exist") };
+        if axis == Axis::Rows {
+            sh.default_row_height = size.unwrap_or(DEFAULT_ROW_HEIGHT);
+        } else {
+            sh.default_col_width = size.unwrap_or(DEFAULT_COL_WIDTH);
+        }
+        self.recalc_all = true;
+        Ok(())
+    }
+
+    /// The id of `style` in the workbook's table; equal formats give equal ids.
+    pub fn intern_style(&mut self, style: &Style) -> StyleId {
+        self.wb.styles.intern(style.clone())
+    }
+
+    pub fn style_of(&self, id: StyleId) -> Option<&Style> {
+        usize::try_from(id.0).ok().filter(|n| *n < self.wb.styles.len()).map(|_| self.wb.styles.get(id))
+    }
+
+    /// Inserts `count` lines before `at` (H5; G7 implements it).
+    pub fn insert_lines(&mut self, _sheet: usize, _axis: Axis, _at: u32, _count: u32) -> Result<()> {
+        refuse("remote inserts of lines are not supported yet")
+    }
+
+    /// Deletes the inclusive `(first, last)` areas of lines (H5; G7 implements it).
+    pub fn delete_lines(&mut self, _sheet: usize, _axis: Axis, _areas: &[(u32, u32)]) -> Result<()> {
+        refuse("remote deletes of lines are not supported yet")
+    }
+}
+
+impl Session {
+    /// Applies changes from other peers to document `doc`. No undo step, no journal entry, no
+    /// observer call; the changed cells are recalculated (everything after lines), and the
+    /// selection stays. An `Err` leaves the workbook exactly as it was.
+    pub fn apply_remote<R>(&mut self, doc: u64, f: impl FnOnce(&mut RemoteCtx) -> Result<R>) -> Result<R> {
+        let Some(d) = self.docs.iter_mut().find(|d| d.uid == doc) else { return Err(EngineError::NoDocument) };
+        let mut cx = RemoteCtx { wb: (*d.wb).clone(), changed: Vec::new(), recalc_all: false, _session: std::marker::PhantomData };
+        let r = f(&mut cx)?;
+        let RemoteCtx { mut wb, changed, recalc_all, .. } = cx;
+        if recalc_all {
+            d.calc.recalc_all(&mut wb);
+        } else if !changed.is_empty() {
+            d.calc.cells_changed(&mut wb, &changed);
+        }
+        crate::cmd::controls::sync_linked_values(&mut wb);
+        d.wb = Arc::new(wb);
+        d.revision += 1;
+        Ok(r)
+    }
+
+    /// Puts `wb` in place of the document's workbook without an undo step or an observer call, and
+    /// recalculates everything. The selection stays where it can.
+    pub fn replace_workbook_quiet(&mut self, doc: u64, wb: Arc<Workbook>) -> Result<()> {
+        let Some(d) = self.docs.iter_mut().find(|d| d.uid == doc) else { return Err(EngineError::NoDocument) };
+        if wb.sheets.is_empty() {
+            return refuse("a workbook needs at least one sheet");
+        }
+        let mut fresh = (*wb).clone();
+        d.calc.rebuild(&fresh);
+        d.calc.recalc_all(&mut fresh);
+        d.wb = Arc::new(fresh);
+        d.revision += 1;
+        Ok(())
+    }
+
+    /// Moves the selection without a command (a collaborator's cursor never reaches here; this is
+    /// for the local view after a remote change). Clamped to the grid, never empty.
+    pub fn set_selection_quiet(&mut self, doc: u64, sel: Selection) -> Result<()> {
+        let Some(d) = self.docs.iter_mut().find(|d| d.uid == doc) else { return Err(EngineError::NoDocument) };
+        let clamp = |c: CellRef| CellRef::new(c.row.min(MAX_ROWS - 1), c.col.min(MAX_COLS - 1));
+        let active = clamp(sel.active);
+        let mut ranges: Vec<RangeRef> = sel.ranges.iter().map(|r| RangeRef::new(clamp(r.start), clamp(r.end))).collect();
+        if ranges.last().is_none_or(|r| !r.contains(active)) {
+            ranges.push(RangeRef::cell(active));
+        }
+        d.selection = Selection { active, anchor: clamp(sel.anchor), ranges };
+        Ok(())
+    }
+
+    /// Installs (or removes) the live undo hook (H3). While set, `edit.undo` and `edit.redo` call
+    /// it instead of the snapshot history, which stays as it is.
+    pub fn set_live_undo_hook(&mut self, hook: Option<Box<dyn FnMut(bool) -> bool + Send>>) {
+        self.live_undo = hook;
+    }
+
+    pub(crate) fn has_live_undo(&self) -> bool {
+        self.live_undo.is_some()
+    }
+
+    /// Runs the hook; `None` when there is none. A panicking hook is dropped.
+    pub(crate) fn live_undo(&mut self, redo: bool) -> Option<bool> {
+        let mut hook = self.live_undo.take()?;
+        let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook(redo)));
+        match done {
+            Ok(done) => {
+                if self.live_undo.is_none() {
+                    self.live_undo = Some(hook);
+                }
+                Some(done)
+            }
+            Err(_) => {
+                log::error!("the live undo hook panicked and was removed");
+                Some(false)
+            }
         }
     }
 }

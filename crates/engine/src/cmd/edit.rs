@@ -192,6 +192,9 @@ fn coalesce(cells: &[CellRef]) -> Vec<RangeRef> {
 // ---------------------------------------------------------------- history
 
 fn undo(s: &mut Session, p: &Json) -> Result<Json> {
+    if let Some(done) = s.live_undo(false) {
+        return Ok(json!({"undone": done.then_some("live")}));
+    }
     let steps = u32_param(p, "steps").unwrap_or(1).max(1);
     let d = s.doc_mut()?;
     let mut label = String::new();
@@ -216,6 +219,9 @@ fn undo(s: &mut Session, p: &Json) -> Result<Json> {
 }
 
 fn redo(s: &mut Session, p: &Json) -> Result<Json> {
+    if let Some(done) = s.live_undo(true) {
+        return Ok(json!({"redone": done.then_some("live")}));
+    }
     let steps = u32_param(p, "steps").unwrap_or(1).max(1);
     let d = s.doc_mut()?;
     let mut label = String::new();

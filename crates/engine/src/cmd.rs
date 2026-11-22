@@ -128,12 +128,12 @@ pub fn has_doc(s: &Session) -> std::result::Result<(), String> {
 pub fn can_undo(s: &Session) -> std::result::Result<(), String> {
     has_doc(s)?;
     not_grouping(s)?;
-    if s.active().is_some_and(|d| !d.undo.is_empty()) { Ok(()) } else { Err("nothing to undo".into()) }
+    if s.has_live_undo() || s.active().is_some_and(|d| !d.undo.is_empty()) { Ok(()) } else { Err("nothing to undo".into()) }
 }
 pub fn can_redo(s: &Session) -> std::result::Result<(), String> {
     has_doc(s)?;
     not_grouping(s)?;
-    if s.active().is_some_and(|d| !d.redo.is_empty()) { Ok(()) } else { Err("nothing to redo".into()) }
+    if s.has_live_undo() || s.active().is_some_and(|d| !d.redo.is_empty()) { Ok(()) } else { Err("nothing to redo".into()) }
 }
 /// Undo and Redo wait while an undo group is open on the active document (an action that spans
 /// several calls is still running).

@@ -44,7 +44,7 @@ pub use gridcraft_formula as formula;
 pub use gridcraft_math as math;
 pub use gridcraft_model as model;
 pub use gridcraft_numfmt as numfmt;
-pub use live::{EditObserver, EditReport, Unshared};
+pub use live::{EditObserver, EditReport, RemoteCtx, Unshared};
 pub use selection::Selection;
 pub use windows::{Target, TargetGuard, WindowState, WindowView};
 
@@ -578,6 +578,9 @@ pub struct Session {
     observer: Option<Box<dyn EditObserver>>,
     /// Counts the top-level commands that were observed (see [`live::Observed::epoch`]).
     observe_epoch: u64,
+    /// Takes over `edit.undo` and `edit.redo` while set (H3): the argument is whether it is a redo,
+    /// the answer whether anything was undone or redone.
+    live_undo: Option<live::UndoHook>,
 }
 
 impl Session {
