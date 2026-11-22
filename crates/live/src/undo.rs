@@ -182,6 +182,11 @@ fn write_bytes(w: &KeyWrite) -> usize {
     std::mem::size_of::<KeyWrite>() + w.key.len() + entry_bytes(&w.before) + entry_bytes(&w.after)
 }
 
+/// A key's identity across steps: the root's rank, the sheet and the key.
+type KeyId = (u8, Id, String);
+/// What an undo meant to write at a key, and what it wrote.
+type Rewrite<'a> = (&'a Entry<Value>, &'a Entry<Value>);
+
 /// A key's identity across steps.
 fn key_of(w: &KeyWrite) -> (u8, Id, &str) {
     let rank = match w.root {
@@ -198,7 +203,7 @@ fn key_of(w: &KeyWrite) -> (u8, Id, &str) {
 /// twice, such as an ordered undo's own revert, takes it back in one go).
 #[must_use]
 pub fn merged(writes: Vec<KeyWrite>) -> Vec<KeyWrite> {
-    let mut at: std::collections::HashMap<(u8, Id, String), usize> = std::collections::HashMap::new();
+    let mut at: std::collections::HashMap<KeyId, usize> = std::collections::HashMap::new();
     let mut out: Vec<KeyWrite> = Vec::with_capacity(writes.len());
     for w in writes {
         let (r, s, k) = key_of(&w);
@@ -223,7 +228,7 @@ pub fn merged(writes: Vec<KeyWrite>) -> Vec<KeyWrite> {
 /// older steps that left the key at `meant` now find it at `written`: their `after` follows, so
 /// this editor's own undos chain and are never taken for someone else's change.
 pub(crate) fn follow_rewrites(log: &mut UndoLog, rewrites: &[(KeyWrite, Entry<Value>)]) {
-    let changed: std::collections::HashMap<(u8, Id, String), (&Entry<Value>, &Entry<Value>)> = rewrites
+    let changed: std::collections::HashMap<KeyId, Rewrite<'_>> = rewrites
         .iter()
         .filter(|(w, written)| w.before != *written)
         .map(|(w, written)| {
