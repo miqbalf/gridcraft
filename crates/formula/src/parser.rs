@@ -60,8 +60,18 @@ pub(crate) fn parse_syntax(src: &str, locale: crate::FormulaLocale) -> Result<Ex
 }
 
 fn parse_top(src: &str, locale: crate::FormulaLocale, allow_union: bool) -> Result<Expr, ParseError> {
+    parse_checked(src, locale, allow_union, true)
+}
+
+/// [`parse`] without the length limit, for a caller that has measured the formula itself (the id
+/// form masks references with longer placeholders, so its text is not the formula's length).
+pub(crate) fn parse_unlimited(src: &str) -> Result<Expr, ParseError> {
+    parse_checked(src, crate::FormulaLocale::En, false, false)
+}
+
+fn parse_checked(src: &str, locale: crate::FormulaLocale, allow_union: bool, limit_length: bool) -> Result<Expr, ParseError> {
     let body = src.strip_prefix('=').unwrap_or(src);
-    if body.len() > MAX_FORMULA_LEN && body.chars().count() > MAX_FORMULA_LEN {
+    if limit_length && body.len() > MAX_FORMULA_LEN && body.chars().count() > MAX_FORMULA_LEN {
         return Err(ParseError { msg: format!("formula is longer than {MAX_FORMULA_LEN} characters"), pos: 0 });
     }
     let toks = tokenize_locale(body, locale).map_err(|e| ParseError { msg: e.msg, pos: e.pos })?;

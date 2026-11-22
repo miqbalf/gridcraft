@@ -5,6 +5,7 @@
 
 pub mod adjust;
 pub mod ast;
+pub mod ids;
 mod input;
 pub mod lexer;
 pub mod parser;
