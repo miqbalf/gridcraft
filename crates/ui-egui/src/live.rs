@@ -181,7 +181,11 @@ impl LiveUi {
     }
 
     /// Takes in the roster after a pump: tracks who moved, and refreshes the presence bar.
-    fn refresh(&mut self, peers: Vec<Peer>, now: f64, lang: Language, names: &dyn Fn(usize) -> String) {
+    fn refresh(&mut self, mut peers: Vec<Peer>, now: f64, lang: Language, names: &dyn Fn(usize) -> String) {
+        // A caret on an id this window does not know yet is not drawn until it is known.
+        for p in &mut peers {
+            p.caret = p.caret.take().filter(|c| !c.hidden);
+        }
         self.moved.retain(|id, _| peers.iter().any(|p| &p.id == id));
         for p in &peers {
             let Some(c) = &p.caret else { continue };
@@ -225,7 +229,7 @@ fn blocked_names(live: &Live) -> BTreeSet<String> {
 /// Whether the ribbon control named `tip` (the English name, as its tooltip is keyed) runs a
 /// command the live session refuses. False when the window is not live.
 pub(crate) fn tip_blocked(ctx: &egui::Context, tip: &str) -> bool {
-    let Some(set) = ctx.data(|d| d.get_temp::<Arc<BTreeSet<String>>>(egui::Id::new(BLOCKED_ID))) else { return false };
+    let Some(set) = ctx.data(|d| d.get_temp::<Arc<BTreeSet<String>>>(egui::Id::NULL.with(BLOCKED_ID))) else { return false };
     set.contains(&tip.replace('\n', " "))
 }
 
@@ -243,6 +247,21 @@ impl SheetApp {
 
     pub fn live_mut(&mut self) -> Option<&mut LiveUi> {
         self.live.as_mut()
+    }
+
+    /// Attaches a live session started on the active workbook, for a host that has it only after
+    /// the window exists (the web host). The session must have been started on the session's
+    /// active document, which `GridLive::start` leaves active.
+    ///
+    /// # Errors
+    /// The window is already live, or has no workbook open.
+    pub fn attach_live(&mut self, live: Live) -> Result<(), String> {
+        if self.live.is_some() {
+            return Err("This window is already editing live".into());
+        }
+        let doc = self.session.active().map(|d| d.uid).ok_or_else(|| "There is no workbook to edit live".to_owned())?;
+        self.live = Some(LiveUi::new(live, doc));
+        Ok(())
     }
 
     /// Whether the live session refuses `id`, a command that exists (UI-only ids and dialogs are
@@ -285,13 +304,20 @@ impl SheetApp {
         let peers = lu.live.pump(&mut self.session);
         let gone = tracked.then(|| self.follow_live_editor(&lu)).flatten();
         let doc = lu.doc;
-        let names = |sheet: usize| self.session.documents().iter().find(|d| d.uid == doc).and_then(|d| d.wb.sheet(sheet)).map(|s| s.name.clone()).unwrap_or_default();
+        let names = |sheet: usize| {
+            self.session.documents().iter().find(|d| d.uid == doc).and_then(|d| d.wb.sheet(sheet)).map(|s| s.name.clone()).unwrap_or_default()
+        };
         lu.refresh(peers, now, lang, &names);
         let notes = lu.live.take_notices();
         lu.live.send_selection(&self.session);
-        ctx.data_mut(|d| d.insert_temp(egui::Id::new(BLOCKED_ID), lu.blocked.clone()));
+        ctx.data_mut(|d| d.insert_temp(egui::Id::NULL.with(BLOCKED_ID), lu.blocked.clone()));
         // A name tag that is showing is due to go: wake up for it.
-        let due = lu.moved.values().map(|(_, at)| at + TAG_SECS - now).filter(|left| *left > 0.0).fold(None, |a: Option<f64>, left| Some(a.map_or(left, |a| a.min(left))));
+        let due = lu
+            .moved
+            .values()
+            .map(|(_, at)| at + TAG_SECS - now)
+            .filter(|left| *left > 0.0)
+            .fold(None, |a: Option<f64>, left| Some(a.map_or(left, |a| a.min(left))));
         ctx.request_repaint_after(due.map_or(POLL, |left| POLL.min(Duration::from_secs_f64(left.max(0.01)))));
         self.live = Some(lu);
         if let Some(draft) = gone {
@@ -340,7 +366,8 @@ impl SheetApp {
         let text = match &draft {
             None => lang.tr(EDITOR_GONE_TEXT).to_owned(),
             Some(d) => {
-                let shown: String = if d.chars().count() > DRAFT_SHOWN { d.chars().take(DRAFT_SHOWN).chain(std::iter::once('…')).collect() } else { d.clone() };
+                let shown: String =
+                    if d.chars().count() > DRAFT_SHOWN { d.chars().take(DRAFT_SHOWN).chain(std::iter::once('…')).collect() } else { d.clone() };
                 lang.tr_fill(EDITOR_GONE_DRAFT_TEXT, &[("draft", &shown)])
             }
         };

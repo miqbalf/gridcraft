@@ -59,9 +59,9 @@ pub(crate) fn paint(app: &SheetApp, ui: &egui::Ui, p: &Painter, geo: &Geo, sh: &
             "{name}'s selection, {range} on {sheet}",
             &[("name", &peer.display), ("range", &selection_text(pos.active, &pos.ranges)), ("sheet", &sh.name)],
         );
-        let id = egui::Id::new(("gridcraft.live.selection", &peer.id));
+        let id = ui.scope_id().with("gridcraft.live.selection").with(peer.id.as_str());
         let response = ui.interact(geo.mirror_rect(cell), id, Sense::hover());
-        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &name));
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &name));
     }
 }
 

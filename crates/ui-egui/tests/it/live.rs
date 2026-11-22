@@ -7,10 +7,10 @@
 use std::sync::Arc;
 
 use craft_collab::{ClientMsg, Hub};
-use craft_live::testing::{MemRelay, ROOM};
 use craft_live::Access;
-use egui_kittest::kittest::{NodeT as _, Queryable as _};
+use craft_live::testing::{MemRelay, ROOM};
 use egui::{Color32, Context, RawInput, Rect, Shape, pos2, vec2};
+use egui_kittest::kittest::{NodeT as _, Queryable as _};
 use gridcraft_engine::core::{CellRef, Value};
 use gridcraft_engine::model::{Cell, Sheet, Workbook};
 use gridcraft_engine::{Session, io};
@@ -142,11 +142,12 @@ fn remote_selection_is_drawn_with_a_named_accessibility_node() {
 }
 
 fn frame(ctx: &Context, app: &mut SheetApp) -> egui::FullOutput {
-    let mut output = ctx.run_ui(RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0))), ..Default::default() }, |ui| {
-        let ctx = ui.ctx().clone();
-        app.logic(&ctx);
-        app.ui(ui);
-    });
+    let mut output =
+        ctx.run_ui(RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0))), ..Default::default() }, |ui| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        });
     output.textures_delta.clear();
     output
 }
@@ -204,7 +205,8 @@ fn peer_on_another_sheet_shows_a_tab_dot() {
     let (mut rig, mut app) = rig(Access::Edit);
     let ctx = Context::default();
     theme::apply(&ctx, false);
-    let dots = |out: &egui::FullOutput, colour: Color32| out.shapes.iter().filter(|s| matches!(&s.shape, Shape::Circle(c) if c.fill == colour)).count();
+    let dots =
+        |out: &egui::FullOutput, colour: Color32| out.shapes.iter().filter(|s| matches!(&s.shape, Shape::Circle(c) if c.fill == colour)).count();
     frames(&mut rig, &ctx, &mut app);
     rig.bob.select("B3", "B3");
     let out = frames(&mut rig, &ctx, &mut app);
@@ -263,7 +265,7 @@ fn gated_command_is_greyed_with_the_reason() {
     // A command the session shares stays enabled.
     h.state_mut().ui.ribbon_tab = "Home".into();
     settle(&mut rig, &mut h);
-    assert!(!h.get_by_label("Bold").accesskit_node().is_disabled());
+    assert!(!h.get_by_label("Paste").accesskit_node().is_disabled());
     // The refusal says why.
     let err = h.state_mut().run("data.removeDuplicates", json!({})).expect_err("refused");
     assert!(err.contains(gridcraft_live::NOT_YET_TEXT), "{err}");
@@ -382,4 +384,32 @@ fn a_formula_in_an_open_editor_is_read_at_commit_against_the_current_grid() {
     // A8 is now the old A7 (7), because a row went in above it: the text was read when entered.
     assert_eq!(value(h.state(), 0, "B7"), Value::Number(7.0));
     assert_eq!(bob_value(&rig, "B7"), Value::Number(7.0));
+}
+
+#[test]
+fn a_session_attached_after_construction_edits_live() {
+    let relay = MemRelay::new();
+    let bytes = base_bytes();
+    let (session, live) = join(&relay, &bytes, "bob", "Bob", Access::Edit);
+    let bob = Bob { session, live };
+    let hub = relay.connect("alice", "Alice", true);
+    let mut session = Session::new();
+    let base = BaseFile { bytes: &bytes, name: FILE, expected_sha256: None };
+    let live = GridLive::start(DynHub(Box::new(hub)), ROOM, &base, Access::Edit, "alice", &mut session).expect("starts");
+    // The window is built first, with no session, then the host attaches it.
+    let mut app = crate::common::prepare(SheetApp::new(session, Services::default()));
+    assert!(app.live().is_none());
+    app.attach_live(live).expect("attaches");
+    let second = {
+        let hub = relay.connect("zed", "Zed", true);
+        let mut s = Session::new();
+        GridLive::start(DynHub(Box::new(hub)), ROOM, &base, Access::Edit, "zed", &mut s).expect("starts")
+    };
+    assert!(app.attach_live(second).is_err(), "a second session is refused");
+    let mut h = harness(app);
+    let mut rig = Rig { relay, bytes, bob };
+    settle(&mut rig, &mut h);
+    h.state_mut().run("cell.set", json!({"cell": "B2", "input": "5"})).expect("runs through the session");
+    settle(&mut rig, &mut h);
+    assert_eq!(bob_value(&rig, "B2"), Value::Number(5.0), "the change reached the other editor");
 }
