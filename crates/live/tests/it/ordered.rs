@@ -7,7 +7,7 @@ use craft_live::Access;
 use craft_live::testing::ROOM;
 use gridcraft_core::Value;
 use gridcraft_engine::{Session, io};
-use gridcraft_live::{Id, axis_kind_rows, workbook_from_state};
+use gridcraft_live::{Id, axis_kind_rows, volatile_for, workbook_from_state};
 use gridcraft_model::{Cell, Formula, Workbook};
 use serde_json::{Value as Json, json};
 
@@ -32,7 +32,9 @@ fn same_everywhere(room: &Room, what: &str) {
     }
     let base = room.base();
     for i in 0..room.peers.len() {
-        let rebuilt = workbook_from_state(&base, &room.replica_state(i), None).unwrap();
+        let state = room.replica_state(i);
+        let source = volatile_for(&base, &state).unwrap();
+        let rebuilt = workbook_from_state(&base, &state, Some(source)).unwrap();
         assert_eq!(room.finger(i), finger(&rebuilt), "{what}: peer {i} differs from the state:\n{}", diff(&room.finger(i), &finger(&rebuilt)));
     }
 }
@@ -270,8 +272,7 @@ fn random_numbers_agree_after_a_row_insert_above_a_rand_cell() {
     assert!(matches!(before, Value::Number(_)));
     room.run(2, "home.insertRows", json!({"rows": "2:3"})).unwrap();
     room.settle();
-    // An edit counts the room's epoch up when a formula draws random numbers, so the number is
-    // a new one: what matters is that every peer has the same one in the cell's new place.
+    // Every peer has the same number in the cell's new place (the draw follows the line ids).
     let after = value_at(&room, 0, "E7");
     assert!(matches!(after, Value::Number(_)));
     for i in 0..3 {
