@@ -38,6 +38,9 @@ fn build() -> Session {
     run(&mut s, "home.columnWidth", json!({"cols": "B:B", "width": 120}));
     run(&mut s, "home.columnWidth", json!({"cols": "E:E", "width": 90}));
     run(&mut s, "insert.chart", json!({"type": "bar", "at": "M30", "width": 200, "height": 100}));
+    run(&mut s, "range.setValues", json!({"range": "J2", "values": [["Kind", "Cost", "Note"], ["a", 1, "x"], ["b", 2, "y"]]}));
+    run(&mut s, "insert.table", json!({"range": "J2:L4", "header": true}));
+    run(&mut s, "cell.set", json!({"cell": "N2", "input": "=SUM(Table1[Cost])"}));
     run(&mut s, "home.insertSheet", json!({"name": "Sheet2"}));
     run(&mut s, "cell.set", json!({"cell": "A1", "input": "=Sheet1!A6+Sheet1!B11"}));
     run(&mut s, "cell.set", json!({"cell": "B1", "input": "=SUM(Sheet1!A1:A12)"}));
@@ -54,32 +57,44 @@ fn peer_of(s: &Session) -> (Session, u64) {
     (p, uid)
 }
 
-/// Everything the brief names, as comparable text: cells and formulas as text, merges, conditional
-/// format ranges, object anchors and line information, for every sheet, plus the defined names.
-fn describe(wb: &Workbook) -> Vec<String> {
-    let mut out = Vec::new();
-    for sh in &wb.sheets {
-        out.push(format!("sheet {}", sh.name));
-        let mut cells: Vec<_> = sh.cells.iter().map(|(c, _)| c).collect();
-        cells.sort_unstable();
-        for c in cells {
-            out.push(format!("{c:?} {}", sh.input_text(c)));
+/// The whole workbook as JSON, less each person's own view (zoom, selection, scroll and so on).
+fn describe(wb: &Workbook) -> serde_json::Value {
+    const LOCAL: &[&str] = &[
+        "zoom",
+        "show_formulas",
+        "show_gridlines",
+        "show_headings",
+        "show_zeros",
+        "show_outline_symbols",
+        "view_active",
+        "view_top_left",
+        "view",
+        "active_sheet",
+        "show_objects",
+    ];
+    let mut v = serde_json::to_value(wb).unwrap();
+    if let Some(m) = v.as_object_mut() {
+        m.retain(|k, _| !LOCAL.contains(&k.as_str()));
+        if let Some(sheets) = m.get_mut("sheets").and_then(|s| s.as_array_mut()) {
+            for sh in sheets.iter_mut().filter_map(|s| s.as_object_mut()) {
+                sh.retain(|k, _| !LOCAL.contains(&k.as_str()));
+            }
         }
-        out.push(format!("merges {:?}", sh.merges));
-        out.push(format!("cf {:?}", sh.cond_formats));
-        out.push(format!("charts {:?}", sh.charts));
-        out.push(format!("rows {:?}", sh.rows));
-        out.push(format!("cols {:?}", sh.cols));
     }
-    out.push(format!("names {:?}", wb.names));
-    out
+    v
 }
 
 fn assert_same(a: &Workbook, b: &Workbook) {
+    // Cached results are each peer's own recalculation; everything else must be equal.
     let (x, y) = (describe(a), describe(b));
-    assert_eq!(x.len(), y.len());
-    for (l, r) in x.iter().zip(&y) {
-        assert_eq!(l, r);
+    if x != y {
+        let sheets = |v: &serde_json::Value| v["sheets"].as_array().cloned().unwrap_or_default();
+        for (i, (p, q)) in sheets(&x).iter().zip(sheets(&y)).enumerate() {
+            for (k, pv) in p.as_object().into_iter().flatten() {
+                assert_eq!(pv, &q[k], "sheet {i} field `{k}` differs");
+            }
+        }
+        assert_eq!(x, y, "workbook-level fields differ");
     }
 }
 
@@ -88,6 +103,7 @@ fn remote_insert_equals_local_insert() {
     let mut a = build();
     let (mut b, uid) = peer_of(&a);
     let before = describe(&a.documents()[0].wb);
+    assert!(!a.documents()[0].wb.sheet(0).unwrap().tables.is_empty(), "the workbook has a table");
     run(&mut a, "home.insertRows", json!({"rows": "3:4"}));
     b.apply_remote(uid, |cx| cx.insert_lines(0, Axis::Rows, 2, 2)).unwrap();
     assert_ne!(before, describe(&a.documents()[0].wb), "the insert must change something");
@@ -108,8 +124,14 @@ fn remote_delete_equals_local_delete() {
     let mut a = build();
     let (mut b, uid) = peer_of(&a);
     run(&mut a, "home.deleteRows", json!({"rows": "2:3,7:8"}));
-    // The areas arrive in any order and may touch.
     b.apply_remote(uid, |cx| cx.delete_lines(0, Axis::Rows, &[(6, 7), (1, 2)])).unwrap();
+    assert_same(&a.documents()[0].wb, &b.documents()[0].wb);
+
+    // Areas arrive in any order, reversed (first > last), touching and overlapping.
+    let mut a = build();
+    let (mut b, uid) = peer_of(&a);
+    run(&mut a, "home.deleteRows", json!({"rows": "2:4,6:6"}));
+    b.apply_remote(uid, |cx| cx.delete_lines(0, Axis::Rows, &[(3, 1), (2, 2), (5, 5)])).unwrap();
     assert_same(&a.documents()[0].wb, &b.documents()[0].wb);
 
     let mut a = build();
@@ -182,10 +204,51 @@ fn structural_report_replays_to_after() {
     .unwrap();
     assert_same(&r.after, &b.documents()[0].wb);
 
-    // A delete with a cell edit in the same command: only the edit is a write.
+    // A multi-area delete: its report is empty too, and applying its edits (one call per edit)
+    // gives the author's workbook.
     let r = one(&mut a, &tap, "home.deleteRows", json!({"rows": "2:3,7:8"}));
     assert!(r.unshared.is_empty(), "{:?}", r.unshared);
     assert!(r.cells.is_empty() && r.lines.is_empty(), "{:?} {:?}", r.cells, r.lines);
+    assert_eq!(r.edits.len(), 2, "one edit per area");
+    let (mut c, cuid) = (Session::new(), 0);
+    run(&mut c, "file.new", json!({}));
+    let cuid = c.documents()[0].uid + cuid;
+    c.replace_workbook_quiet(cuid, r.before.clone()).unwrap();
+    c.apply_remote(cuid, |cx| {
+        for (sheet, e) in &r.edits {
+            let gridcraft_engine::formula::adjust::Edit::Delete { axis, at, count } = e else { panic!("not a delete") };
+            cx.delete_lines(*sheet, *axis, &[(*at, *at + *count - 1)])?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_same(&r.after, &c.documents()[0].wb);
+}
+
+#[test]
+fn lines_inside_a_table_keep_its_header_in_step() {
+    // A column inserted inside the table is named and written into the header as the local
+    // command does, and a deleted header row promotes the next row.
+    for (id, params, axis, at, count) in [
+        ("home.insertColumns", json!({"cols": "K:K"}), Axis::Cols, 10, 1),
+        ("home.deleteRows", json!({"rows": "2:2"}), Axis::Rows, 1, 1),
+        ("home.insertRows", json!({"rows": "3:3"}), Axis::Rows, 2, 1),
+    ] {
+        let mut a = build();
+        let (mut b, uid) = peer_of(&a);
+        run(&mut a, id, params);
+        b.apply_remote(uid, |cx| {
+            if id == "home.deleteRows" { cx.delete_lines(0, axis, &[(at, at + count - 1)]) } else { cx.insert_lines(0, axis, at, count) }
+        })
+        .unwrap();
+        assert_same(&a.documents()[0].wb, &b.documents()[0].wb);
+    }
+    // No report names Tables for a plain insert.
+    let mut a = build();
+    let tap = Tap::default();
+    a.set_observer(Some(Box::new(tap.clone())));
+    let r = one(&mut a, &tap, "home.insertColumns", json!({"cols": "K:K"}));
+    assert!(!r.unshared.contains(&gridcraft_engine::Unshared::Tables(0)), "{:?}", r.unshared);
 }
 
 #[test]

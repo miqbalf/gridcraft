@@ -331,6 +331,8 @@ pub(crate) fn insert_lines_in(wb: &mut Workbook, sheet: usize, axis: Axis, at: u
     }
     let e = Edit::Insert { axis, at, count };
     rewrite_many(wb, &name, std::slice::from_ref(&e))?;
+    // As the command does after every edit: a column inserted into a table gets its header.
+    crate::tables::sync_headers_in(wb, true, &[]);
     Ok(e)
 }
 
@@ -362,6 +364,7 @@ pub(crate) fn delete_lines_in(wb: &mut Workbook, sheet: usize, axis: Axis, areas
     }
     let edits: Vec<Edit> = areas.iter().map(|&(at, count)| Edit::Delete { axis, at, count }).collect();
     rewrite_many(wb, &name, &edits)?;
+    crate::tables::sync_headers_in(wb, true, &[]);
     Ok(edits)
 }
 

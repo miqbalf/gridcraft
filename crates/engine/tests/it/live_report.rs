@@ -159,6 +159,12 @@ fn extra() -> Vec<(&'static str, Json)> {
         ("home.mergeCells", json!({"range": "B30:C30"})),
         ("view.freezePanes", json!({"cell": "B3"})),
         ("home.wrapText", json!({"range": "B2:B2", "on": true})),
+        // Line edits inside a table: the header row follows (G7). `data.subtotal` is in the
+        // registry above.
+        ("insert.table", json!({"range": "N40:P44", "header": true})),
+        ("home.insertColumns", json!({"cols": "O:O", "range": "O40"})),
+        ("home.insertRows", json!({"rows": "42:42"})),
+        ("home.deleteRows", json!({"rows": "40:40"})),
     ]
 }
 
@@ -269,16 +275,25 @@ fn every_registered_command_change_is_reported_or_unshared() {
             if report.is_empty() {
                 failures.push(format!("{name} {}: the workbook changed ({what}) and the report names nothing", id));
             }
-            // A change to a field with its own category must produce that category.
+            // A change to a field with its own category must produce that category. For line
+            // edits (G7) the baseline is `before` replayed through them with the public remote
+            // API, one call per edit, the way a peer applies them; a report with any other edit
+            // (a move, a restore) is marked Structure and is not compared field by field.
+            let structure = report.unshared.iter().any(|u| matches!(u, Unshared::Structure(_)));
+            if structure {
+                continue;
+            }
+            let what = if report.edits.is_empty() {
+                what
+            } else {
+                let Some(replayed) = replay_json(report) else {
+                    failures.push(format!("{name} {id}: the line edits of the report cannot be replayed remotely"));
+                    continue;
+                };
+                fields_that_differ(Some(&without_local(without_default_lines(replayed))), Some(&now))
+            };
             for key in what.split(", ").filter(|k| !k.is_empty()) {
                 let field = key.rsplit('.').next().unwrap_or(key);
-                // A sheet marked Structure is not compared field by field, and a workbook whose line
-                // edits were replayed (G7) is compared with the replay, not with `before`: what the
-                // edits moved (charts, formats, tables) is no change of its own, so the raw JSON
-                // difference does not have to appear in the report (`live_lines` checks that).
-                if !report.edits.is_empty() || report.unshared.iter().any(|u| matches!(u, Unshared::Structure(_))) {
-                    continue;
-                }
                 if let Some(is) = category(field)
                     && !report.unshared.iter().any(is)
                 {
@@ -329,6 +344,27 @@ fn without_local(mut wb: Json) -> Json {
         }
     }
     wb
+}
+
+/// The JSON of the report's `before` with its line edits applied through `apply_remote`, one call
+/// per edit; `None` when an edit is not a line insert or delete, or a peer refuses it.
+fn replay_json(report: &EditReport) -> Option<Json> {
+    let mut peer = Session::new();
+    peer.execute("file.new", json!({})).ok()?;
+    let uid = peer.documents()[0].uid;
+    peer.replace_workbook_quiet(uid, report.before.clone()).ok()?;
+    peer.apply_remote(uid, |cx| {
+        for (sheet, e) in &report.edits {
+            match e {
+                Edit::Insert { axis, at, count } => cx.insert_lines(*sheet, *axis, *at, *count)?,
+                Edit::Delete { axis, at, count } => cx.delete_lines(*sheet, *axis, &[(*at, *at + *count - 1)])?,
+                _ => return Err(gridcraft_engine::EngineError::Other("not a line edit".into())),
+            }
+        }
+        Ok(())
+    })
+    .ok()?;
+    serde_json::to_value(&*peer.documents()[0].wb).ok()
 }
 
 /// The workbook JSON with row and column entries that say nothing (the default `LineInfo`)

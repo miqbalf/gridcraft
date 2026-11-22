@@ -604,7 +604,10 @@ impl RemoteCtx<'_> {
     }
 
     /// Deletes the inclusive `(first, last)` areas of lines, in any order (overlapping or
-    /// touching areas are merged). Refused (nothing changes) outside the grid.
+    /// touching areas are merged). All areas are positions in one coordinate frame, the one
+    /// before the delete: never batch sequential deletes (two `Delete` edits of one report, the
+    /// second counted after the first) into one call, or they merge into a single area; make one
+    /// call per edit. Refused (nothing changes) outside the grid.
     pub fn delete_lines(&mut self, sheet: usize, axis: Axis, areas: &[(u32, u32)]) -> Result<()> {
         let limit = if axis == Axis::Rows { MAX_ROWS } else { MAX_COLS };
         let mut spans: Vec<(u32, u32)> = Vec::with_capacity(areas.len());
