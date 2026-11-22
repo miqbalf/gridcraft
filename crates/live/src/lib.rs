@@ -26,8 +26,9 @@ pub mod split;
 pub mod styles;
 pub mod volatile;
 
+pub use app::SentCommand;
 pub use axis::{Axis, AxisKind, Insertion};
-pub use doc::{CellContent, Entry, GridChange, GridDoc, GridSeed, GridTxn, HELD_MAX_BYTES, HELD_MAX_ENTRIES, Meta};
+pub use doc::{CellContent, Entry, GridChange, GridDoc, GridSeed, GridTxn, Meta};
 pub use gate::NOT_YET_TEXT;
 pub use ids::{Id, cell_key, parse_cell_key};
 pub use kind::{Grid, GridCaret, GridEdit, GridPos};

@@ -105,10 +105,14 @@ impl<H: Hub> GridLive<H> {
     /// # Errors
     /// [`LiveFail`].
     pub fn start(hub: H, room: &str, base: &BaseFile, access: Access, uid: &str, session: &mut Session) -> Result<Self, LiveFail> {
-        Self::start_with(hub, room, base, access, uid, session, fnv1a64)
+        Self::start_inner(hub, room, base, access, uid, session, fnv1a64)
     }
 
     /// [`GridLive::start`] with the style key hash given (tests force a collision).
+    ///
+    /// # Errors
+    /// [`LiveFail`].
+    #[cfg(any(test, feature = "test-util"))]
     #[doc(hidden)]
     pub fn start_with(
         hub: H,
@@ -119,6 +123,10 @@ impl<H: Hub> GridLive<H> {
         session: &mut Session,
         hash: StyleHash,
     ) -> Result<Self, LiveFail> {
+        Self::start_inner(hub, room, base, access, uid, session, hash)
+    }
+
+    fn start_inner(hub: H, room: &str, base: &BaseFile, access: Access, uid: &str, session: &mut Session, hash: StyleHash) -> Result<Self, LiveFail> {
         let sha: [u8; 32] = Sha256::digest(base.bytes).into();
         if base.expected_sha256.is_some_and(|want| want != sha) {
             return Err(LiveFail::BaseMismatch);
@@ -157,10 +165,18 @@ impl<H: Hub> GridLive<H> {
             mine: HashMap::new(),
             lost: Vec::new(),
             editor: None,
+            sent: Vec::new(),
+            group: 0,
         };
         let observed = Arc::new(std::sync::atomic::AtomicU64::new(doc));
         let mut live = GridLive { core, map, observed, names: HashMap::new(), undo_notified: false, broken_told: false };
-        live.bind(session).map_err(|e| LiveFail::Open(e.to_string()))?;
+        if let Err(e) = live.bind(session) {
+            // Do not leave the document open in the host's session.
+            if let Some(i) = session.document_index(doc) {
+                session.close_document(i);
+            }
+            return Err(LiveFail::Open(e.to_string()));
+        }
         Ok(live)
     }
 
@@ -210,6 +226,12 @@ impl<H: Hub> GridLive<H> {
     /// One frame: retries what an open undo group held back, shares the local edits, takes in
     /// the other editors' edits and carets, and says who else is here.
     pub fn pump(&mut self, session: &mut Session) -> Vec<Peer> {
+        let peers = {
+            let mut app = GridApp { session, map: &mut self.map };
+            self.core.pump(&mut app)
+        };
+        // After the flush: a refused edit is put back first, so changes held back for an open
+        // undo group are applied on top of that and not wiped by it.
         let retry = {
             let mut app = GridApp { session, map: &mut self.map };
             app.retry(self.core.live().doc())
@@ -218,10 +240,6 @@ impl<H: Hub> GridLive<H> {
             log::warn!("gridcraft-live: a held-back change did not land: {e}");
             self.core.end(RESYNC_TEXT);
         }
-        let peers = {
-            let mut app = GridApp { session, map: &mut self.map };
-            self.core.pump(&mut app)
-        };
         for p in &peers {
             self.names.insert(uid_of(&p.id).to_owned(), p.display.clone());
         }
@@ -242,7 +260,7 @@ impl<H: Hub> GridLive<H> {
         }
         for (uid, cell) in std::mem::take(&mut self.map.lost) {
             let who = self.names.get(&uid).cloned().unwrap_or(uid);
-            self.map.notices.push(format!("{who} changed {cell} at the same time. Their change was kept."));
+            self.map.notices.push(format!("{who} also changed {cell}; their value was kept."));
         }
         for n in std::mem::take(&mut self.map.notices) {
             self.core.push_notice(n);
@@ -353,6 +371,12 @@ impl<H: Hub> GridLive<H> {
 
     pub fn core_mut(&mut self) -> &mut LiveEditing<H, Grid> {
         &mut self.core
+    }
+
+    /// The commands sent since the last call: each is one group (one logical step for undo) even
+    /// when it went out as several updates.
+    pub fn take_commands(&mut self) -> Vec<crate::app::SentCommand> {
+        std::mem::take(&mut self.map.sent)
     }
 
     /// The replica, for tests and the worker.

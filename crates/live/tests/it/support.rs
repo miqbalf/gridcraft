@@ -158,6 +158,18 @@ impl Room {
         finger(self.wb(i))
     }
 
+    /// Every peer is still `Live` and none was told the link ended or a change was lost.
+    pub fn assert_all_live(&self, what: &str) {
+        for (i, p) in self.peers.iter().enumerate() {
+            assert!(matches!(p.live.status(), craft_live::LiveStatus::Live { .. }), "{what}: peer {i} is {:?}", p.live.status());
+            assert!(
+                p.notices.iter().all(|n| !n.contains("Reopen") && !n.contains("could not")),
+                "{what}: peer {i} was told of a break: {:?}",
+                p.notices
+            );
+        }
+    }
+
     pub fn notices_of(&self, i: usize) -> &[String] {
         &self.peers[i].notices
     }
@@ -177,7 +189,14 @@ pub fn finger(wb: &Workbook) -> String {
         }
         // A line with nothing set and no entry are the same line.
         let set = |m: &std::collections::BTreeMap<u32, gridcraft_model::LineInfo>| {
-            m.iter().filter(|(_, l)| **l != Default::default()).map(|(k, l)| (*k, *l)).collect::<Vec<_>>()
+            // Style ids differ between peers (interning order): compare the style itself.
+            m.iter()
+                .filter(|(_, l)| **l != Default::default())
+                .map(|(k, l)| {
+                    let st = l.style.map(|id| serde_json::to_string(wb.styles.get(id)).unwrap());
+                    (*k, gridcraft_model::LineInfo { style: None, ..*l }, st)
+                })
+                .collect::<Vec<_>>()
         };
         out.push_str(&format!("rows {:?}\ncols {:?}\n", set(&s.rows), set(&s.cols)));
     }

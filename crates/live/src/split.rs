@@ -68,6 +68,8 @@ pub struct Plan {
     cells: BTreeMap<(Id, String), CellWrite>,
     lines: BTreeMap<(Id, u8, String), (AxisKind, Put<Json>)>,
     props: BTreeMap<(Id, &'static str), Json>,
+    /// Styles that whole-line formats name: key and canonical JSON, written in the same update.
+    styles: BTreeMap<String, Json>,
     /// Bump the room's recalculation epoch.
     pub epoch: bool,
 }
@@ -96,6 +98,11 @@ impl Plan {
         self.lines.insert(k, (axis, merged));
     }
 
+    /// A style a line's `st` names, to be written with it.
+    pub fn style(&mut self, key: String, style: Json) {
+        self.styles.insert(key, style);
+    }
+
     pub fn prop(&mut self, sheet: Id, name: &'static str, value: Json) {
         self.props.insert((sheet, name), value);
     }
@@ -103,7 +110,7 @@ impl Plan {
     /// Whether nothing is to be written.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.cells.is_empty() && self.lines.is_empty() && self.props.is_empty() && !self.epoch
+        self.cells.is_empty() && self.lines.is_empty() && self.props.is_empty() && self.styles.is_empty() && !self.epoch
     }
 
     /// The cells written, as `(sheet, key)`.
@@ -118,13 +125,14 @@ impl Plan {
             cells: Vec::new(),
             lines: self.lines.into_iter().map(|((sheet, _, key), (axis, put))| ((sheet, axis, key), put)).collect(),
             props: self.props.into_iter().collect(),
+            styles: self.styles.into_iter().collect(),
             epoch: self.epoch,
         }];
         let mut used = 0usize;
         for (_, w) in self.cells {
             let size = w.size();
             if used > 0 && used + size > CHUNK_BUDGET_BYTES {
-                chunks.push(Chunk { cells: Vec::new(), lines: Vec::new(), props: Vec::new(), epoch: false });
+                chunks.push(Chunk { cells: Vec::new(), lines: Vec::new(), props: Vec::new(), styles: Vec::new(), epoch: false });
                 used = 0;
             }
             used += size;
@@ -142,6 +150,7 @@ pub struct Chunk {
     pub cells: Vec<CellWrite>,
     pub lines: Vec<((Id, AxisKind, String), Put<Json>)>,
     pub props: Vec<((Id, &'static str), Json)>,
+    pub styles: Vec<(String, Json)>,
     pub epoch: bool,
 }
 
@@ -166,6 +175,11 @@ impl Chunk {
                 Put::Reset => t.reset_fmt(w.sheet, &w.key),
                 Put::Clear => t.clear_fmt(w.sheet, &w.key),
                 Put::Set(k) => t.set_fmt(w.sheet, &w.key, k),
+            }
+        }
+        for (k, j) in &self.styles {
+            if put_styles.insert(k.clone()) {
+                t.put_style(k, j.clone());
             }
         }
         for ((sheet, axis, key), put) in &self.lines {

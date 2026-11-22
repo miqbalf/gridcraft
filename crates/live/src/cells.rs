@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use gridcraft_core::{CellError, CellRef, RangeRef, Value};
+use gridcraft_core::{CellError, CellRef, MAX_COLS, MAX_ROWS, RangeRef, Value};
 use gridcraft_formula::ids::{parse_ids, print_ids};
 use gridcraft_model::{Cell, Formula, PyCode, StyleId};
 use serde_json::{Map, Value as Json};
@@ -113,7 +113,10 @@ pub fn from_content(c: Option<&CellContent>, at: CellRef, home: &Home, style: St
                 Ok(e) => Formula::from_expr(e),
                 Err(_) => Formula::new(text),
             };
-            f.array = c.a.map(|[rows, cols]| RangeRef::new(at, CellRef::new(at.row + rows.max(1) - 1, at.col + cols.max(1) - 1)));
+            f.array = c.a.map(|[rows, cols]| {
+                let end = |from: u32, n: u32, max: u32| from.saturating_add(n.max(1) - 1).min(max - 1);
+                RangeRef::new(at, CellRef::new(end(at.row, rows, MAX_ROWS), end(at.col, cols, MAX_COLS)))
+            });
             f.dynamic = c.d == Some(true);
             cell.formula = Some(Arc::new(f));
         } else {

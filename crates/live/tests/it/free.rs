@@ -50,9 +50,12 @@ fn converge(peers: usize, seed: u64) {
         if step % 9 == 0 {
             let text = (0..3).map(|r| format!("p{r}\tq{r}\t{}", rng.below(9))).collect::<Vec<_>>().join("\n");
             let at = some_cell(&mut rng);
-            let _ = room.run(who, "edit.paste", json!({"at": at, "text": text}));
+            if let Err(e) = room.run(who, "edit.paste", json!({"at": at, "text": text})) {
+                panic!("seed {seed}: paste failed unexpectedly: {e}");
+            }
         } else if let Err(e) = room.run(who, id, params) {
             assert_ne!(e, NOT_YET_TEXT, "seed {seed}: {id} is a free command");
+            panic!("seed {seed}: {id} failed unexpectedly: {e}");
         }
         // Some peers pump, in a drawn order: delivery is seeded.
         let mut order: Vec<usize> = (0..peers).collect();
@@ -64,6 +67,7 @@ fn converge(peers: usize, seed: u64) {
         }
     }
     room.settle();
+    room.assert_all_live(&format!("seed {seed}"));
     let first = room.finger(0);
     for i in 1..peers {
         let other = room.finger(i);
@@ -103,7 +107,7 @@ fn same_cell_one_value_wins_everywhere_and_the_loser_is_told() {
     let winner = if shown(0) == Value::Text("from alice".into()) { "Alice" } else { "Bob" };
     let loser = usize::from(winner == "Alice");
     assert!(room.notices_of(loser).iter().any(|n| n.contains(winner)), "the loser is told who won: {:?}", room.notices_of(loser));
-    assert!(room.notices_of(1 - loser).iter().all(|n| !n.contains("at the same time")), "the winner is not told");
+    assert!(room.notices_of(1 - loser).iter().all(|n| !n.contains("also changed")), "the winner is not told");
 }
 
 #[test]
@@ -229,6 +233,10 @@ fn a_paste_of_10k_cells_converges_in_parts() {
     room.run(0, "edit.paste", json!({"at": "A20", "text": text})).unwrap();
     room.settle();
     let sizes: Vec<usize> = room.peers[0].sizes.borrow()[before..].to_vec();
+    let cmds = room.peers[0].live.take_commands();
+    let paste: Vec<_> = cmds.iter().filter(|c| c.updates > 1).collect();
+    assert_eq!(paste.len(), 1, "the paste is one command: {cmds:?}");
+    assert_eq!(paste[0].updates, sizes.len(), "whose parts are all its updates");
     assert!(sizes.len() > 1, "the paste went in parts: {sizes:?} notices {:?}", room.notices_of(0));
     assert!(sizes.iter().all(|s| *s <= gridcraft_live::split::UPDATE_MAX_BYTES), "every update is within the cap: {sizes:?}");
     assert_eq!(room.finger(0), room.finger(1));
@@ -304,4 +312,56 @@ fn random_numbers_agree_on_every_peer_and_the_state() {
     room.settle();
     assert_eq!(draw(&room, 0), draw(&room, 2), "still equal after another edit");
     assert_ne!(before, draw(&room, 0), "every edit changes the numbers, as in a spreadsheet");
+}
+
+#[test]
+fn a_later_overwrite_is_not_told_as_lost_but_a_concurrent_one_is() {
+    // Sequential: Alice types, everyone settles, then Bob overwrites.
+    let mut room = Room::new(2);
+    room.run(0, "cell.set", json!({"cell": "D5", "input": "first"})).unwrap();
+    room.settle();
+    room.run(1, "cell.set", json!({"cell": "D5", "input": "second"})).unwrap();
+    room.settle();
+    room.run(0, "cell.set", json!({"cell": "D5", "input": "third"})).unwrap();
+    room.settle();
+    for i in 0..2 {
+        assert!(room.notices_of(i).iter().all(|n| !n.contains("also changed")), "peer {i}: {:?}", room.notices_of(i));
+    }
+    assert_eq!(room.finger(0), room.finger(1));
+    // Concurrent: both type before either hears the other.
+    room.run(0, "cell.set", json!({"cell": "E5", "input": "alice"})).unwrap();
+    room.run(1, "cell.set", json!({"cell": "E5", "input": "bob"})).unwrap();
+    room.settle();
+    let told = (0..2).filter(|i| room.notices_of(*i).iter().any(|n| n.contains("also changed"))).count();
+    assert_eq!(told, 1, "exactly the loser is told");
+}
+
+#[test]
+fn whole_column_and_row_formats_converge() {
+    let mut room = Room::new(3);
+    room.run(0, "home.bold", json!({"range": "C:C"})).unwrap();
+    room.run(1, "cell.set", json!({"cell": "C3", "input": "typed in the column"})).unwrap();
+    room.run(2, "home.fillColor", json!({"range": "6:6", "color": "#00FF00"})).unwrap();
+    room.settle();
+    room.assert_all_live("whole line formats");
+    for i in 0..3 {
+        let sheet = room.wb(i).sheet(0).unwrap();
+        let col = sheet.cols.get(&2).copied().unwrap_or_default();
+        assert!(col.style.is_some_and(|s| room.wb(i).styles.get(s).font.bold), "peer {i}: column C is bold");
+        let row = sheet.rows.get(&5).copied().unwrap_or_default();
+        assert!(row.style.is_some(), "peer {i}: row 6 has a fill; rows {:?} cols {:?}", sheet.rows, sheet.cols);
+        assert_eq!(sheet.cell(a1("C3")).unwrap().value, Value::Text("typed in the column".into()), "peer {i}");
+    }
+    let (f0, f1, f2) = (room.finger(0), room.finger(1), room.finger(2));
+    assert!(f0 == f1, "{}", diff(&f0, &f1));
+    assert!(f0 == f2, "{}", diff(&f0, &f2));
+    // And the saved state shows the same.
+    let state = room.replica_state(0);
+    let base = room.base();
+    let oracle = workbook_from_state(&base, &state, None).unwrap();
+    assert_eq!(room.finger(0), finger(&oracle));
+    // A late joiner agrees.
+    let late = room.join("Dana", Access::Edit, None);
+    room.settle();
+    assert_eq!(room.finger(0), room.finger(late));
 }
