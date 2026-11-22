@@ -260,7 +260,7 @@ fn undo_of_an_ordered_edit_waits_for_the_structure_lock() {
     let line = room.peers[0].live.status_line().expect("waiting for the lock");
     assert!(line.contains("Carol"), "{line}");
     assert_eq!(room.finger(0), inserted, "nothing is undone while another holds the lock");
-    carol.send(ClientMsg::Unlock { doc: ROOM.into(), scope: "grid/struct".into() }).unwrap();
+    carol.send(ClientMsg::Unlock { doc: ROOM.into(), scope: "grid/struct".into(), token: None }).unwrap();
     room.settle();
     for i in 0..2 {
         assert_eq!(room.finger(i), base, "peer {i}: undone once the lock was free");
@@ -311,7 +311,7 @@ fn a_second_undo_waits_for_a_pending_ordered_undo() {
     room.run(0, "edit.undo", json!({})).unwrap();
     room.settle();
     assert_ne!(room.finger(0), start, "nothing ran while the lock was held");
-    carol.send(ClientMsg::Unlock { doc: ROOM.into(), scope: "grid/struct".into() }).unwrap();
+    carol.send(ClientMsg::Unlock { doc: ROOM.into(), scope: "grid/struct".into(), token: None }).unwrap();
     room.settle();
     room.settle();
     for i in 0..2 {
@@ -379,10 +379,36 @@ fn an_ordered_undo_that_gave_up_can_be_asked_again() {
     room.settle();
     assert!(room.notices_of(0).iter().any(|n| n.contains("Carol") && n.contains("was not made")), "{:?}", room.notices_of(0));
     assert_eq!(room.finger(0), inserted);
-    carol.send(ClientMsg::Unlock { doc: ROOM.into(), scope: "grid/struct".into() }).unwrap();
+    carol.send(ClientMsg::Unlock { doc: ROOM.into(), scope: "grid/struct".into(), token: None }).unwrap();
     room.settle();
     undo(&mut room, 0);
     for i in 0..2 {
         assert_eq!(room.finger(i), start, "peer {i}: the step was kept and undone on the second ask");
     }
+}
+
+#[test]
+fn an_ordered_undo_whose_lease_is_lost_is_taken_back_and_reaches_nobody() {
+    let mut room = Room::new(2);
+    room.run(0, "home.insertRows", json!({"rows": "3:3"})).unwrap();
+    room.settle();
+    let inserted = room.finger(0);
+    room.run(0, "edit.undo", json!({})).unwrap();
+    // The undo's lock request is granted at the relay; Alice has not read the grant when it lapses.
+    room.relay.lapse("grid/struct");
+    let mut bob = room.relay.connect("bob-raw", "Bob", true);
+    bob.send(ClientMsg::Lock { doc: ROOM.into(), scope: "grid/struct".into() }).unwrap();
+    let seq = room.relay.seq();
+    room.settle();
+    assert!(room.notices_of(0).iter().any(|n| n.contains("was not kept")), "{:?}", room.notices_of(0));
+    assert_eq!(room.relay.seq(), seq, "nothing of the undo reached the room");
+    for i in 0..2 {
+        assert_eq!(room.finger(i), inserted, "peer {i}: the undo was taken back");
+    }
+    same_everywhere(&room, "after the lost undo");
+    bob.send(ClientMsg::Unlock { doc: ROOM.into(), scope: "grid/struct".into(), token: None }).unwrap();
+    room.settle();
+    room.run(0, "cell.set", json!({"cell": "D4", "input": "after"})).unwrap();
+    room.settle();
+    same_everywhere(&room, "an edit after the lost undo");
 }

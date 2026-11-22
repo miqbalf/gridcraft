@@ -877,7 +877,11 @@ impl LiveApp<Grid> for GridApp<'_> {
         m.pending.clear();
         m.unresolved.clear();
         m.index.clear();
-        // The steps name keys and ops of the replica that was replaced: none can be trusted.
+        // A reset mid-session (a fenced run taken back, or the room's checkpoint replacing the
+        // replica) drops every local edit that was not ordered: none of them is a step to undo.
+        m.sent.clear();
+        m.removed.clear();
+        // The undo steps name keys and ops of the replica that was replaced: none can be trusted.
         m.undo = UndoLog::default();
         m.replays.clear();
         m.replay = None;

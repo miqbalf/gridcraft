@@ -22,12 +22,11 @@ pub const SCOPE: &str = "grid/struct";
 pub const BUSY_TEXT: &str = "Another change to rows or columns is still going. Try again in a moment.";
 /// Told when every line a delete named was deleted by someone else first.
 pub const GONE_TEXT: &str = "Those rows or columns were already deleted.";
-/// Told when the lock was lost while an ordered edit that had run was being shared. The edit is
-/// kept and sent again when the link is back, but another editor may have changed the structure
-/// at the same time, so the result may differ from what was meant.
-pub const LOCK_LOST_TEXT: &str = "The connection dropped while your change to rows or columns was being shared. It is kept and sent again, but another editor may have changed the sheet at the same time. Check the sheet before you repeat it.";
-/// Told when the link broke while an ordered edit that had run was being shared: it will not be
-/// sent again, so it may not have reached the others.
+/// Told when the relay refused an ordered edit because another editor held the structure lock by
+/// then (the lease lapsed): the edit is out of the sheet again and nothing of it was shared.
+pub const LOCK_LOST_TEXT: &str = "Another editor changed the sheet's rows or columns first, so your change to rows or columns was not kept. Nothing of it was shared. Do it again if you still want it.";
+/// Told when the link broke while an ordered edit that had run was being shared: the relay never
+/// answered for it, so it may not have reached the others.
 pub const LOCK_LOST_BROKEN_TEXT: &str = "The link to the room broke while your change to rows or columns was being shared, so it may not have reached the others. Reopen the file and check the sheet.";
 /// Told when the lock was lost before an ordered edit that waited for an open undo group ran.
 pub const LOCK_LOST_UNRUN_TEXT: &str = "The connection dropped before your change to rows or columns was made. Nothing was changed. Try again.";
