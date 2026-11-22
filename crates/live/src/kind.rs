@@ -38,6 +38,9 @@ pub struct GridPos {
     pub ranges: Vec<RangeRef>,
     /// The peer has its cell editor open on `active`.
     pub editing: bool,
+    /// The caret's sheet or active cell is on an id this window does not know yet: draw nothing
+    /// until it is known (the other fields are then empty).
+    pub hidden: bool,
 }
 
 /// Another editor's selection as the mapping keeps it between edits: by stable id, so it follows
@@ -54,10 +57,10 @@ pub struct GridCaret {
 }
 
 impl GridCaret {
-    /// The position this caret resolves to now.
+    /// The position this caret resolves to now; `None` while an id it names is not known here.
     #[must_use]
-    pub fn at(&self) -> &GridPos {
-        &self.pos
+    pub fn at(&self) -> Option<&GridPos> {
+        (!self.pos.hidden).then_some(&self.pos)
     }
 }
 

@@ -16,7 +16,7 @@ use gridcraft_model::Workbook;
 use serde_json::Value as Json;
 use sha2::{Digest, Sha256};
 
-use crate::app::{GridApp, Mapping, caret_payload};
+use crate::app::{GridApp, Mapping};
 use crate::axis::AxisKind;
 use crate::doc::{GridDoc, GridSeed};
 use crate::gate::{Class, NOT_YET_TEXT, class};
@@ -24,7 +24,9 @@ use crate::ids::Id;
 use crate::kind::{Grid, GridEdit, GridPos};
 use crate::layout::Layout;
 use crate::local::has_random;
-use crate::ordered::{BUSY_TEXT, LOCK_LOST_TEXT, LOCK_LOST_UNRUN_TEXT, Pending, SCOPE, Tracked, request, resolve, send_actions};
+use crate::ordered::{
+    BUSY_TEXT, LOCK_LOST_BROKEN_TEXT, LOCK_LOST_TEXT, LOCK_LOST_UNRUN_TEXT, Pending, SCOPE, Tracked, request, resolve, send_actions,
+};
 use crate::remote::build;
 use crate::styles::{StyleHash, fnv1a64};
 use crate::volatile::LiveVolatile;
@@ -185,6 +187,7 @@ impl<H: Hub> GridLive<H> {
             recalc: false,
             resync_wanted: false,
             skipped: 0,
+            rebuilds: 0,
             unresolved: BTreeSet::new(),
             mine: HashMap::new(),
             lost: Vec::new(),
@@ -445,6 +448,9 @@ impl<H: Hub> GridLive<H> {
                 if self.deferred.take().is_some() {
                     // It never ran: nothing was changed or shared.
                     self.map.notices.push(LOCK_LOST_UNRUN_TEXT.to_owned());
+                } else if matches!(self.core.status(), LiveStatus::Broken(_)) {
+                    // The replica broke: the edit will never be ordered, and nothing resends it.
+                    self.map.notices.push(LOCK_LOST_BROKEN_TEXT.to_owned());
                 } else {
                     // It ran and was shared without the lock. Until the relay refuses such an edit
                     // (the fencing follow-up), the link resends it, so the engine and the room
@@ -540,6 +546,14 @@ impl<H: Hub> GridLive<H> {
         LiveApp::resync(&mut app, &doc)
     }
 
+    /// How many times an ordered change made the engine rebuild from the document instead of
+    /// applying the ops (for tests: it should stay 0).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn ordered_rebuilds(&self) -> u32 {
+        self.map.rebuilds
+    }
+
     /// How many op-log entries the engine has applied (equal to the log's length when it is
     /// caught up, or was built from the state).
     #[must_use]
@@ -565,7 +579,7 @@ impl<H: Hub> GridLive<H> {
         let Some(d) = session.documents().iter().find(|d| d.uid == self.map.doc) else { return };
         let editing = self.map.editor.is_some();
         let sel = &d.selection;
-        if let Some(p) = caret_payload(&self.map.layout, d.wb.active_sheet(), sel.active, &sel.ranges, editing) {
+        if let Some(p) = crate::presence::payload(&self.map.layout, d.wb.active_sheet(), sel.active, &sel.ranges, editing) {
             self.core.send_presence(p);
         }
     }

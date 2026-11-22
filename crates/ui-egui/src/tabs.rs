@@ -278,6 +278,10 @@ pub fn sheet_tabs(app: &mut SheetApp, ui: &mut Ui) {
                                     } else {
                                         ui.painter().text(r.center(), Align2::CENTER_CENTER, &name, font, if active { t.accent } else { t.text });
                                     }
+                                    if let Some(live) = app.live() {
+                                        let shown = app.session.active().map_or(0, |d| d.wb.active_sheet());
+                                        crate::grid::presence::paint_tab_dots(ui.painter(), r, &live.tab_dots(i, shown));
+                                    }
                                     // A right-click activates the tab too, as in Excel, so the menu's sheet commands (Protect
                                     // Sheet, Select All Sheets) act on the sheet that was clicked rather than the one that was active.
                                     if resp.clicked() || (resp.secondary_clicked() && !active) {
@@ -404,6 +408,7 @@ pub fn status_bar(app: &mut SheetApp, ui: &mut Ui) {
                 };
                 text(ui, egui::RichText::new(app.ui.language.tr(mode)).font(theme::ui_font(12.5)).color(t.text_dim));
                 crate::macro_ui::status(app, ui);
+                crate::live::status(app, ui, &t);
                 if let Some(d) = app.session.active() {
                     if d.wb.vba_project.is_some() {
                         ui.add_space(12.0);
@@ -433,6 +438,7 @@ pub fn status_bar(app: &mut SheetApp, ui: &mut Ui) {
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    crate::live::presence_bar(app, ui);
                     // Zoom percentage and slider.
                     let zoom = app.session.active().and_then(|d| d.wb.active().map(|s| s.zoom)).unwrap_or(100);
                     let zl = ui.add(

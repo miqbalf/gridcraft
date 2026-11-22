@@ -44,6 +44,10 @@ pub struct Services {
     /// Web: hand PDF bytes to the browser's print flow directly (no download,
     /// no intermediate file) — opens the system print dialog on that PDF.
     pub print: Option<PrintPdf>,
+    /// Live co-editing: the session the host started on this window's workbook (it opened the
+    /// workbook as the session's active document). [`crate::live`] pumps it every frame and
+    /// routes the window's commands through it.
+    pub live: Option<crate::live::Live>,
 }
 
 /// Shared queue of files read asynchronously (browser file picker, drag and drop).
