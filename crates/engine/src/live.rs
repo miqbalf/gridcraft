@@ -70,8 +70,8 @@ pub enum Unshared {
     Names,
     /// A workbook-level setting, by field name.
     Workbook(&'static str),
-    /// An [`Edit`] other than an insert or delete of lines, or one whose effect on the sheet
-    /// cannot be replayed yet: the sheet's cells are not compared.
+    /// An [`Edit`] other than an insert or delete of lines (a move of cells, a restored workbook),
+    /// or edits that cannot be replayed: the sheet's cells are not compared position by position.
     Structure(usize),
 }
 
@@ -162,10 +162,27 @@ impl Session {
     }
 }
 
-/// Where the replay of `edits` over a sheet of `before` (H5) will plug in: the sheet as the edits
-/// leave it, or `None` while they cannot be replayed. G7 implements it for inserts and deletes.
-fn replayed(_before: &Sheet, _edits: &[&Edit]) -> Option<Arc<Sheet>> {
-    None
+/// `before` with every structural edit of the command replayed by position (H5), or `None` when
+/// the command did something else as well (a move of cells, a restored workbook) or an edit
+/// cannot be replayed. The whole workbook is replayed, not one sheet: an insert also rewrites
+/// formulas, names and charts on other sheets, and those are no change of their own.
+fn replay_lines(before: &Workbook, edits: &[(usize, Edit)]) -> Option<Workbook> {
+    if edits.is_empty() {
+        return None;
+    }
+    let mut wb = before.clone();
+    for (sheet, e) in edits {
+        match e {
+            Edit::Insert { axis, at, count } => {
+                crate::cmd::sheet::insert_lines_in(&mut wb, *sheet, *axis, *at, *count).ok()?;
+            }
+            Edit::Delete { axis, at, count } => {
+                crate::cmd::sheet::delete_lines_in(&mut wb, *sheet, *axis, &[(*at, *count)]).ok()?;
+            }
+            _ => return None,
+        }
+    }
+    Some(wb)
 }
 
 fn diff(doc: u64, command: &str, params: &Json, before: Arc<Workbook>, after: Arc<Workbook>, seen: Observed) -> EditReport {
@@ -190,6 +207,20 @@ fn diff(doc: u64, command: &str, params: &Json, before: Arc<Workbook>, after: Ar
         }
     }
     let same_layout = before.sheets.len() == after.sheets.len() && before.sheets.iter().zip(&after.sheets).all(|(b, a)| b.uid == a.uid);
+    let whole = if same_layout && !restored { replay_lines(&before, &r.edits) } else { None };
+    if let Some(replay) = &whole {
+        // Every sheet is compared with the replay, so what the edits moved is not reported.
+        for (i, (b, a)) in replay.sheets.iter().zip(&after.sheets).enumerate() {
+            if b.name != a.name {
+                push_once(&mut r.unshared, Unshared::Sheets);
+            }
+            if !Arc::ptr_eq(b, a) {
+                sheet_diff(i, b, a, command, &mut r);
+            }
+        }
+        workbook_diff(replay, &after, &mut r.unshared);
+        return r;
+    }
     if same_layout {
         for (i, (b, a)) in before.sheets.iter().zip(&after.sheets).enumerate() {
             if b.name != a.name {
@@ -199,7 +230,6 @@ fn diff(doc: u64, command: &str, params: &Json, before: Arc<Workbook>, after: Ar
                 continue;
             }
             let own: Vec<&Edit> = r.edits.iter().filter(|(s, _)| *s == i).map(|(_, e)| e).collect();
-            let lines_move = own.iter().any(|e| matches!(e, Edit::Insert { .. } | Edit::Delete { .. }));
             if restored {
                 // Which steps the restored workbook crosses is not known: every changed sheet
                 // may have shifted lines, so none is compared position by position.
@@ -207,15 +237,11 @@ fn diff(doc: u64, command: &str, params: &Json, before: Arc<Workbook>, after: Ar
                 push_once(&mut r.unshared, Unshared::Structure(i));
             } else if own.is_empty() {
                 sheet_diff(i, b, a, command, &mut r);
-            } else if !lines_move {
-                // A move of cells: the cells are where they are, but it is not an insert or delete.
+            } else {
+                // A move of cells, or edits that cannot be replayed together: the cells are where
+                // they are, but the edits are not replayed position by position.
                 sheet_diff(i, b, a, command, &mut r);
                 push_once(&mut r.unshared, Unshared::Structure(i));
-            } else {
-                match replayed(b, &own) {
-                    Some(replay) => sheet_diff(i, &replay, a, command, &mut r),
-                    None => push_once(&mut r.unshared, Unshared::Structure(i)),
-                }
             }
         }
     } else {
@@ -566,14 +592,47 @@ impl RemoteCtx<'_> {
         usize::try_from(id.0).ok().filter(|n| *n < self.wb.styles.len()).map(|_| self.wb.styles.get(id))
     }
 
-    /// Inserts `count` lines before `at` (H5; G7 implements it).
-    pub fn insert_lines(&mut self, _sheet: usize, _axis: Axis, _at: u32, _count: u32) -> Result<()> {
-        refuse("remote inserts of lines are not supported yet")
+    /// Inserts `count` lines before `at` (H5): cells, line information, the sheet's features and
+    /// every reference in the workbook move as for a local insert, with no undo step. Refused
+    /// (nothing changes) past the end of the grid.
+    pub fn insert_lines(&mut self, sheet: usize, axis: Axis, at: u32, count: u32) -> Result<()> {
+        let mut wb = self.wb.clone();
+        crate::cmd::sheet::insert_lines_in(&mut wb, sheet, axis, at, count)?;
+        self.wb = wb;
+        self.recalc_all = true;
+        Ok(())
     }
 
-    /// Deletes the inclusive `(first, last)` areas of lines (H5; G7 implements it).
-    pub fn delete_lines(&mut self, _sheet: usize, _axis: Axis, _areas: &[(u32, u32)]) -> Result<()> {
-        refuse("remote deletes of lines are not supported yet")
+    /// Deletes the inclusive `(first, last)` areas of lines, in any order (overlapping or
+    /// touching areas are merged). Refused (nothing changes) outside the grid.
+    pub fn delete_lines(&mut self, sheet: usize, axis: Axis, areas: &[(u32, u32)]) -> Result<()> {
+        let limit = if axis == Axis::Rows { MAX_ROWS } else { MAX_COLS };
+        let mut spans: Vec<(u32, u32)> = Vec::with_capacity(areas.len());
+        for &(a, b) in areas {
+            let (a, b) = (a.min(b), a.max(b));
+            if b >= limit {
+                return refuse("a remote delete names lines outside the grid");
+            }
+            spans.push((a, b));
+        }
+        spans.sort_unstable();
+        let mut merged: Vec<(u32, u32)> = Vec::new();
+        for (a, b) in spans {
+            match merged.last_mut() {
+                Some(last) if a <= last.1.saturating_add(1) => last.1 = last.1.max(b),
+                _ => merged.push((a, b)),
+            }
+        }
+        // Last area first, as the local command applies them.
+        let areas: Vec<(u32, u32)> = merged.into_iter().rev().map(|(a, b)| (a, b - a + 1)).collect();
+        if areas.is_empty() {
+            return Ok(());
+        }
+        let mut wb = self.wb.clone();
+        crate::cmd::sheet::delete_lines_in(&mut wb, sheet, axis, &areas)?;
+        self.wb = wb;
+        self.recalc_all = true;
+        Ok(())
     }
 }
 

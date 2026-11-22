@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use gridcraft_core::CellRef;
+use gridcraft_core::{CellRef, MAX_ROWS};
 use gridcraft_engine::core::Value;
 use gridcraft_engine::formula::adjust::Axis;
 use gridcraft_engine::model::{Cell, LineInfo, Style};
@@ -147,7 +147,7 @@ fn remote_lines_and_sizes_apply_and_the_rest_is_quiet() {
         cx.set_line(0, Axis::Cols, 2, Some(LineInfo { size: Some(120.0), ..LineInfo::default() }))?;
         cx.set_default_size(0, Axis::Rows, Some(30.0))?;
         assert!(cx.set_default_size(0, Axis::Rows, Some(f32::NAN)).is_err());
-        assert!(cx.insert_lines(0, Axis::Rows, 0, 1).is_err(), "not yet");
+        assert!(cx.insert_lines(0, Axis::Rows, MAX_ROWS, 1).is_err(), "past the grid");
         Ok(())
     })
     .unwrap();

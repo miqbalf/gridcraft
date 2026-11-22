@@ -272,8 +272,11 @@ fn every_registered_command_change_is_reported_or_unshared() {
             // A change to a field with its own category must produce that category.
             for key in what.split(", ").filter(|k| !k.is_empty()) {
                 let field = key.rsplit('.').next().unwrap_or(key);
-                // A sheet marked Structure is not compared field by field (G7 replays it).
-                if report.unshared.iter().any(|u| matches!(u, Unshared::Structure(_))) {
+                // A sheet marked Structure is not compared field by field, and a workbook whose line
+                // edits were replayed (G7) is compared with the replay, not with `before`: what the
+                // edits moved (charts, formats, tables) is no change of its own, so the raw JSON
+                // difference does not have to appear in the report (`live_lines` checks that).
+                if !report.edits.is_empty() || report.unshared.iter().any(|u| matches!(u, Unshared::Structure(_))) {
                     continue;
                 }
                 if let Some(is) = category(field)
