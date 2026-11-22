@@ -208,7 +208,7 @@ fn pair(rng: &mut Rng, span: u32, max: u32, ordered: bool) -> (u32, u32) {
 fn reference(rng: &mut Rng, span: u32, ordered: bool) -> String {
     let sheet = if rng.chance(40) { format!("{}!", quote_sheet(SHEETS[rng.below(SHEETS.len())].1)) } else { String::new() };
     let flag = |rng: &mut Rng| if rng.chance(30) { "$" } else { "" };
-    let body = match rng.below(4) {
+    let body = match rng.below(7) {
         0 => {
             let (r, c) = (pos(rng, span, MAX_ROWS), pos(rng, span, MAX_COLS));
             anchor(rng, r, c)
@@ -221,9 +221,25 @@ fn reference(rng: &mut Rng, span: u32, ordered: bool) -> String {
             let (a, b) = pair(rng, span, MAX_ROWS, ordered);
             format!("{}{}:{}{}", flag(rng), a + 1, flag(rng), b + 1)
         }
-        _ => {
+        3 => {
             let (a, b) = pair(rng, span, MAX_COLS, ordered);
             format!("{}{}:{}{}", flag(rng), col_to_letters(a), flag(rng), col_to_letters(b))
+        }
+        // The forms the parser keeps as a range operator between two references: a sheet on
+        // the right end, and a cell followed by a column.
+        4 => {
+            let (r0, c0, r1, c1) = (rng.int(0, span), rng.int(0, span), rng.int(0, span), rng.int(0, span));
+            let other = SHEETS[rng.below(SHEETS.len())].1;
+            format!("{}:{}!{}", anchor(rng, r0, c0), quote_sheet(other), anchor(rng, r1, c1))
+        }
+        5 => {
+            let (r0, c0, r1, c1) = (rng.int(0, span), rng.int(0, span), rng.int(0, span), rng.int(0, span));
+            let other = quote_sheet(SHEETS[rng.below(SHEETS.len())].1);
+            format!("{}:{other}!{}", anchor(rng, r0, c0), anchor(rng, r1, c1))
+        }
+        _ => {
+            let (r0, c0, c1) = (rng.int(0, span), rng.int(0, span), rng.int(0, span));
+            format!("{}:{}{}:{}{}", anchor(rng, r0, c0), flag(rng), col_to_letters(c1), flag(rng), col_to_letters(c1))
         }
     };
     format!("{sheet}{body}")
@@ -279,12 +295,14 @@ fn a1_to_ids_and_back_is_identity() {
 }
 
 /// Prints `text` as ids, applies `edit` to the layout and to `adjust`, and compares them.
-fn edit_matches_adjust(seed: u64, make: impl Fn(&mut Rng) -> Edit) {
+fn edit_matches_adjust(seed: u64, make: impl Fn(&mut Rng) -> Edit) -> (usize, usize) {
+    let (mut changed, mut lost) = (0, 0);
     for seed in seed..seed + 800 {
         let mut rng = Rng(seed);
         let mut model = Model::with_history(&mut rng);
         let text = formula(&mut rng, 0, 14, true);
         let e = parsed(&text, seed);
+        let before = e.clone();
         let ids = print_ids(&e, HOST, &model).unwrap_or_else(|err| panic!("seed {seed}: `{text}`: {err:?}"));
         let edit = make(&mut rng);
         let (target, name) = SHEETS[rng.below(SHEETS.len())];
@@ -298,23 +316,28 @@ fn edit_matches_adjust(seed: u64, make: impl Fn(&mut Rng) -> Edit) {
             print(&got),
             print(&expected)
         );
+        changed += usize::from(got != before);
+        lost += usize::from(print(&got).contains("#REF!") && !text.contains("#REF!"));
     }
+    (changed, lost)
 }
 
 #[test]
 fn printed_after_insert_equals_adjust() {
-    edit_matches_adjust(1_000, |rng| {
+    let (changed, _) = edit_matches_adjust(1_000, |rng| {
         let axis = if rng.chance(50) { Axis::Rows } else { Axis::Cols };
         Edit::Insert { axis, at: rng.int(0, 16), count: rng.int(1, 4) }
     });
+    assert!(changed > 100, "only {changed} formulas moved");
 }
 
 #[test]
 fn printed_after_delete_equals_adjust() {
-    edit_matches_adjust(5_000, |rng| {
+    let (changed, lost) = edit_matches_adjust(5_000, |rng| {
         let axis = if rng.chance(50) { Axis::Rows } else { Axis::Cols };
         Edit::Delete { axis, at: rng.int(0, 16), count: rng.int(1, 6) }
     });
+    assert!(changed > 100 && lost > 20, "the deletes reached too little: {changed} changed, {lost} lost references");
 }
 
 #[test]
@@ -411,18 +434,171 @@ fn hostile_id_text_is_an_error_not_a_panic() {
             assert!(at <= text.len(), "seed {seed}: offset {at} outside `{text}`");
         }
     }
-    for bad in [
-        "@{r:zzzzzzzzzzzzzzzzzz,c:1}",
-        "@{r:1,c:1",
-        "@{r:1,r:2}",
-        "@{$r}",
-        "@{r:1,c:1}:@{r:2}",
-        "@{r:1}",
-        "@{r:1,c:1}:@{s:2,r:1,c:1}",
-        "A@{r:1,c:1}",
-        "@{r:1,c:1}(2)",
-        "@{r:1,c:1}5",
-    ] {
+    for bad in ["@{r:zzzzzzzzzzzzzzzzzz,c:1}", "@{r:1,c:1", "@{r:1,r:2}", "@{$r}", "@{r:1}", "A@{r:1,c:1}", "@{r:1,c:1}(2)", "@{r:1,c:1}5"] {
         assert!(parse_ids(bad, HOST, &model).is_err(), "`{bad}` parsed");
     }
+}
+
+#[test]
+fn ranges_between_separate_references_round_trip() {
+    let model = Model::new();
+    for text in ["Sheet2!A1:Sheet2!B2", "S2!A1:S2!B2", "A1:S2!B2", "A1:B:B", "SUM(A1:'Q 3'!$B$2)"] {
+        let e = parsed(text, 0);
+        let ids = match print_ids(&e, HOST, &model) {
+            Ok(ids) => ids,
+            Err(IdError::UnknownSheet(_)) => continue,
+            Err(err) => panic!("`{text}`: {err:?}"),
+        };
+        let back = parse_ids(&ids, HOST, &model).unwrap_or_else(|err| panic!("`{text}` as `{ids}`: {err:?}"));
+        assert_eq!(back, e, "`{text}` through `{ids}`");
+    }
+}
+
+/// Fragments of A1 formulas, glued at random: whatever the engine's parser accepts must round-trip.
+/// Trim operators are left to the structured generator: glued at random they make text such as
+/// `TRUE:.$2:$4`, which the lexer takes in a way no reference-shaped input can reproduce.
+#[test]
+fn every_formula_the_parser_accepts_round_trips() {
+    const PIECES: [&str; 42] = [
+        "A1",
+        "$B$2",
+        "C$3",
+        "$D4",
+        "A1:B2",
+        "A:A",
+        "$B:$C",
+        "3:5",
+        "$2:$4",
+        "S2!A1",
+        "'Q 3'!$B$2",
+        "S2!A1:B2",
+        "S2!A1:S2!B2",
+        "A1:S2!B2",
+        "A1:B:B",
+        "A1:B2:C3",
+        "1:1",
+        "S2!1:3",
+        "SUM(",
+        "IF(",
+        "INDEX(",
+        ")",
+        ",",
+        "+",
+        "-",
+        "*",
+        "&",
+        "<=",
+        " ",
+        "(",
+        "1",
+        "2.5",
+        "\"x\"",
+        "TRUE",
+        "Total",
+        "T[Col]",
+        "T[@Col]",
+        "#",
+        "@",
+        "%",
+        "{1,2;3,4}",
+        "#REF!",
+    ];
+    let model = Model::new();
+    let (mut parsed_ok, mut converted) = (0, 0);
+    for seed in 0..40_000u64 {
+        let mut rng = Rng(seed);
+        let text: String = (0..1 + rng.below(7)).map(|_| PIECES[rng.below(PIECES.len())]).collect();
+        let Ok(e) = parse(&text) else { continue };
+        // Random gluing can make text the engine's own printer does not give back (`$2:$41:1S2!A1`):
+        // the id form promises what the A1 form does, so those are not its concern.
+        if parse(&print(&e)).ok().as_ref() != Some(&e) {
+            continue;
+        }
+        parsed_ok += 1;
+        let ids = match print_ids(&e, HOST, &model) {
+            Ok(ids) => ids,
+            Err(IdError::UnknownSheet(_)) => continue,
+            Err(err) => panic!("seed {seed}: `{text}`: {err:?}"),
+        };
+        converted += usize::from(ids != print(&e));
+        let back = parse_ids(&ids, HOST, &model).unwrap_or_else(|err| panic!("seed {seed}: `{text}` printed as `{ids}` does not read back: {err:?}"));
+        assert_eq!(back, e, "seed {seed}: `{text}` through `{ids}` came back as `{}`", print(&back));
+    }
+    assert!(parsed_ok > 2_000 && converted > 1_000, "the generator reached too little: {parsed_ok} parsed, {converted} with ids");
+}
+
+#[test]
+fn long_formulas_round_trip() {
+    let model = Model::new();
+    // 8,000 characters of A1 text with 2,000 references: every id token is longer than its A1 text.
+    let long = format!("1{}", "+A1".repeat(2_666));
+    assert!(long.len() >= 7_990 && long.len() <= 8_000, "{}", long.len());
+    // 500 references of mixed shapes.
+    let shapes = ["$C$12:D13", "S2!B2", "A:A", "7:9", "Q1"];
+    let group = |from: usize| format!("SUM({})", (from..from + 167).map(|i| shapes[i % 5]).collect::<Vec<_>>().join(","));
+    let mixed = format!("{}+{}+{}", group(0), group(167), group(334));
+    for (name, text) in [("8,000 characters", long), ("500 references", mixed)] {
+        let e = parsed(&text, 0);
+        let ids = print_ids(&e, HOST, &model).unwrap_or_else(|err| panic!("{name}: {err:?}"));
+        let back = parse_ids(&ids, HOST, &model).unwrap_or_else(|err| panic!("{name}: `{}`...: {err:?}", &ids[..40]));
+        assert_eq!(back, e, "{name}");
+    }
+    // The limit is the engine's, measured on the A1 text: one more character than it allows is an error.
+    let too_long = format!("1{}", "+A1".repeat(2_800));
+    assert!(parse(&too_long).is_err());
+    let tokens = "@{r:0,c:0}+".repeat(2_800);
+    assert!(parse_ids(&format!("{tokens}1"), HOST, &model).is_err());
+}
+
+#[test]
+fn id_text_far_beyond_any_formula_is_refused() {
+    let model = Model::new();
+    // Far longer than any formula's id form: refused up front, not scanned quadratically.
+    let text = format!("_gcid{}", "x".repeat(600_000));
+    assert!(parse_ids(&text, HOST, &model).is_err());
+}
+
+#[test]
+fn an_external_path_reference_stays_text() {
+    let model = Model::new();
+    let e = parsed("'C:\\x\\[Book.xlsx]Data'!A1+A1", 0);
+    let ids = print_ids(&e, HOST, &model).unwrap_or_else(|err| panic!("{err:?}"));
+    assert!(ids.contains("Book.xlsx"), "{ids}");
+    assert_eq!(parse_ids(&ids, HOST, &model).unwrap_or_else(|err| panic!("{err:?}")), e);
+}
+
+/// The shapes a resolver may report for the two ends of a range, one by one.
+#[test]
+fn range_ends_in_every_lookup_shape() {
+    struct Fixed(Vec<(u64, Lookup)>);
+    impl Resolver for Fixed {
+        fn sheet_id(&self, _: &str) -> Option<u64> {
+            None
+        }
+        fn sheet_name(&self, _: u64) -> Option<String> {
+            None
+        }
+        fn line_id(&self, _: Option<u64>, _: Axis, pos: u32) -> Option<u64> {
+            Some(u64::from(pos) + 1)
+        }
+        fn line_pos(&self, _: Option<u64>, _: Axis, id: u64) -> Lookup {
+            self.0.iter().find(|(i, _)| *i == id).map_or(Lookup::Unknown, |(_, l)| *l)
+        }
+    }
+    let gone = |before, after| Lookup::Deleted { before, after };
+    let rows = |first: Lookup, last: Lookup| {
+        let r = Fixed(vec![(1, first), (2, last)]);
+        parse_ids("@{r:1}:@{r:2}", HOST, &r).map(|e| print(&e)).unwrap_or_else(|err| panic!("{err:?}"))
+    };
+    let (at, at9) = (Lookup::At(2), Lookup::At(8));
+    assert_eq!(rows(at, at9), "3:9");
+    assert_eq!(rows(gone(Some(1), Some(2)), at9), "3:9", "a deleted start moves to the line after it");
+    assert_eq!(rows(at, gone(Some(7), Some(8))), "3:8", "a deleted end moves to the line before it");
+    assert_eq!(rows(gone(None, Some(0)), at9), "1:9");
+    assert_eq!(rows(at, gone(Some(7), None)), "3:8");
+    assert_eq!(rows(gone(Some(4), None), at9), "#REF!", "nothing after the start survives");
+    assert_eq!(rows(gone(Some(3), Some(4)), gone(Some(3), Some(4))), "#REF!", "both ends in one deleted block");
+    assert_eq!(rows(Lookup::Unknown, at9), "#REF!");
+    assert_eq!(rows(at, Lookup::Unknown), "#REF!");
+    assert_eq!(rows(at9, at), "9:3", "ends keep their order");
 }

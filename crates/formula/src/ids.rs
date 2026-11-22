@@ -18,7 +18,7 @@ use gridcraft_core::{CellError, MAX_COLS, MAX_ROWS};
 
 use crate::adjust::Axis;
 use crate::ast::{Anchor, Expr, RefKind, Reference, SheetSel, TrimMode, UnOp};
-use crate::parser::parse;
+use crate::parser::{MAX_FORMULA_LEN, parse_unlimited};
 use crate::printer::print;
 
 /// What the id form needs to know about the current layout. No live dependency: the crate stays L1.
@@ -109,7 +109,7 @@ fn end_token(r: &impl Resolver, sheet: Option<u64>, lines: u64, row: Coord, col:
 fn ref_token(rf: &Reference, host: u64, r: &impl Resolver) -> Result<Option<String>, IdError> {
     let (named, lines) = match &rf.sheet {
         SheetSel::Current => (None, host),
-        SheetSel::Named(n) if n.starts_with('[') => return Ok(None),
+        SheetSel::Named(n) if n.contains('[') => return Ok(None),
         SheetSel::Named(n) => {
             let id = r.sheet_id(n).ok_or_else(|| IdError::UnknownSheet(n.clone()))?;
             (Some(id), id)
@@ -135,8 +135,10 @@ fn ref_token(rf: &Reference, host: u64, r: &impl Resolver) -> Result<Option<Stri
     Ok(token)
 }
 
-/// A1 expression → id-form text: `@{r:5,c:1}`, `@{s:2,r:3,c:2,$r,$c}`, whole rows `@{r:5}`,
-/// whole columns `@{c:1}`, ranges `X:Y`. Ids are base 36. Names, structured references,
+/// A1 expression → id-form text: `@{r:5,c:1}`, `@{s:2,r:3,c:2,$r,$c}`, whole rows
+/// `@{r:5}:@{r:7}`, whole columns `@{c:1}:@{c:3}` (always a pair, as in A1), ranges `X:Y`. Ids
+/// are base 36. A range whose ends differ in shape or sheet (`A1:S2!B2`, `A1:B:B`) is two
+/// tokens joined by the range operator. Names, structured references,
 /// INDIRECT text, 3D spans and external references stay A1 text.
 pub fn print_ids(e: &Expr, host_sheet: u64, r: &impl Resolver) -> Result<String, IdError> {
     let mut failure = None;
@@ -240,11 +242,16 @@ fn read_token(b: &[u8], i: &mut usize) -> Result<Token, usize> {
     for (link, trim) in LINKS {
         let after = *i + link.len();
         if b.get(*i..after) == Some(link.as_bytes()) && token_starts(b, after) {
-            *i = after;
-            let second_at = *i;
-            let second = read_end(b, i)?;
+            let mut j = after;
+            let second = read_end(b, &mut j)?;
             let same_shape = first.row.is_some() == second.row.is_some() && first.col.is_some() == second.col.is_some();
-            return if second.sheet.is_some() || !same_shape { Err(second_at) } else { Ok(Token { first, second: Some(second), trim }) };
+            // Ends that differ in sheet or shape are two references joined by the range
+            // operator, as the parser keeps `A1:S2!B2` and `A1:B:B`: the token ends here.
+            if second.sheet.is_none() && same_shape {
+                *i = j;
+                return Ok(Token { first, second: Some(second), trim });
+            }
+            break;
         }
     }
     // A row or column on its own is not a reference: whole lines always come as `X:Y`.
@@ -313,19 +320,57 @@ impl Mask {
 
 /// The text a token is masked as: a reference on a sheet no workbook has, so every operator
 /// that applies to references (`#`, trim, ranges) parses around it.
-fn placeholder(prefix: &str, index: usize, range: bool, trim: Option<TrimMode>) -> String {
-    let link = trim.map_or(":", TrimMode::symbol);
-    if range { format!("'{prefix}{index}_'!A1{link}B2") } else { format!("'{prefix}{index}_'!A1") }
+fn placeholder(prefix: &str, index: usize, token: &Token) -> String {
+    // The same `$` marks as the id form's, so the masked text lexes as the A1 text would.
+    let end = |e: &End, row: &str, col: &str| {
+        let d = |abs: Option<(u64, bool)>| if abs.is_some_and(|(_, a)| a) { "$" } else { "" };
+        match (e.row, e.col) {
+            (Some(_), Some(_)) => format!("{}{col}{}{row}", d(e.col), d(e.row)),
+            (Some(_), None) => format!("{}{row}", d(e.row)),
+            _ => format!("{}{col}", d(e.col)),
+        }
+    };
+    let first = end(&token.first, "1", "A");
+    let tail = match &token.second {
+        Some(second) => format!("{}{}", token.trim.map_or(":", TrimMode::symbol), end(second, "2", "B")),
+        None => String::new(),
+    };
+    format!("'{prefix}{index}_'!{first}{tail}")
+}
+
+/// Longest id-form text read. A formula of [`MAX_FORMULA_LEN`] characters has at most about 4,100
+/// references, each at most about 70 bytes of id form, so this leaves room to spare.
+const MAX_ID_TEXT: usize = 512 * 1024;
+
+/// `_gcid` followed by more `x`s than any run after `_gcid` in `text` (compared without case),
+/// so the prefix occurs nowhere in the text. One pass.
+fn free_prefix(text: &str) -> String {
+    const BASE: &[u8] = b"_gcid";
+    let b = text.as_bytes();
+    let mut longest = 0usize;
+    let mut i = 0usize;
+    while i + BASE.len() <= b.len() {
+        if b.get(i..i + BASE.len()).is_some_and(|w| w.eq_ignore_ascii_case(BASE)) {
+            let mut j = i + BASE.len();
+            while b.get(j).is_some_and(|c| c.eq_ignore_ascii_case(&b'x')) {
+                j += 1;
+            }
+            longest = longest.max(j - i - BASE.len());
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    format!("_gcid{}", "x".repeat(longest + 1))
 }
 
 /// Replaces every id token by a name that cannot occur in the text, leaving strings, quoted
 /// sheet names and structured references alone.
 fn mask(text: &str) -> Result<Mask, IdError> {
-    let lower = text.to_ascii_lowercase();
-    let mut prefix = String::from("_gcid");
-    while lower.contains(&prefix) {
-        prefix.push('x');
+    if text.len() > MAX_ID_TEXT {
+        return Err(IdError::Syntax(MAX_ID_TEXT));
     }
+    let prefix = free_prefix(text);
     let b = text.as_bytes();
     let mut m = Mask { text: String::with_capacity(text.len()), spans: Vec::new(), tokens: Vec::new(), prefix };
     let (mut i, mut copied) = (0usize, 0usize);
@@ -343,7 +388,7 @@ fn mask(text: &str) -> Result<Mask, IdError> {
                     return Err(IdError::Syntax(start));
                 }
                 m.text.push_str(text.get(copied..start).ok_or(IdError::Syntax(start))?);
-                let name = placeholder(&m.prefix, m.tokens.len(), token.second.is_some(), token.trim);
+                let name = placeholder(&m.prefix, m.tokens.len(), &token);
                 m.spans.push((m.text.len(), name.len(), start, i - start));
                 m.text.push_str(&name);
                 m.tokens.push(token);
@@ -446,7 +491,14 @@ fn resolve(t: &Token, host: u64, r: &impl Resolver) -> Expr {
 /// range shrinks inward to the nearest surviving ids, and is `#REF!` when none survive.
 pub fn parse_ids(text: &str, host_sheet: u64, r: &impl Resolver) -> Result<Expr, IdError> {
     let m = mask(text)?;
-    let parsed = parse(&m.text).map_err(|e| IdError::Syntax(m.original_pos(e.pos)))?;
+    // The limit is the formula's, counted on the A1 text it stands for: each token costs what
+    // the shortest A1 form of it would (`A1`, `A1:B2`), not the placeholder's length.
+    let a1_len = text.chars().count() - m.spans.iter().map(|s| s.3).sum::<usize>()
+        + m.tokens.iter().map(|t| if t.second.is_some() { 3 } else { 2 }).sum::<usize>();
+    if a1_len > MAX_FORMULA_LEN {
+        return Err(IdError::Syntax(0));
+    }
+    let parsed = parse_unlimited(&m.text).map_err(|e| IdError::Syntax(m.original_pos(e.pos)))?;
     Ok(parsed.map(&mut |x| match x {
         Expr::Ref(Reference { sheet: SheetSel::Named(n), kind }) => {
             let index = n.strip_prefix(&m.prefix).and_then(|rest| rest.strip_suffix('_')).and_then(|digits| digits.parse::<usize>().ok());
