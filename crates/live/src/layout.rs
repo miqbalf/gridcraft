@@ -9,8 +9,8 @@ use gridcraft_model::workbook::Workbook;
 
 use crate::axis::{Axis, AxisKind};
 use crate::doc::GridDoc;
-use crate::formula_ids::{Lookup, Resolver};
 use crate::ids::Id;
+use gridcraft_formula::ids::{Lookup, Resolver};
 
 /// One sheet's axes.
 #[derive(Clone, Debug, PartialEq, Eq)]

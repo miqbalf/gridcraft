@@ -11,8 +11,8 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use crate::formula_ids::Lookup;
 use crate::ids::Id;
+use gridcraft_formula::ids::Lookup;
 
 /// Rows or columns.
 pub use gridcraft_formula::adjust::Axis as AxisKind;

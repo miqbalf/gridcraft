@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use craft_collab::Replica;
-use gridcraft_live::formula_ids::Lookup;
+use gridcraft_formula::ids::Lookup;
 use gridcraft_live::{Axis, AxisKind, GridDoc, GridSeed, Id, Op};
 
 use crate::{Rng, seeds};
