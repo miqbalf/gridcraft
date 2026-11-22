@@ -71,10 +71,6 @@ pub struct Bridge {
     opened: Rc<RefCell<Option<String>>>,
     /// The host said `share: true`: it opens Nextcloud sharing on `gridcraft:share`.
     share: Rc<Cell<bool>>,
-    /// Files the host sent that are not yet bound to a workbook ([`SheetApp::note_host_open`]).
-    host_opens: Rc<RefCell<Vec<String>>>,
-    /// The workbooks open at the end of the last frame: a host file opens as a new one.
-    known: Rc<RefCell<Vec<u64>>>,
 }
 
 impl Bridge {
@@ -102,15 +98,17 @@ impl Bridge {
             answers: Rc::default(),
             opened: Rc::default(),
             share: Rc::default(),
-            host_opens: Rc::default(),
-            known: Rc::default(),
         })
     }
 
     /// Send saved and exported files to the host instead of downloading them, and hear files
     /// from it.
-    pub fn connect(&self, services: &mut Services, inbox: Inbox, ctx: egui::Context) {
-        self.listen(inbox, ctx);
+    pub fn connect(&self, services: &mut Services, ctx: egui::Context) {
+        // The page's files have their own inbox, so the workbook each opens is known to be the
+        // page's (`Services::host_doc`); File › Open and drops use the app's inbox.
+        let host_inbox = Inbox::default();
+        services.host_inbox = Some(host_inbox.clone());
+        self.listen(host_inbox, ctx);
         let bridge = self.clone();
         services.download = Some(Box::new(move |name: &str, bytes: &[u8]| {
             if let Err(e) = bridge.post_save(name, bytes) {
@@ -143,7 +141,6 @@ impl Bridge {
     pub fn sync(&self, app: &mut SheetApp) {
         let saved = std::mem::take(&mut *self.saved.borrow_mut());
         sync_saved(&saved, app);
-        self.bind_host_opens(app);
         self.apply_share(app);
         let answers = std::mem::take(&mut *self.answers.borrow_mut());
         {
@@ -156,13 +153,6 @@ impl Bridge {
             }
         }
         self.host.post_dirty(app.session.documents().iter().any(|d| d.is_dirty()));
-    }
-
-    /// The workbook each host open produced becomes the page's (by its id, not its name).
-    fn bind_host_opens(&self, app: &mut SheetApp) {
-        let known = self.known.borrow().clone();
-        self.host_opens.borrow_mut().retain(|name| !app.note_host_open(name, &known));
-        *self.known.borrow_mut() = app.session.documents().iter().map(|d| d.uid).collect();
     }
 
     /// Share asks the page once it said `share: true` (parent mode only), for the workbook it
@@ -206,7 +196,6 @@ impl Bridge {
             Message::Open { name, data } => {
                 if deliver_open(&inbox, &ctx, &name, &data) {
                     *bridge.opened.borrow_mut() = Some(open_name(&name));
-                    bridge.host_opens.borrow_mut().push(open_name(&name));
                 }
             }
             Message::Host { saves, share, .. } => {

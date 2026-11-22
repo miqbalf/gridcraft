@@ -49,10 +49,13 @@ pub struct Services {
     /// Web: the page hosting GridCraft shares files itself (`gridcraft:host` with `share: true`).
     /// Share posts `gridcraft:share` to it, for the workbook it opened ([`Services::host_doc`]).
     pub host_share: Option<HostShare>,
-    /// Web: the id (`DocState::uid`) of the workbook the hosting page opened in the frame
-    /// ([`crate::SheetApp::note_host_open`]). Share asks the page only while that workbook is the
-    /// active one, whatever it is named.
+    /// Web: the id (`DocState::uid`) of the workbook the hosting page opened in the frame: the one
+    /// its own open from [`Services::host_inbox`] produced. Share asks the page only while that
+    /// workbook is the active one, whatever it is named.
     pub host_doc: Option<u64>,
+    /// Web: files the hosting page sent (name, bytes), opened on the next frame like
+    /// [`Services::inbox`]; the workbook such an open produces becomes [`Services::host_doc`].
+    pub host_inbox: Option<Inbox>,
     /// Desktop: where Share goes for a workbook saved at a path (`craft_share::desktop_route`:
     /// Nextcloud sharing in the browser for a file in a folder the Nextcloud client syncs).
     pub share_route: Option<ShareRoute>,

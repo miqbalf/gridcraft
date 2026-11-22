@@ -261,6 +261,8 @@ pub(super) const CORE: &[(&str, &str)] = &[
     ("Share", "共有"),
     ("No Nextcloud connected", "Nextcloud に接続されていません"),
     ("Share in Nextcloud", "Nextcloud で共有"),
+    ("Share works only for {name}, the first file opened from Nextcloud", "共有できるのは Nextcloud から最初に開いたファイル {name} だけです"),
+    ("Couldn't reach Nextcloud to share this workbook", "このブックを共有するために Nextcloud に接続できませんでした"),
     ("Add Chart\nElement", "グラフ要素を追加"),
     ("Change\nChart Type", "グラフの種類の変更"),
     ("Switch\nRow/Column", "行/列の切り替え"),

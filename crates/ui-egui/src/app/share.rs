@@ -16,6 +16,9 @@ use super::{Json, SheetApp, json, now_ms};
 /// A second file from the page, while its first is still open.
 const HOST_ONE_FILE: &str = "Share works only for {name}, the first file opened from Nextcloud";
 
+/// The page could not be asked to share (it went away).
+const HOST_UNREACHABLE: &str = "Couldn't reach Nextcloud to share this workbook";
+
 impl SheetApp {
     /// Where Share goes for the active workbook.
     pub fn share_route(&self) -> ShareRoute {
@@ -46,19 +49,14 @@ impl SheetApp {
         self.share_routes.insert(doc.uid, (path.to_string(), route));
     }
 
-    /// Web: the hosting page opened `name` in the frame. Binds the workbook that open produced
-    /// (open now, not in `before`, named `name`) as the page's: Share asks the page for it alone.
-    /// The page edits one file per frame: while its first workbook is still open, a later one is
-    /// opened but not bound, and a toast says which file Share is for. Returns `false` while no
-    /// such workbook is open yet (the open is still to come, or waits for a password).
-    pub fn note_host_open(&mut self, name: &str, before: &[u64]) -> bool {
+    /// Web: the hosting page's own open (from [`crate::Services::host_inbox`], or the password
+    /// prompt it led to) produced the workbook in `opened` (`file.open`'s result): it is the
+    /// page's, and Share asks the page for it alone. The page edits one file per frame: while its
+    /// first workbook is still open, a later one is opened but not bound, and a toast says which
+    /// file Share is for.
+    pub(crate) fn bind_host_open(&mut self, opened: &Json) {
         let docs = self.session.documents();
-        // An xls, xlsb or ods file opens as an imported copy, "{stem} (imported).xlsx".
-        let stem = std::path::Path::new(name).file_stem().and_then(std::ffi::OsStr::to_str).unwrap_or(name);
-        let imported = format!("{stem} (imported).xlsx");
-        let Some(uid) = docs.iter().find(|d| !before.contains(&d.uid) && (d.title == name || d.title == imported)).map(|d| d.uid) else {
-            return false;
-        };
+        let Some(uid) = opened.get("index").and_then(Json::as_u64).and_then(|i| docs.get(usize::try_from(i).ok()?)).map(|d| d.uid) else { return };
         match self.services.host_doc.and_then(|first| docs.iter().find(|d| d.uid == first && d.uid != uid)) {
             Some(first) => {
                 let first = first.title.clone();
@@ -68,7 +66,6 @@ impl SheetApp {
             }
             None => self.services.host_doc = Some(uid),
         }
-        true
     }
 
     /// The one Share function (`file.share`).
@@ -78,8 +75,15 @@ impl SheetApp {
         match self.share_route() {
             ShareRoute::NextcloudWebHost => {
                 let post = self.services.host_share.as_ref().ok_or_else(|| craft_share::NO_NEXTCLOUD.to_string())?;
-                post()?;
-                Ok(json!({"shared": "host"}))
+                match post() {
+                    Ok(()) => Ok(json!({"shared": "host"})),
+                    // Said in a toast, like "No Nextcloud connected"; automation gets the reason.
+                    Err(e) => {
+                        self.follow_active_window();
+                        self.toast = Some((HOST_UNREACHABLE.to_string(), now_ms()));
+                        Ok(json!({"shared": false, "message": HOST_UNREACHABLE, "error": e}))
+                    }
+                }
             }
             ShareRoute::NextcloudDesktop { server, remote_path, .. } => {
                 let url = craft_share::sharing_url(&server, &remote_path);

@@ -268,6 +268,10 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Share" => "Partager",
         "No Nextcloud connected" => "Aucun Nextcloud connecté",
         "Share in Nextcloud" => "Partager dans Nextcloud",
+        "Share works only for {name}, the first file opened from Nextcloud" => {
+            "Le partage ne fonctionne que pour {name}, le premier fichier ouvert depuis Nextcloud"
+        }
+        "Couldn't reach Nextcloud to share this workbook" => "Impossible de joindre Nextcloud pour partager ce classeur",
         "Add Chart\nElement" => "Ajouter un élément\nde graphique",
         "Change\nChart Type" => "Modifier le type\nde graphique",
         "Switch\nRow/Column" => "Permuter\nligne/colonne",

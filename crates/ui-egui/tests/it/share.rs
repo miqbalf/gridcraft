@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use egui::Key;
 use egui_kittest::kittest::Queryable as _;
 use gridcraft_ui_egui::craft_share::{self, ShareRoute};
-use gridcraft_ui_egui::{Services, SheetApp, control};
+use gridcraft_ui_egui::{Inbox, Services, SheetApp, control};
 use serde_json::json;
 
 type Harness = egui_kittest::Harness<'static, SheetApp>;
@@ -39,6 +39,8 @@ fn web_host(log: &Log) -> Services {
             p.lock().unwrap().posts += 1;
             Ok(())
         })),
+        host_inbox: Some(Inbox::default()),
+        inbox: Some(Inbox::default()),
         ..deliveries(log)
     }
 }
@@ -64,17 +66,34 @@ fn harness(services: Services, path: Option<&str>) -> Harness {
     h
 }
 
-/// The page sends `name` (an XLSX workbook), as the web bridge does: the workbook it opens
-/// becomes the page's. Returns its id.
+/// An XLSX workbook with content, as the page or a local pick would send it.
+fn workbook_bytes() -> Vec<u8> {
+    let mut s = gridcraft_engine::Session::new();
+    s.new_workbook();
+    s.execute("cell.set", json!({"cell": "A1", "input": "42"})).unwrap();
+    let b64 = s.execute("file.saveBytes", json!({})).unwrap();
+    gridcraft_engine::io::base64_decode(b64["base64"].as_str().unwrap()).unwrap()
+}
+
+fn push(inbox: Option<&Inbox>, name: &str, bytes: Vec<u8>) {
+    inbox.expect("the harness has this inbox").lock().unwrap().push((name.into(), bytes));
+}
+
+/// The page sends `name`, as the web bridge does (its own inbox); returns the workbook it opened.
 fn host_open(h: &mut Harness, name: &str) -> u64 {
-    let before: Vec<u64> = h.state().session.documents().iter().map(|d| d.uid).collect();
-    // A file with content: an untouched blank workbook would be replaced by the next open.
-    h.state_mut().run("cell.set", json!({"cell": "A1", "input": "42"})).unwrap();
-    let bytes = h.state_mut().run("file.saveBytes", json!({})).unwrap();
-    h.state_mut().run("file.open", json!({"name": name, "base64": bytes["base64"]})).unwrap();
-    h.run_steps(2);
-    assert!(h.state_mut().note_host_open(name, &before), "{name} opened");
-    h.run_steps(2);
+    host_send(h, name, workbook_bytes());
+    h.state().session.active().unwrap().uid
+}
+
+fn host_send(h: &mut Harness, name: &str, bytes: Vec<u8>) {
+    push(h.state().services.host_inbox.as_ref(), name, bytes);
+    h.run_steps(3);
+}
+
+/// File › Open or a drop on the web (the app's inbox); returns the workbook it opened.
+fn local_open(h: &mut Harness, name: &str) -> u64 {
+    push(h.state().services.inbox.as_ref(), name, workbook_bytes());
+    h.run_steps(3);
     h.state().session.active().unwrap().uid
 }
 
@@ -116,8 +135,10 @@ fn control_share(h: &mut Harness) -> serde_json::Value {
 #[test]
 fn every_entry_point_asks_the_hosting_page() {
     let log = Log::default();
+    // A framed page starts with an untouched blank workbook; the page's file replaces it.
     let mut h = harness(web_host(&log), None);
     host_open(&mut h, "Budget.xlsx");
+    assert_eq!(h.state().session.documents().len(), 1, "the blank start workbook was replaced");
     click_title_bar_share(&mut h);
     assert_eq!(log.lock().unwrap().posts, 1, "the title bar's Share asks the page");
     command_search_share(&mut h);
@@ -157,13 +178,11 @@ fn the_page_shares_only_the_workbook_it_opened() {
     assert!(no_nextcloud_shown(&h));
     let page = host_open(&mut h, "Budget.xlsx");
     // A local workbook with the same name, opened in the frame (File › Open, a drop).
-    let bytes = h.state_mut().run("file.saveBytes", json!({})).unwrap();
-    h.state_mut().run("file.open", json!({"name": "Budget.xlsx", "base64": bytes["base64"]})).unwrap();
-    h.run_steps(2);
-    assert_ne!(h.state().session.active().unwrap().uid, page);
+    let local = local_open(&mut h, "Budget.xlsx");
+    assert_ne!(local, page);
     h.state_mut().toast = None;
     click_title_bar_share(&mut h);
-    assert_eq!(log.lock().unwrap().posts, 0, "a same-named workbook is not the page's");
+    assert_eq!(log.lock().unwrap().posts, 0, "a same-named local workbook is not the page's");
     assert!(no_nextcloud_shown(&h));
     nothing_else(&h, &log);
     // The page's workbook, renamed by a conflict copy, is still the page's.
@@ -172,6 +191,26 @@ fn the_page_shares_only_the_workbook_it_opened() {
     h.run_steps(2);
     click_title_bar_share(&mut h);
     assert_eq!(log.lock().unwrap().posts, 1, "the page's workbook, whatever its name");
+}
+
+#[test]
+fn a_failed_page_open_leaves_no_workbook_for_the_page() {
+    let log = Log::default();
+    let mut h = harness(web_host(&log), None);
+    // The page's file is a broken workbook: it does not open, and says why.
+    let docs = h.state().session.documents().len();
+    let mut broken = workbook_bytes();
+    broken.truncate(broken.len() / 2);
+    host_send(&mut h, "Budget.xlsx", broken);
+    assert_eq!(h.state().session.documents().len(), docs, "nothing opened");
+    assert!(h.state().message.is_some(), "the failed open is reported");
+    h.state_mut().message = None;
+    // The person then opens their own copy of that name.
+    local_open(&mut h, "Budget.xlsx");
+    click_title_bar_share(&mut h);
+    assert_eq!(log.lock().unwrap().posts, 0, "a local workbook never becomes the page's");
+    assert!(no_nextcloud_shown(&h));
+    nothing_else(&h, &log);
 }
 
 #[test]
@@ -193,14 +232,18 @@ fn a_second_file_from_the_page_does_not_take_over_share() {
 }
 
 #[test]
-fn a_page_that_cannot_be_reached_is_reported() {
+fn a_page_that_cannot_be_reached_is_said_in_a_toast() {
     let log = Log::default();
-    let services = Services { host_share: Some(Box::new(|| Err("no same-origin parent".into()))), ..deliveries(&log) };
+    let services =
+        Services { host_share: Some(Box::new(|| Err("no same-origin parent".into()))), host_inbox: Some(Inbox::default()), ..deliveries(&log) };
     let mut h = harness(services, None);
     host_open(&mut h, "Budget.xlsx");
+    click_title_bar_share(&mut h);
+    assert!(h.state().toast.is_some(), "a short status message");
+    assert!(!no_nextcloud_shown(&h), "Nextcloud is connected; the page did not answer");
     let response = control_share(&mut h);
-    assert_eq!(response["ok"], false, "a failed post is not a share: {response}");
-    assert!(log.lock().unwrap().delivered.is_empty());
+    assert_eq!(response["result"]["shared"], false, "a failed post is not a share: {response}");
+    nothing_else(&h, &log);
 }
 
 #[test]

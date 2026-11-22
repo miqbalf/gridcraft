@@ -55,6 +55,10 @@ pub enum Field {
     Note(String),
 }
 
+/// Marks an `openPassword` dialog for a file the hosting page sent: the workbook it opens is
+/// the page's ([`crate::Services::host_doc`]).
+pub(crate) const HOST_OPEN: &str = "hostOpen";
+
 #[derive(Clone, Debug)]
 pub struct Dialog {
     pub name: String,
@@ -451,6 +455,7 @@ impl Dialog {
                 json!({"on": false}),
             ),
             "openPassword" => {
+                // `HOST_OPEN` (the hosting page's file) rides along too; `build_params` drops it.
                 // The file rides along in the values (`path` on the desktop, `name` and `base64`
                 // on the web) and goes back to `file.open` with the password.
                 let source = p("path").as_str().or(p("name").as_str()).map(str::to_string).unwrap_or_default();

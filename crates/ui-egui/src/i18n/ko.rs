@@ -253,6 +253,8 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Share" => "공유",
         "No Nextcloud connected" => "연결된 Nextcloud가 없습니다",
         "Share in Nextcloud" => "Nextcloud에서 공유",
+        "Share works only for {name}, the first file opened from Nextcloud" => "공유는 Nextcloud에서 처음 연 파일 {name}에만 사용할 수 있습니다",
+        "Couldn't reach Nextcloud to share this workbook" => "이 통합 문서를 공유하기 위해 Nextcloud에 연결할 수 없습니다",
         "Add Chart\nElement" => "차트\n요소 추가",
         "Change\nChart Type" => "차트 종류\n변경",
         "Switch\nRow/Column" => "행/열\n전환",

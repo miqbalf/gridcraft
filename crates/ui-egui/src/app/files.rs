@@ -24,6 +24,16 @@ impl SheetApp {
         self.show_open_warnings(r);
     }
 
+    /// A workbook opened from the password prompt (`values` are the prompt's): as [`Self::after_open`],
+    /// and the hosting page's file stays the page's.
+    pub(crate) fn after_password_open(&mut self, values: &serde_json::Map<String, Json>, r: &Json) {
+        let path = values.get("path").and_then(Json::as_str).map(str::to_string);
+        self.after_open(path.as_deref(), r);
+        if values.get(crate::dialogs::HOST_OPEN) == Some(&json!(true)) {
+            self.bind_host_open(r);
+        }
+    }
+
     /// Turns the `warnings` a `file.open` result carries into an info-bar notice, choosing the
     /// most important one (a preserved VBA project outranks, say, a skipped optional part).
     /// Kept deliberately generic: any open-time warning can reach the user this way.
@@ -77,23 +87,35 @@ impl SheetApp {
 
     /// Opens files that arrived asynchronously (web file picker, dropped files).
     pub(super) fn poll_async_opens(&mut self) {
-        let arrived: Vec<(String, Vec<u8>)> = self
-            .services
-            .inbox
-            .as_ref()
-            .map(|i| std::mem::take(&mut *i.lock().unwrap_or_else(std::sync::PoisonError::into_inner)))
-            .unwrap_or_default();
-        for (name, bytes) in arrived {
+        let take = |inbox: Option<&crate::Inbox>| -> Vec<(String, Vec<u8>)> {
+            inbox.map(|i| std::mem::take(&mut *i.lock().unwrap_or_else(std::sync::PoisonError::into_inner))).unwrap_or_default()
+        };
+        // The hosting page's files first, each marked as the page's own open.
+        let arrived: Vec<(String, Vec<u8>, bool)> = take(self.services.host_inbox.as_ref())
+            .into_iter()
+            .map(|(n, b)| (n, b, true))
+            .chain(take(self.services.inbox.as_ref()).into_iter().map(|(n, b)| (n, b, false)))
+            .collect();
+        for (name, bytes, host) in arrived {
             let b64 = gridcraft_engine::io::base64_encode(&bytes);
             match self.run("file.open", json!({"name": &name, "base64": &b64})) {
                 // A file picked from File › Open (web) arrives here: show it, not the Backstage.
                 Ok(r) => {
                     self.backstage = None;
                     self.show_open_warnings(&r);
+                    if host {
+                        self.bind_host_open(&r);
+                    }
                 }
                 Err(e) if e.contains(gridcraft_engine::io::PASSWORD_REQUIRED) => {
                     self.backstage = None;
-                    self.open_dialog("openPassword", json!({"name": name, "base64": b64}));
+                    // The page's file stays the page's through the password prompt; a cancelled
+                    // prompt leaves nothing behind.
+                    let mut values = json!({"name": name, "base64": b64});
+                    if host {
+                        values[crate::dialogs::HOST_OPEN] = json!(true);
+                    }
+                    self.open_dialog("openPassword", values);
                 }
                 Err(e) => self.message = Some(("GridCraft".into(), clean_error(&e))),
             }

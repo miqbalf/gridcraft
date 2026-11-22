@@ -364,8 +364,12 @@ pub fn handle(app: &mut SheetApp, ctx: &egui::Context, method: &str, p: &Json) -
                     let params = crate::dialogs::build_params(&d);
                     let home = app.ui_window();
                     let r = app.run(cmd, params);
-                    if r.is_err() {
-                        app.return_dialog(home, d);
+                    match &r {
+                        Err(_) => app.return_dialog(home, d),
+                        Ok(r) if d.name == "openPassword" && d.values.get(crate::dialogs::HOST_OPEN) == Some(&json!(true)) => {
+                            app.bind_host_open(r);
+                        }
+                        Ok(_) => {}
                     }
                     wrap(r)
                 }

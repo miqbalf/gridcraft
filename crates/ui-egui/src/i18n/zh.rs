@@ -253,6 +253,8 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Share" => "分享",
         "No Nextcloud connected" => "未连接 Nextcloud",
         "Share in Nextcloud" => "在 Nextcloud 中分享",
+        "Share works only for {name}, the first file opened from Nextcloud" => "分享仅适用于 {name}，即从 Nextcloud 打开的第一个文件",
+        "Couldn't reach Nextcloud to share this workbook" => "无法连接 Nextcloud 来分享此工作簿",
         "Add Chart\nElement" => "添加图表\n元素",
         "Change\nChart Type" => "更改\n图表类型",
         "Switch\nRow/Column" => "切换\n行/列",
