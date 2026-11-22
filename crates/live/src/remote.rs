@@ -134,6 +134,16 @@ impl Targets {
                 }
             }
         }
+        for (i, s) in layout.sheets.iter().enumerate() {
+            for axis in [AxisKind::Rows, AxisKind::Cols] {
+                for key in doc.written_lines(s.id, axis) {
+                    let Some((id, "st")) = key.split_once('/') else { continue };
+                    if matches!(doc.line(s.id, axis, &key), Entry::Set(v) if v.as_str().is_some_and(|k| arrived.iter().any(|a| a.as_str() == k))) {
+                        self.lines.extend(Id::parse(id).map(|id| (i, u8::from(axis == AxisKind::Cols), id)));
+                    }
+                }
+            }
+        }
         for k in arrived.into_iter().cloned().collect::<Vec<_>>() {
             unresolved.remove(&k);
         }
@@ -164,7 +174,7 @@ pub(crate) fn apply(cx: &mut RemoteCtx, ctx: &Ctx, doc: &GridDoc, t: &Targets, u
         cell(cx, ctx, doc, *i, key, unresolved)?;
     }
     for (i, cols, id) in &t.lines {
-        line(cx, ctx, doc, *i, if *cols == 1 { AxisKind::Cols } else { AxisKind::Rows }, *id)?;
+        line(cx, ctx, doc, (*i, if *cols == 1 { AxisKind::Cols } else { AxisKind::Rows }, *id), unresolved)?;
     }
     for i in &t.props {
         props(cx, ctx, doc, *i)?;
@@ -264,7 +274,21 @@ fn bool_entry(e: Entry<serde_json::Value>, base: bool) -> bool {
     }
 }
 
-fn line(cx: &mut RemoteCtx, ctx: &Ctx, doc: &GridDoc, i: usize, axis: AxisKind, id: Id) -> gridcraft_engine::Result<()> {
+/// The largest row height or column width a remote value may name.
+const MAX_LINE_SIZE: f32 = 4096.0;
+
+/// A remote size the engine accepts: finite and not below 0 (above 0 for a default size), at
+/// most [`MAX_LINE_SIZE`]. Anything else is junk from a peer: it is logged and read as absent.
+fn clean_size(v: &serde_json::Value, positive: bool) -> Option<f32> {
+    let f = v.as_f64().filter(|f| f.is_finite() && if positive { *f > 0.0 } else { *f >= 0.0 });
+    if f.is_none() {
+        log::warn!("gridcraft-live: ignored a remote size that is not a usable number");
+    }
+    f.map(|f| f.min(f64::from(MAX_LINE_SIZE)) as f32)
+}
+
+fn line(cx: &mut RemoteCtx, ctx: &Ctx, doc: &GridDoc, at: (usize, AxisKind, Id), unresolved: &mut BTreeSet<String>) -> gridcraft_engine::Result<()> {
+    let (i, axis, id) = at;
     let Some(sheet) = ctx.layout.sheets.get(i) else { return Ok(()) };
     let Lookup::At(pos) = sheet.axis(axis).pos_of(id) else { return Ok(()) };
     if pos >= if axis == AxisKind::Rows { MAX_ROWS } else { MAX_COLS } {
@@ -276,17 +300,31 @@ fn line(cx: &mut RemoteCtx, ctx: &Ctx, doc: &GridDoc, i: usize, axis: AxisKind, 
     let size = match doc.line(sheet.id, axis, &line_key(id, size_part(axis))) {
         Entry::Absent => base.size,
         Entry::Cleared => None,
-        Entry::Set(v) => v.as_f64().map(|f| f as f32).or(base.size),
+        Entry::Set(v) => clean_size(&v, false).or(base.size),
     };
     let custom = if axis == AxisKind::Rows { bool_entry(doc.line(sheet.id, axis, &line_key(id, "hc")), base.custom) } else { cur.custom };
     let manual = bool_entry(doc.line(sheet.id, axis, &line_key(id, "hide")), base.hidden && !fh);
-    let info = LineInfo { size, hidden: manual || fh, custom, ..cur };
+    let style = match doc.line(sheet.id, axis, &line_key(id, "st")) {
+        Entry::Absent => base.style.map(|b| cx.intern_style(&ctx.base.styles.get(b).clone())),
+        Entry::Cleared => None,
+        Entry::Set(k) => k.as_str().and_then(|k| Some((k, doc.style(k)?))).and_then(|(k, j)| styles::from_json(&j).map(|s| (k, s))).map_or_else(
+            || {
+                log::warn!("gridcraft-live: a line's style is not in the document; none is shown until it arrives");
+                if let Some(k) = k.as_str() {
+                    unresolved.insert(k.to_owned());
+                }
+                None
+            },
+            |(_, s)| Some(cx.intern_style(&s)),
+        ),
+    };
+    let info = LineInfo { size, hidden: manual || fh, custom, style, ..cur };
     cx.set_line(i, axis, pos, (info != LineInfo::default()).then_some(info))
 }
 
 fn props(cx: &mut RemoteCtx, ctx: &Ctx, doc: &GridDoc, i: usize) -> gridcraft_engine::Result<()> {
     let (Some(sheet), Some(base)) = (ctx.layout.sheets.get(i), ctx.base.sheet(i)) else { return Ok(()) };
-    let read = |name: &str, base: f32| doc.sheet_prop(sheet.id, name).and_then(|v| v.as_f64()).map_or(base, |f| f as f32);
+    let read = |name: &str, base: f32| doc.sheet_prop(sheet.id, name).and_then(|v| clean_size(&v, true)).unwrap_or(base);
     cx.set_default_size(i, AxisKind::Cols, Some(read("defw", base.default_col_width)))?;
     cx.set_default_size(i, AxisKind::Rows, Some(read("defh", base.default_row_height)))
 }

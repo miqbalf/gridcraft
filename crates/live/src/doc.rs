@@ -25,11 +25,6 @@ use crate::schema::{
 /// The key the change observers are registered under.
 const OBSERVER: &str = "gridcraft-live/changes";
 
-/// The most updates [`GridDoc`] keeps while yrs holds pending ones (see `settle`).
-pub const HELD_MAX_ENTRIES: usize = 1024;
-/// The most bytes [`GridDoc`] keeps while yrs holds pending ones, the relay's cap in order of size.
-pub const HELD_MAX_BYTES: usize = 4 * 1024 * 1024;
-
 /// A key's state in the overlay.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Entry<T> {
@@ -56,6 +51,20 @@ pub struct CellContent {
     pub py: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub u: Option<String>,
+    /// The fingerprint of the content the author's replica held at this cell when it wrote this
+    /// (see [`CellContent::fingerprint`]; "0" for none; text, because yrs may hand a large integer back as a float): "I replaced that one". A later write that
+    /// names a different fingerprint did not see this one, which is how a truly concurrent
+    /// overwrite is told from an ordinary later edit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p: Option<String>,
+}
+
+impl CellContent {
+    /// A hash of the content as stored, naming this exact version of a cell.
+    #[must_use]
+    pub fn fingerprint(&self) -> String {
+        format!("{:016x}", crate::styles::fnv1a64(serde_json::to_string(self).unwrap_or_default().as_bytes()))
+    }
 }
 
 /// What a room is seeded from: the base bytes' hash and the base workbook's sheet count. Equal
@@ -171,14 +180,6 @@ pub struct GridDoc {
     roots: Roots,
     /// What the observers saw, drained by [`Replica::apply`].
     seen: Arc<Mutex<Vec<Seen>>>,
-    /// Updates that arrived while yrs was waiting for missing dependencies, kept until the gap
-    /// closes and then applied again (see [`GridDoc::settle`]).
-    held: Vec<Vec<u8>>,
-    /// The bytes in `held`.
-    held_bytes: usize,
-    /// The copies outgrew their cap and were dropped: this replica may never close its gap
-    /// alone and needs a full state. Sticky until [`GridDoc::clear_resync`].
-    resync: bool,
     /// Writes the last [`GridDoc::write`] skipped.
     skipped: usize,
 }
@@ -202,91 +203,15 @@ impl GridDoc {
         // No undo scope: every write is untracked (Ruling R3).
         let mut y = YReplica::assemble(doc, client, |_, _| {});
         y.set_untracked(true);
-        GridDoc { y, roots, seen, held: Vec::new(), held_bytes: 0, resync: false, skipped: 0 }
+        GridDoc { y, roots, seen, skipped: 0 }
     }
 
-    fn missing(&self) -> bool {
-        self.y.doc().transact().has_missing_updates()
-    }
-
-    /// yrs 0.28 holds an update whose dependencies have not arrived as "pending", and does not
-    /// always let it go: with updates delivered out of order, a pending update can stay pending
-    /// after its dependencies have landed (its retry check misses them), and a merge of pending
-    /// updates can lose items. Applying the same bytes again lets it go. So this replica keeps its
-    /// own copy of every update that arrives while anything is pending and, after an apply that
-    /// grew the state (`grew`), applies the copies again, pass after pass while the state still
-    /// grows. Once nothing is pending the copies are dropped. Blocks yrs already has are skipped,
-    /// so a repeat only fills what was held back. Updates from the relay arrive in order, so this
-    /// is normally a no-op.
-    ///
-    /// The copies are capped ([`HELD_MAX_ENTRIES`], [`HELD_MAX_BYTES`]): a gap that never closes
-    /// (a lost message, a partial state) drops them and raises [`needs_resync`](Self::needs_resync).
-    fn settle(&mut self, update: &[u8], grew: bool) {
-        if !self.held.is_empty() || self.missing() {
-            self.held_bytes += update.len();
-            self.held.push(update.to_vec());
-            if self.held.len() > HELD_MAX_ENTRIES || self.held_bytes > HELD_MAX_BYTES {
-                if !self.resync {
-                    log::warn!(
-                        "gridcraft-live: {} updates wait on a dependency that has not arrived; dropped, a full state is needed",
-                        self.held.len()
-                    );
-                }
-                self.drop_held();
-                self.resync = true;
-                return;
-            }
-        }
-        if grew {
-            for _ in 0..self.held.len() {
-                if !self.missing() {
-                    break;
-                }
-                let before = self.y.doc().transact().state_vector();
-                for u in &self.held {
-                    // Each was decoded and applied once already.
-                    let _ = self.y.apply(u);
-                }
-                if self.y.doc().transact().state_vector() == before {
-                    break;
-                }
-            }
-        }
-        if !self.missing() {
-            self.drop_held();
-        }
-    }
-
-    fn drop_held(&mut self) {
-        self.held.clear();
-        self.held_bytes = 0;
-    }
-
-    /// Whether this replica dropped updates it was holding for a dependency that never came, so
-    /// the session should fetch a full state (a checkpoint) and apply it. Stays set until
-    /// [`clear_resync`](Self::clear_resync).
+    /// Whether this replica dropped updates it was holding for a dependency that never came
+    /// (the replica's own cap, see `YReplica::needs_resync`): it is sound but behind and wants
+    /// the room's full state.
     #[must_use]
     pub fn needs_resync(&self) -> bool {
-        self.resync
-    }
-
-    /// The session has asked for (or applied) a full state.
-    pub fn clear_resync(&mut self) {
-        self.resync = false;
-    }
-
-    /// How many updates are held for a missing dependency (for tests and diagnostics).
-    #[doc(hidden)]
-    #[must_use]
-    pub fn held_len(&self) -> usize {
-        self.held.len()
-    }
-
-    /// The bytes held for a missing dependency (for tests and diagnostics).
-    #[doc(hidden)]
-    #[must_use]
-    pub fn held_bytes(&self) -> usize {
-        self.held_bytes
+        self.y.needs_resync()
     }
 
     /// How many writes the last [`write`](Self::write) skipped: writes to a sheet the document
@@ -470,6 +395,17 @@ impl GridDoc {
     /// logged (check [`has_sheet`](Self::has_sheet) first); the rest of the transaction is kept,
     /// because a yrs transaction cannot be taken back once it holds writes.
     pub fn write(&mut self, f: impl FnOnce(&mut GridTxn)) -> Result<Vec<u8>, LiveError> {
+        self.write_grouped(0, f)
+    }
+
+    /// [`write`](Self::write) as one part of command group `group`. Every update of one command
+    /// (a large batch is cut into several) is written under the same yrs transaction origin,
+    /// `"craft-collab/untracked#cmd<group>"`, so the undo of G11 can take them as one step. Group
+    /// 0 is an ungrouped write.
+    ///
+    /// # Errors
+    /// As [`write`](Self::write).
+    pub fn write_grouped(&mut self, group: u64, f: impl FnOnce(&mut GridTxn)) -> Result<Vec<u8>, LiveError> {
         if self.y.damaged() {
             return Err(LiveError::Damaged);
         }
@@ -477,7 +413,11 @@ impl GridDoc {
             return Err(LiveError::NoClient);
         }
         let (update, skipped) = {
-            let mut g = GridTxn { txn: self.y.doc().transact_mut_with(UNTRACKED), roots: &self.roots, skipped: 0 };
+            let mut g = GridTxn {
+                txn: self.y.doc().transact_mut_with(if group == 0 { UNTRACKED.to_owned() } else { format!("{UNTRACKED}#cmd{group}") }),
+                roots: &self.roots,
+                skipped: 0,
+            };
             f(&mut g);
             (g.txn.encode_update_v1(), g.skipped)
         };
@@ -598,24 +538,15 @@ impl Replica for GridDoc {
             return Ok(());
         }
         let doc = self.y.rebuilt(space)?;
-        let damaged = self.y.damaged();
-        let held = std::mem::take(&mut self.held);
-        let (held_bytes, resync) = (self.held_bytes, self.resync);
-        *self = GridDoc::assemble(doc, Some(space));
-        self.y.set_damaged(damaged);
-        self.held = held;
-        self.held_bytes = held_bytes;
-        self.resync = resync;
+        let old = std::mem::replace(self, GridDoc::assemble(doc, Some(space)));
+        self.y.carry_marks(&old.y);
         Ok(())
     }
 
     fn apply(&mut self, update: &[u8]) -> Result<Vec<GridChange>, LiveError> {
         let ops_before = self.ops_len();
         self.drain_seen();
-        let before = self.y.doc().transact().state_vector();
         self.y.apply(update)?;
-        let grew = self.y.doc().transact().state_vector() != before;
-        self.settle(update, grew);
         let seen = self.drain_seen();
         Ok(self.changes(ops_before, seen))
     }
@@ -634,6 +565,10 @@ impl Replica for GridDoc {
 
     fn damaged(&self) -> bool {
         self.y.damaged()
+    }
+
+    fn needs_resync(&self) -> bool {
+        self.y.needs_resync()
     }
 }
 

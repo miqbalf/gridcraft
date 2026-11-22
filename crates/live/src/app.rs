@@ -65,6 +65,11 @@ pub(crate) struct Mapping {
     pub mine: HashMap<(Id, String), CellContent>,
     /// Another peer's change replaced one of this peer's: (their uid, the cell).
     pub lost: Vec<(String, String)>,
+    /// The commands sent so far, as the group they were written under and how many updates each
+    /// took (a large batch is cut into several updates that are still one command).
+    pub sent: Vec<SentCommand>,
+    /// The last command group handed out.
+    pub group: u64,
     /// The slot the cell editor is open on: (sheet, row, column).
     pub editor: Option<(Id, Id, Id)>,
     /// How many op-log entries the engine has applied (or is built from).
@@ -78,6 +83,14 @@ pub(crate) struct Mapping {
     pub lines_minted: u32,
     /// Entries a delete took away: (their uid, the cell, the value as text, `row` or `column`).
     pub removed: Vec<(String, String, String, &'static str)>,
+}
+
+/// One command as it went out: its group (shared by all its updates, see
+/// [`GridDoc::write_grouped`]) and how many updates it took.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SentCommand {
+    pub group: u64,
+    pub updates: usize,
 }
 
 /// The engine session and the mapping, for one call.
@@ -244,15 +257,17 @@ impl GridApp<'_> {
         }
         m.has_random |= random;
         m.resync_wanted |= resync;
-        plan.epoch = calculate || m.has_random;
+        plan.epoch = calculate || (m.has_random && !plan.is_empty());
         if plan.is_empty() && steps.is_empty() {
             return Ok(Vec::new());
         }
         let epoch = plan.epoch;
         let mut updates = Vec::new();
+        m.group += 1;
+        let group = m.group;
         for (n, chunk) in plan.split().into_iter().enumerate() {
             let update = replica
-                .write(|t| {
+                .write_grouped(group, |t| {
                     if n == 0 {
                         for s in &steps {
                             s.write(t);
@@ -264,9 +279,11 @@ impl GridApp<'_> {
             m.skipped += replica.write_skipped();
             for w in &chunk.cells {
                 match &w.content {
-                    crate::split::Put::Set(c) if m.mine.len() < MINE_MAX => {
-                        m.mine.insert((w.sheet, w.key.clone()), c.clone());
-                        m.recent.insert((w.sheet, w.key.clone()), c.clone());
+                    crate::split::Put::Set(_) if m.mine.len() < MINE_MAX => {
+                        if let Entry::Set(stored) = replica.cell(w.sheet, &w.key) {
+                            m.recent.insert((w.sheet, w.key.clone()), stored.clone());
+                            m.mine.insert((w.sheet, w.key.clone()), stored);
+                        }
                     }
                     Put::Keep => {}
                     _ => {
@@ -284,6 +301,7 @@ impl GridApp<'_> {
             }
             updates.push(update);
         }
+        m.sent.push(SentCommand { group, updates: updates.len() });
         if ordered {
             m.layout = layout;
             m.lines_minted = minted;
@@ -449,8 +467,10 @@ impl LiveApp<Grid> for GridApp<'_> {
                 if let Some(mine) = self.map.mine.get(&key)
                     && *mine != now
                 {
+                    // The overwrite is concurrent only when its author had not seen our value.
+                    let concurrent = now.p.as_ref().is_some_and(|p| *p != mine.fingerprint());
                     self.map.mine.remove(&key);
-                    if let Some(who) = now.u.clone().filter(|u| *u != self.map.uid) {
+                    if concurrent && let Some(who) = now.u.clone().filter(|u| *u != self.map.uid) {
                         let cell = self.a1(*sheet, k);
                         self.map.lost.push((who, cell));
                     }

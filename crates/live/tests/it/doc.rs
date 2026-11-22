@@ -2,7 +2,7 @@
 //! bytes, and replicas that reach the same document whatever order their updates arrive in.
 
 use craft_collab::Replica;
-use gridcraft_live::{AxisKind, CellContent, Entry, GridChange, GridDoc, GridSeed, HELD_MAX_BYTES, HELD_MAX_ENTRIES, Id, Op, cell_key};
+use gridcraft_live::{AxisKind, CellContent, Entry, GridChange, GridDoc, GridSeed, Id, Op, cell_key};
 use serde_json::{Value, json};
 
 use crate::{Rng, seeds};
@@ -213,23 +213,18 @@ fn a_gap_that_never_closes_is_bounded_and_asks_for_a_full_state() {
     // has to be an origin.)
     let key = cell_key(Id::base(0), Id::base(0));
     let _withheld = a.write(|t| t.set_cell(sheet, &key, &content(json!(-1), "alice"))).unwrap();
-    let mut most_held = 0;
-    let mut most_bytes = 0;
-    for n in 0..(HELD_MAX_ENTRIES * 2) {
+    for n in 0..4200 {
         let u = a.write(|t| t.set_cell(sheet, &key, &content(json!(n), "alice"))).unwrap();
         b.apply(&u).unwrap();
-        most_held = most_held.max(b.held_len());
-        most_bytes = most_bytes.max(b.held_bytes());
     }
-    assert!(most_held <= HELD_MAX_ENTRIES, "the copies never outgrow their cap");
-    assert!(most_bytes <= HELD_MAX_BYTES, "nor their byte cap");
-    assert!(b.needs_resync(), "a gap that outgrew the cap asks for a full state");
+    assert!(b.needs_resync(), "a gap that outgrew the replica's cap asks for a full state");
     assert_ne!(dump(&b), dump(&a), "the stuck replica is behind");
-    b.apply(&a.state()).unwrap();
-    b.clear_resync();
-    assert_eq!(dump(&b), dump(&a), "after a full state the replicas agree");
-    assert_eq!(b.held_len(), 0, "and nothing is held any more");
-    assert!(!b.needs_resync());
+    let fresh = GridDoc::from_state(&a.state()).unwrap();
+    assert_eq!(dump(&fresh), dump(&a), "after a full state the replicas agree");
+    assert!(!fresh.needs_resync());
+    // The mark survives the client being adopted.
+    b.set_client(9).unwrap();
+    assert!(b.needs_resync());
 }
 
 #[test]
@@ -287,4 +282,39 @@ fn styles_props_and_meta_are_named_and_converge() {
         assert_eq!(d.meta(), a.meta(), "one epoch wins everywhere");
     }
     assert_eq!(dump(&b), dump(&a));
+}
+
+#[test]
+fn every_update_kind_passes_the_relay_gate() {
+    let s = seed(11);
+    let mut d = peer(&s, 1);
+    let sheet = Id::base(0);
+    let key = cell_key(Id::base(0), Id::base(0));
+    let line = format!("{}/h", Id::base(1).text());
+    let hide = format!("{}/hide", Id::base(1).text());
+    let mut updates = vec![("state", d.state())];
+    type Write<'a> = Box<dyn FnOnce(&mut gridcraft_live::GridTxn) + 'a>;
+    let kinds: Vec<(&str, Write)> = vec![
+        ("cells", Box::new(|t| t.set_cell(Id::base(0), &key, &content(json!("x"), "alice")))),
+        ("clear", Box::new(|t| t.clear_cell(Id::base(0), &key))),
+        ("formats", Box::new(|t| t.set_fmt(Id::base(0), &key, "s1"))),
+        ("styles", Box::new(|t| t.put_style("s1", json!({"b": true})))),
+        ("sizes", Box::new(|t| t.set_line(Id::base(0), AxisKind::Rows, &line, json!(33.5)))),
+        ("props", Box::new(|t| t.set_sheet_prop(Id::base(0), "defw", json!(70)))),
+        ("hide", Box::new(|t| t.set_line(Id::base(0), AxisKind::Rows, &hide, json!(true)))),
+        ("reset", Box::new(|t| t.reset_line(Id::base(0), AxisKind::Rows, &hide))),
+        ("epoch", Box::new(|t| t.bump_epoch("alice"))),
+    ];
+    for (name, f) in kinds {
+        updates.push((name, d.write(f).unwrap()));
+    }
+    let _ = sheet;
+    for (name, u) in &updates {
+        assert!(craft_collab::update_is_sound(u), "the {name} update passes the relay's gate");
+    }
+    let mut joiner = peer(&s, 2);
+    for (_, u) in &updates[1..] {
+        joiner.apply(u).unwrap();
+    }
+    assert_eq!(dump(&joiner), dump(&d));
 }

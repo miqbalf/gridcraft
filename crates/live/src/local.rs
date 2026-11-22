@@ -14,7 +14,7 @@ use serde_json::Value as Json;
 
 use crate::axis::AxisKind;
 use crate::cells::{Home, is_random, same_content, to_content};
-use crate::doc::GridDoc;
+use crate::doc::{Entry, GridDoc};
 use crate::gate::NOT_YET_TEXT;
 use crate::ids::{Id, cell_key};
 use crate::layout::Layout;
@@ -97,7 +97,13 @@ impl Planner<'_> {
                 Some(c) if same_place && same_content(base, Some(c)) => Put::Reset,
                 Some(c) => {
                     let home = Home { layout: self.layout, sheet: sheet.id.0 };
-                    let content = to_content(c, &home, self.uid);
+                    let mut content = to_content(c, &home, self.uid);
+                    if let Some(x) = content.as_mut() {
+                        x.p = Some(match self.doc.cell(sheet.id, &cell_key(row, col)) {
+                            Entry::Set(seen) => seen.fingerprint(),
+                            _ => "0".to_owned(),
+                        });
+                    }
                     if c.formula.as_ref().is_some_and(|f| is_random(&f.text)) {
                         self.random = true;
                     }
@@ -150,12 +156,15 @@ impl Planner<'_> {
         if b == a {
             return Ok(());
         }
-        // Outline levels, collapsed groups and whole-line formats are not shared in M1.
-        if (b.outline, b.collapsed, b.style) != (a.outline, a.collapsed, a.style) {
+        // Outline levels and collapsed groups are ordered edits, not shared in M1.
+        if (b.outline, b.collapsed) != (a.outline, a.collapsed) {
             return refused();
         }
         let base = base_line(self.base, i, axis, id);
         let sheet = layout.id;
+        if b.style != a.style {
+            self.line_style(r, a.style, base.style, (sheet, axis, id), plan);
+        }
         if b.size != a.size {
             let put = match a.size {
                 s if s == base.size => Put::Reset,
@@ -179,6 +188,25 @@ impl Planner<'_> {
             }
         }
         Ok(())
+    }
+
+    /// A whole-line format: written as `<id>/st`, the key of a style in the `styles` map, like a
+    /// cell's format.
+    fn line_style(&mut self, r: &EditReport, after: Option<StyleId>, base: Option<StyleId>, at: (Id, AxisKind, Id), plan: &mut Plan) {
+        let (sheet, axis, id) = at;
+        let json = |wb: &Workbook, s: Option<StyleId>| styles::canonical(&styles::to_json(wb.styles.get(s.unwrap_or(StyleId::DEFAULT))));
+        let sa = json(&r.after, after);
+        let key = line_key(id, "st");
+        let put = if sa == json(self.base, base) {
+            Put::Reset
+        } else if sa == json(&r.after, None) {
+            Put::Clear
+        } else {
+            let k = self.style_key(&sa);
+            plan.style(k.clone(), styles::to_json(r.after.styles.get(after.unwrap_or(StyleId::DEFAULT))));
+            Put::Set(Json::String(k))
+        };
+        plan.line(sheet, axis, key, put);
     }
 
     fn props(&mut self, r: &EditReport, i: usize, plan: &mut Plan) -> Result<(), LocalError> {
