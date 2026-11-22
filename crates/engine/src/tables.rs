@@ -317,27 +317,36 @@ pub fn gallery() -> Vec<String> {
 /// Editing a table's header row renames the column, as in Excel: an empty or repeated header
 /// gets a unique name written back into the cell, and structured references follow the rename.
 pub(crate) fn sync_headers(cx: &mut crate::cmd::Ctx) {
-    if cx.wb.sheets.iter().all(|s| s.tables.is_empty()) {
-        return;
+    if sync_headers_in(&mut cx.wb, cx.structural, &cx.changed) {
+        cx.structural = true;
+    }
+}
+
+/// [`sync_headers`] on a bare workbook, for edits that have no command context (a peer's insert or
+/// delete of lines). `structural`: check every header; otherwise only those in `changed`. Answers
+/// whether a column was renamed. Idempotent.
+pub(crate) fn sync_headers_in(wb: &mut gridcraft_model::Workbook, structural: bool, changed: &[gridcraft_calc::Key]) -> bool {
+    if wb.sheets.iter().all(|s| s.tables.is_empty()) {
+        return false;
     }
     // (sheet, table name, table range, old column name, new column name)
     let mut renames: Vec<(usize, String, RangeRef, String, String)> = Vec::new();
-    let heads: Vec<(usize, RangeRef)> = (0..cx.wb.sheets.len())
-        .flat_map(|si| cx.wb.sheet(si).into_iter().flat_map(move |sh| sh.tables.iter().filter(|t| t.header_row).map(move |t| (si, t.range))))
+    let heads: Vec<(usize, RangeRef)> = (0..wb.sheets.len())
+        .flat_map(|si| wb.sheet(si).into_iter().flat_map(move |sh| sh.tables.iter().filter(|t| t.header_row).map(move |t| (si, t.range))))
         .map(|(si, r)| (si, RangeRef::new(r.start, CellRef::new(r.start.row, r.end.col))))
         .collect();
     // A structural edit can move anything into a header row: then every header is checked.
-    let changed: std::collections::BTreeSet<(usize, CellRef)> = if cx.structural {
+    let touched: std::collections::BTreeSet<(usize, CellRef)> = if structural {
         heads.iter().flat_map(|(s, r)| r.iter().map(move |c| (*s, c))).collect()
     } else {
-        cx.changed.iter().filter(|(si, c)| heads.iter().any(|(s, r)| s == si && r.contains(*c))).copied().collect()
+        changed.iter().filter(|(si, c)| heads.iter().any(|(s, r)| s == si && r.contains(*c))).copied().collect()
     };
     // Per table: lower-case column name → column, and the next number to try for a repeated name
     // (both kept up to date, so a wide header row stays linear).
     type Names = (std::collections::HashMap<String, usize>, std::collections::HashMap<String, usize>);
     let mut names: std::collections::HashMap<(usize, usize), Names> = std::collections::HashMap::new();
-    for (si, c) in changed {
-        let Some(sh) = cx.wb.sheet(si) else { continue };
+    for (si, c) in touched {
+        let Some(sh) = wb.sheet(si) else { continue };
         let Some(ti) = sh.tables.iter().position(|t| t.header_row && c.row == t.range.start.row && t.range.contains(c)) else { continue };
         let Some(t) = sh.tables.get(ti) else { continue };
         let col = (c.col - t.range.start.col) as usize;
@@ -347,7 +356,7 @@ pub(crate) fn sync_headers(cx: &mut crate::cmd::Ctx) {
         let value = sh.value(c);
         let text = match value.as_text() {
             Some(t) => t.to_string(),
-            None => crate::display::cell_text(&cx.wb, sh, c),
+            None => crate::display::cell_text(wb, sh, c),
         };
         // Headers hold constant text: a formula (or a spilled value) there becomes its text.
         let is_text = value.is_text() && sh.cell(c).is_some_and(|x| x.formula.is_none());
@@ -369,7 +378,7 @@ pub(crate) fn sync_headers(cx: &mut crate::cmd::Ctx) {
         }
         taken.insert(name.to_lowercase(), col);
         let (table, range) = (t.name.clone(), t.range);
-        let Some(sh) = cx.wb.sheet_mut(si) else { continue };
+        let Some(sh) = wb.sheet_mut(si) else { continue };
         if let Some(x) = sh.tables.get_mut(ti).and_then(|t| t.columns.get_mut(col)) {
             x.name = name.clone();
         }
@@ -383,12 +392,12 @@ pub(crate) fn sync_headers(cx: &mut crate::cmd::Ctx) {
         }
     }
     if renames.is_empty() {
-        return;
+        return false;
     }
     // Structured references follow the new names.
-    for i in 0..cx.wb.sheets.len() {
+    for i in 0..wb.sheets.len() {
         let formulas: Vec<(CellRef, std::sync::Arc<Formula>)> =
-            cx.wb.sheets.get(i).map(|s| s.cells.iter().filter_map(|(c, x)| x.formula.clone().map(|f| (c, f))).collect()).unwrap_or_default();
+            wb.sheets.get(i).map(|s| s.cells.iter().filter_map(|(c, x)| x.formula.clone().map(|f| (c, f))).collect()).unwrap_or_default();
         for (c, f) in formulas {
             let Some(e) = f.expr() else { continue };
             let mut hit = false;
@@ -409,12 +418,12 @@ pub(crate) fn sync_headers(cx: &mut crate::cmd::Ctx) {
                 }
                 o => o,
             });
-            if hit && let Some(cell) = cx.wb.sheet_mut(i).and_then(|s| s.cells.get_mut(c)) {
+            if hit && let Some(cell) = wb.sheet_mut(i).and_then(|s| s.cells.get_mut(c)) {
                 cell.formula = Some(std::sync::Arc::new(Formula::from_expr(ne)));
             }
         }
     }
-    cx.structural = true;
+    true
 }
 
 #[cfg(test)]

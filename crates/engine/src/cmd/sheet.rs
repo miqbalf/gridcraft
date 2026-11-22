@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use gridcraft_core::{CellRef, MAX_COLS, MAX_ROWS, RangeRef};
 use gridcraft_formula::adjust::{Axis, Edit};
-use gridcraft_model::{Anchor, AnchorMode, PivotDataCell, PivotLookup, Sheet, Visibility};
+use gridcraft_model::{Anchor, AnchorMode, PivotDataCell, PivotLookup, Sheet, Visibility, Workbook};
 use serde_json::{Value as Json, json};
 
 use super::{
@@ -242,13 +242,12 @@ fn shift_sheet_features(sh: &mut Sheet, axis: Axis, at: u32, count: u32, insert:
 /// Rewrites every formula reference (chart series included), sparkline source and PivotTable
 /// source for a structural edit on `target`.
 pub(super) fn rewrite(cx: &mut Ctx, target: &str, e: &Edit) -> Result<()> {
-    rewrite_many(cx, target, std::slice::from_ref(e))
+    cx.edits.push((target.to_string(), e.clone()));
+    rewrite_many(&mut cx.wb, target, std::slice::from_ref(e))
 }
 
 /// [`rewrite`] for several edits applied in order, parsing each reference once.
-fn rewrite_many(cx: &mut Ctx, target: &str, edits: &[Edit]) -> Result<()> {
-    cx.edits.extend(edits.iter().map(|e| (target.to_string(), e.clone())));
-    let wb = &mut cx.wb;
+fn rewrite_many(wb: &mut Workbook, target: &str, edits: &[Edit]) -> Result<()> {
     super::edit::rewrite_all_formulas_many(wb, target, edits)?;
     for si in 0..wb.sheets.len() {
         let host = wb.sheets.get(si).map(|s| s.name.clone()).unwrap_or_default();
@@ -300,14 +299,73 @@ fn inherit_line_format(sh: &mut Sheet, axis: Axis, at: u32, count: u32) {
     }
 }
 
-fn check_push_off_sheet(s: &Session, sheet: usize, axis: Axis, at: u32, count: u32, limit: u32) -> Result<()> {
-    if let Some(u) = s.doc()?.wb.sheet(sheet).and_then(|sh| sh.used_range()) {
+fn check_push_off_sheet(wb: &Workbook, sheet: usize, axis: Axis, at: u32, count: u32, limit: u32) -> Result<()> {
+    if let Some(u) = wb.sheet(sheet).and_then(|sh| sh.used_range()) {
         let last = if axis == Axis::Rows { u.end.row } else { u.end.col };
         if last >= at && last as u64 + count as u64 >= limit as u64 {
             return Err(EngineError::Other("To prevent possible loss of data, GridCraft cannot shift nonblank cells off of the worksheet.".into()));
         }
     }
     Ok(())
+}
+
+/// Inserts `count` lines before `at` on `sheet` of `wb`: cells, line information, the sheet's own
+/// features and every reference in the workbook move. New lines take the format of the line
+/// before. Returns the structural edit made. Refuses lines past the grid (and cells that would be
+/// pushed off it), whoever asks; nothing is changed then.
+pub(crate) fn insert_lines_in(wb: &mut Workbook, sheet: usize, axis: Axis, at: u32, count: u32) -> Result<Edit> {
+    let limit = if axis == Axis::Rows { MAX_ROWS } else { MAX_COLS };
+    if count == 0 || at.checked_add(count).is_none_or(|end| end > limit) {
+        return Err(EngineError::Other("the inserted lines would extend past the end of the worksheet".into()));
+    }
+    let Some(name) = wb.sheet(sheet).map(|s| s.name.clone()) else { return Err(EngineError::Other("no such sheet".into())) };
+    check_push_off_sheet(wb, sheet, axis, at, count, limit)?;
+    if let Some(sh) = wb.sheet_mut(sheet) {
+        match axis {
+            Axis::Rows => sh.cells.shift_rows(at, count as i64),
+            Axis::Cols => sh.cells.shift_cols(at, count as i64),
+        }
+        shift_sheet_features(sh, axis, at, count, true);
+        // New lines take the format of the line before (Excel's "Format Same As Above").
+        inherit_line_format(sh, axis, at, count);
+    }
+    let e = Edit::Insert { axis, at, count };
+    rewrite_many(wb, &name, std::slice::from_ref(&e))?;
+    // As the command does after every edit: a column inserted into a table gets its header.
+    crate::tables::sync_headers_in(wb, true, &[]);
+    Ok(e)
+}
+
+/// Deletes `areas` (`(first line, count)`, the last area first so deleting one never shifts the
+/// next) on `sheet` of `wb`. Returns the structural edits made, in order. Refuses areas outside
+/// the grid; nothing is changed then.
+pub(crate) fn delete_lines_in(wb: &mut Workbook, sheet: usize, axis: Axis, areas: &[(u32, u32)]) -> Result<Vec<Edit>> {
+    let limit = if axis == Axis::Rows { MAX_ROWS } else { MAX_COLS };
+    let mut above = limit;
+    for &(at, count) in areas {
+        // Descending and apart: each area ends before the previous one starts.
+        if count == 0 || at.checked_add(count).is_none_or(|end| end > above) {
+            return Err(EngineError::Other("the deleted lines lie outside the worksheet".into()));
+        }
+        above = at;
+    }
+    let Some(name) = wb.sheet(sheet).map(|s| s.name.clone()) else { return Err(EngineError::Other("no such sheet".into())) };
+    if let Some(sh) = wb.sheet_mut(sheet) {
+        // Cells move once, past every deleted area above or left of them.
+        let ascending: Vec<(u32, u32)> = areas.iter().rev().copied().collect();
+        match axis {
+            Axis::Rows => sh.cells.delete_rows(&ascending),
+            Axis::Cols => sh.cells.delete_cols(&ascending),
+        }
+        // Last area first, so the earlier ones keep their positions.
+        for &(at, count) in areas {
+            shift_sheet_features(sh, axis, at, count, false);
+        }
+    }
+    let edits: Vec<Edit> = areas.iter().map(|&(at, count)| Edit::Delete { axis, at, count }).collect();
+    rewrite_many(wb, &name, &edits)?;
+    crate::tables::sync_headers_in(wb, true, &[]);
+    Ok(edits)
 }
 
 fn insert_lines(s: &mut Session, p: &Json, axis: Axis) -> Result<Json> {
@@ -319,21 +377,12 @@ fn insert_lines(s: &mut Session, p: &Json, axis: Axis) -> Result<Json> {
     }
     check_lines_protection(s, p, axis, at, count, true)?;
     let sheet = target_sheet(s, p)?;
-    check_push_off_sheet(s, sheet, axis, at, count, limit)?;
+    check_push_off_sheet(&s.doc()?.wb, sheet, axis, at, count, limit)?;
     let out = edit(s, |cx| {
-        let name = cx.wb.sheet(sheet).map(|s| s.name.clone()).unwrap_or_default();
         cx.protection_checked = true;
-        {
-            let sh = cx.sheet_mut(sheet)?;
-            match axis {
-                Axis::Rows => sh.cells.shift_rows(at, count as i64),
-                Axis::Cols => sh.cells.shift_cols(at, count as i64),
-            }
-            shift_sheet_features(sh, axis, at, count, true);
-            // New lines take the format of the line before (Excel's "Format Same As Above").
-            inherit_line_format(sh, axis, at, count);
-        }
-        rewrite(cx, &name, &Edit::Insert { axis, at, count })?;
+        let e = insert_lines_in(&mut cx.wb, sheet, axis, at, count)?;
+        let name = cx.wb.sheet(sheet).map(|s| s.name.clone()).unwrap_or_default();
+        cx.edits.push((name, e));
         cx.structural = true;
         Ok(Json::Null)
     })?;
@@ -381,23 +430,10 @@ fn delete_lines(s: &mut Session, p: &Json, axis: Axis) -> Result<Json> {
     }
     let sheet = target_sheet(s, p)?;
     let out = edit(s, |cx| {
-        let name = cx.wb.sheet(sheet).map(|s| s.name.clone()).unwrap_or_default();
         cx.protection_checked = true;
-        {
-            let sh = cx.sheet_mut(sheet)?;
-            // Cells move once, past every deleted area above or left of them.
-            let ascending: Vec<(u32, u32)> = areas.iter().rev().copied().collect();
-            match axis {
-                Axis::Rows => sh.cells.delete_rows(&ascending),
-                Axis::Cols => sh.cells.delete_cols(&ascending),
-            }
-            // Last area first, so the earlier ones keep their positions.
-            for &(at, count) in &areas {
-                shift_sheet_features(sh, axis, at, count, false);
-            }
-        }
-        let edits: Vec<Edit> = areas.iter().map(|&(at, count)| Edit::Delete { axis, at, count }).collect();
-        rewrite_many(cx, &name, &edits)?;
+        let name = cx.wb.sheet(sheet).map(|s| s.name.clone()).unwrap_or_default();
+        let edits = delete_lines_in(&mut cx.wb, sheet, axis, &areas)?;
+        cx.edits.extend(edits.into_iter().map(|e| (name.clone(), e)));
         cx.structural = true;
         Ok(Json::Null)
     })?;
