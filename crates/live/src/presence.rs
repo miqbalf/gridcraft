@@ -31,10 +31,10 @@ pub fn payload(layout: &Layout, sheet: usize, active: CellRef, ranges: &[RangeRe
         let (r2, c2) = layout.slot_at(sheet, r.end)?;
         Some([r1.text(), c1.text(), r2.text(), c2.text()])
     };
-    let sent: Vec<[String; 4]> = if ranges.len() > RANGES_MAX {
-        bounding_box(layout, sheet, ranges).into_iter().collect()
-    } else {
-        ranges.iter().filter_map(corners).collect()
+    // When the box has a corner off the layout, the first ranges are sent instead: the selection is kept.
+    let sent: Vec<[String; 4]> = match bounding_box(layout, sheet, ranges) {
+        Some(b) if ranges.len() > RANGES_MAX => vec![b],
+        _ => ranges.iter().filter_map(corners).take(RANGES_MAX).collect(),
     };
     Some(json!({"s": s.id.text(), "a": [ar.text(), ac.text()], "r": sent, "e": u8::from(editing), "o": null}))
 }
@@ -55,43 +55,55 @@ fn bounding_box(layout: &Layout, sheet: usize, ranges: &[RangeRef]) -> Option<[S
     Some([ra.text(), ca.text(), rb.text(), cb.text()])
 }
 
+/// The longest id text: `u64::MAX` in base 36 is 13 digits.
+const ID_TEXT_MAX: usize = 13;
+
 fn id_at(v: &Value) -> Option<Id> {
-    Id::parse(v.as_str()?)
+    let t = v.as_str()?;
+    if t.len() > ID_TEXT_MAX { None } else { Id::parse(t) }
+}
+
+fn corners_of(v: &Value) -> Option<((Id, Id), (Id, Id))> {
+    match v.as_array()?.as_slice() {
+        [r1, c1, r2, c2] => Some(((id_at(r1)?, id_at(c1)?), (id_at(r2)?, id_at(c2)?))),
+        _ => None,
+    }
 }
 
 /// A caret from its payload, not yet resolved (it is hidden until [`resolve`] runs). `None` when
-/// the payload is not one [`payload`] makes. More than [`RANGES_MAX`] ranges are cut to that.
+/// the payload is not one [`payload`] makes: the shape is checked before anything is copied, so
+/// an oversized id text or array is refused whole (ids over 13 characters, more than
+/// [`RANGES_MAX`] ranges, an `a` that is not two ids, a range that is not four ids).
 #[must_use]
 pub fn parse(payload: &Value) -> Option<GridCaret> {
     let sheet = id_at(payload.get("s")?)?;
-    let a = payload.get("a")?.as_array()?;
-    let active = match a.as_slice() {
+    let active = match payload.get("a")?.as_array()?.as_slice() {
         [r, c] => (id_at(r)?, id_at(c)?),
         _ => return None,
     };
-    let ranges = payload
-        .get("r")
-        .and_then(Value::as_array)
-        .map(|rs| {
-            rs.iter()
-                .take(RANGES_MAX)
-                .filter_map(|v| match v.as_array()?.as_slice() {
-                    [r1, c1, r2, c2] => Some(((id_at(r1)?, id_at(c1)?), (id_at(r2)?, id_at(c2)?))),
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let ranges = match payload.get("r") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(r) => {
+            let r = r.as_array()?;
+            if r.len() > RANGES_MAX {
+                return None;
+            }
+            r.iter().map(corners_of).collect::<Option<Vec<_>>>()?
+        }
+    };
     let editing = match payload.get("e") {
         Some(Value::Bool(b)) => *b,
         Some(Value::Number(n)) => n.as_u64() == Some(1),
         _ => false,
     };
-    Some(GridCaret { sheet, active, ranges, editing, pos: hidden(editing) })
+    Some(GridCaret { sheet, active, ranges, editing, rev: UNRESOLVED, pos: hidden_pos(editing) })
 }
 
-fn hidden(editing: bool) -> GridPos {
-    GridPos { sheet: 0, active: CellRef::default(), ranges: Vec::new(), editing, hidden: true }
+/// The revision of a caret that was never resolved (layout revisions start at 1).
+const UNRESOLVED: u64 = 0;
+
+fn hidden_pos(editing: bool) -> GridPos {
+    GridPos { sheet: 0, active: CellRef::default(), ranges: Vec::new(), editing, unknown: true }
 }
 
 /// Where a line is now: its own position, else its nearest surviving neighbour's; `None` for an
@@ -104,15 +116,26 @@ fn place(axis: &Axis, id: Id) -> Option<u32> {
     }
 }
 
+/// [`resolve`], skipped when `c` was already resolved under layout revision `rev` (the layout
+/// has not moved, so the answer cannot have changed). Returns whether the caret is shown.
+pub fn resolve_at(layout: &Layout, rev: u64, c: &mut GridCaret) -> bool {
+    if c.rev != rev || rev == UNRESOLVED {
+        let shown = resolve(layout, c);
+        c.rev = rev;
+        return shown;
+    }
+    !c.pos.unknown
+}
+
 /// Works out where `c` is under `layout` and stores it. Returns whether the caret is shown: it is
 /// hidden while its sheet or an id of its active cell is unknown here.
 pub fn resolve(layout: &Layout, c: &mut GridCaret) -> bool {
-    c.pos = hidden(c.editing);
+    c.pos = hidden_pos(c.editing);
     let Some(i) = layout.sheet_index(c.sheet) else { return false };
     let Some(s) = layout.sheets.get(i) else { return false };
     let cell = |(r, col): (Id, Id)| Some(CellRef::new(place(&s.rows, r)?, place(&s.cols, col)?));
     let Some(active) = cell(c.active) else { return false };
     let ranges = c.ranges.iter().filter_map(|(a, b)| Some(RangeRef::new(cell(*a)?, cell(*b)?))).collect();
-    c.pos = GridPos { sheet: i, active, ranges, editing: c.editing, hidden: false };
+    c.pos = GridPos { sheet: i, active, ranges, editing: c.editing, unknown: false };
     true
 }
