@@ -7,6 +7,8 @@ mod free;
 #[cfg(feature = "test-util")]
 mod gate;
 #[cfg(feature = "test-util")]
+mod junk;
+#[cfg(feature = "test-util")]
 mod support;
 #[cfg(feature = "test-util")]
 mod volatile;
