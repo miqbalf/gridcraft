@@ -54,7 +54,9 @@ fn junk_values_are_dropped_and_the_room_survives() {
     );
     assert_eq!(back.cell(sheet, &cell_key(Id::base(8), Id::base(8))), gridcraft_live::Entry::Absent, "an extent no integer holds is dropped");
     let params = serde_json::to_value(TextPayload::new(&update)).unwrap();
-    mallory.send(ClientMsg::Submit { doc: ROOM.into(), local: 1, command: craft_collab::CRDT_TEXT.into(), params, scope: None }).unwrap();
+    mallory
+        .send(ClientMsg::Submit { doc: ROOM.into(), local: 1, command: craft_collab::CRDT_TEXT.into(), params, scope: None, fence: None })
+        .unwrap();
     room.settle();
     room.assert_all_live("junk");
     // The clamp ran: the array ends at the last cell of the grid, on every peer.

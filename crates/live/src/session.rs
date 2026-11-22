@@ -126,6 +126,11 @@ impl<H: Hub> GridLive<H> {
     /// Opens `base` as the session's document, checks its hash when one is given, installs the
     /// edit observer, the live undo hook and the shared random numbers, and seeds the replica.
     ///
+    /// `hub` must have joined the room naming [`schema()`] (`NativeHub::connect_as(.., Some(&schema()))`
+    /// or the web hub's equivalent), so the relay types the room's top-level roots; [`schema()`] is
+    /// the one place the string is made. Give the link a clock with [`GridLive::set_clock`] on the
+    /// web, so a lock held for a long run has its lease refreshed.
+    ///
     /// # Errors
     /// [`LiveFail`].
     pub fn start(hub: H, room: &str, base: &BaseFile, access: Access, uid: &str, session: &mut Session) -> Result<Self, LiveFail> {
@@ -449,12 +454,12 @@ impl<H: Hub> GridLive<H> {
                     // It never ran: nothing was changed or shared.
                     self.map.notices.push(LOCK_LOST_UNRUN_TEXT.to_owned());
                 } else if matches!(self.core.status(), LiveStatus::Broken(_)) {
-                    // The replica broke: the edit will never be ordered, and nothing resends it.
+                    // The replica broke: the relay never answered for the edit.
                     self.map.notices.push(LOCK_LOST_BROKEN_TEXT.to_owned());
                 } else {
-                    // It ran and was shared without the lock. Until the relay refuses such an edit
-                    // (the fencing follow-up), the link resends it, so the engine and the room
-                    // agree and nothing is rolled back here.
+                    // The relay refused the edit (another editor held the lock by then). The link
+                    // has taken it out of the replica and `LiveApp::reset` and `resync` have put
+                    // the engine back at the room's state: only the user needs telling.
                     self.map.notices.push(LOCK_LOST_TEXT.to_owned());
                 }
             }
@@ -565,7 +570,13 @@ impl<H: Hub> GridLive<H> {
         for n in std::mem::take(&mut self.map.notices) {
             self.core.push_notice(n);
         }
-        self.core.take_notices()
+        // The link words a refused run in terms of its scope; the lock-lost notice above says it
+        // for a user, so the two do not both reach the screen.
+        let mut notices = self.core.take_notices();
+        if notices.iter().any(|n| n == LOCK_LOST_TEXT) {
+            notices.retain(|n| !n.starts_with("another editor took "));
+        }
+        notices
     }
 
     /// Whether the host may take an edit now.
