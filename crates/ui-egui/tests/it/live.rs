@@ -446,7 +446,11 @@ fn typing_in_another_workbook_is_not_written_into_the_live_one() {
     settle(&mut rig, &mut h);
     let active = h.state().session.active().expect("doc");
     assert_ne!(active.uid, live_doc, "still in the second workbook");
-    assert_eq!(active.wb.sheet(0).and_then(|s| s.cell(a1("C3"))).map(|c| c.value.clone()), Some(Value::Text("private".into())), "it went into its own workbook");
+    assert_eq!(
+        active.wb.sheet(0).and_then(|s| s.cell(a1("C3"))).map(|c| c.value.clone()),
+        Some(Value::Text("private".into())),
+        "it went into its own workbook"
+    );
     assert_eq!(bob_value(&rig, "C3"), Value::Empty, "nothing reached the other editor");
     let live = h.state().session.documents().iter().find(|d| d.uid == live_doc).expect("live doc");
     assert_eq!(live.wb.sheet(0).and_then(|s| s.cell(a1("C3"))).map(|c| c.value.clone()), None, "and the live workbook is untouched");
@@ -457,7 +461,7 @@ fn closing_the_live_workbook_ends_the_session_and_the_window_stays_usable() {
     let (mut rig, app) = rig(Access::Edit);
     let mut h = harness(app);
     settle(&mut rig, &mut h);
-    h.state_mut().run("file.close", json!({})).expect("closes");
+    h.state_mut().run("file.close", json!({"force": true})).expect("closes");
     settle(&mut rig, &mut h);
     assert!(h.state().live().is_none(), "the session ended with its workbook");
     assert!(notice_text(h.state()).to_lowercase().contains("live editing ended"), "{:?}", notice_text(h.state()));

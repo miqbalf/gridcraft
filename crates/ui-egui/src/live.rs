@@ -94,7 +94,16 @@ impl LiveUi {
     pub fn new(live: Live) -> LiveUi {
         let doc = live.doc();
         let blocked = Arc::new(blocked_names(&live));
-        LiveUi { live, doc, peers: Vec::new(), bar: PresenceBar::new(), moved: HashMap::new(), viewers: HashSet::new(), blocked, queue: VecDeque::new() }
+        LiveUi {
+            live,
+            doc,
+            peers: Vec::new(),
+            bar: PresenceBar::new(),
+            moved: HashMap::new(),
+            viewers: HashSet::new(),
+            blocked,
+            queue: VecDeque::new(),
+        }
     }
 
     #[must_use]
@@ -374,7 +383,11 @@ impl SheetApp {
         if self.notice.is_none()
             && let Some((text, kind)) = lu.queue.pop_front()
         {
-            let text = if lu.queue.is_empty() { text } else { lang.tr_fill("{text} (+{count} more)", &[("text", &text), ("count", &lu.queue.len().to_string())]) };
+            let text = if lu.queue.is_empty() {
+                text
+            } else {
+                lang.tr_fill("{text} (+{count} more)", &[("text", &text), ("count", &lu.queue.len().to_string())])
+            };
             self.notice = Some(Notice { text, kind, action: None });
         }
         self.live = Some(lu);
@@ -420,7 +433,8 @@ impl SheetApp {
             lu.queue.push_back((lang.tr(EDITOR_GONE_TEXT).to_owned(), NoticeKind::Warning));
             return;
         };
-        let shown: String = if d.chars().count() > DRAFT_SHOWN { d.chars().take(DRAFT_SHOWN).chain(std::iter::once('…')).collect() } else { d.clone() };
+        let shown: String =
+            if d.chars().count() > DRAFT_SHOWN { d.chars().take(DRAFT_SHOWN).chain(std::iter::once('…')).collect() } else { d.clone() };
         lu.queue.push_back((lang.tr_fill(EDITOR_GONE_DRAFT_TEXT, &[("draft", &shown)]), NoticeKind::Warning));
         let whole = lang.tr_fill(EDITOR_GONE_DRAFT_TEXT, &[("draft", &d)]);
         self.message = Some(match self.message.take() {
