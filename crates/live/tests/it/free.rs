@@ -189,7 +189,7 @@ fn a_style_key_collision_falls_back_to_a_minted_key() {
     assert_ne!(key(0), key(1), "the second style did not overwrite the first");
     assert!(key(1).starts_with('m'), "the second key is minted: {}", key(1));
     assert_ne!(doc.style(&key(0)), doc.style(&key(1)), "both styles survive and differ");
-    let fill = |i: usize, c: &str| room.wb(i).styles.get(room.wb(i).sheet(0).unwrap().cell(a1(c)).unwrap().style).fill.clone();
+    let fill = |i: usize, c: &str| room.wb(i).styles.get(room.wb(i).sheet(0).unwrap().cell(a1(c)).unwrap().style).fill;
     assert_ne!(fill(0, "E1"), fill(0, "E2"));
     assert_eq!(room.finger(0), room.finger(1));
 }

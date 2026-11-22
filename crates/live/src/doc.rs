@@ -457,7 +457,8 @@ impl GridDoc {
     #[must_use]
     pub fn written_lines(&self, sheet: Id, axis: AxisKind) -> Vec<String> {
         let txn = self.y.doc().transact();
-        let mut keys: Vec<String> = self.roots.part_map(&txn, sheet, info_part(axis)).map(|m| m.keys(&txn).map(str::to_owned).collect()).unwrap_or_default();
+        let mut keys: Vec<String> =
+            self.roots.part_map(&txn, sheet, info_part(axis)).map(|m| m.keys(&txn).map(str::to_owned).collect()).unwrap_or_default();
         keys.sort();
         keys
     }

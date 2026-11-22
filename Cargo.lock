@@ -992,7 +992,7 @@ source = "git+https://github.com/storytold/craft-libs?rev=e98299546f5c5c3c22388d
 [[package]]
 name = "craft-collab"
 version = "0.1.0"
-source = "git+https://github.com/miqbalf/collab-craft?rev=95eea9626ad619e2e4e2a3cf0fcb56d6fe6be048#95eea9626ad619e2e4e2a3cf0fcb56d6fe6be048"
+source = "git+https://github.com/miqbalf/collab-craft?rev=702f565a1c6137405b90d6c6d703a4456ca8627a#702f565a1c6137405b90d6c6d703a4456ca8627a"
 dependencies = [
  "base64 0.23.1",
  "log",
@@ -1065,7 +1065,7 @@ dependencies = [
 [[package]]
 name = "craft-live"
 version = "0.1.0"
-source = "git+https://github.com/miqbalf/collab-craft?rev=95eea9626ad619e2e4e2a3cf0fcb56d6fe6be048#95eea9626ad619e2e4e2a3cf0fcb56d6fe6be048"
+source = "git+https://github.com/miqbalf/collab-craft?rev=702f565a1c6137405b90d6c6d703a4456ca8627a#702f565a1c6137405b90d6c6d703a4456ca8627a"
 dependencies = [
  "craft-collab",
  "log",
@@ -2460,6 +2460,7 @@ version = "0.19.1"
 dependencies = [
  "chrono",
  "js-sys",
+ "libm",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -2521,6 +2522,7 @@ dependencies = [
  "gridcraft-model",
  "gridcraft-xlsx",
  "log",
+ "serde",
  "serde_json",
  "sha2 0.11.1",
  "thiserror 2.0.21",

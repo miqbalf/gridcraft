@@ -135,7 +135,11 @@ impl Targets {
         for (i, s) in layout.sheets.iter().enumerate() {
             t.cells.extend(doc.written_cells(s.id).into_iter().map(|k| (i, k)));
             for axis in [AxisKind::Rows, AxisKind::Cols] {
-                t.lines.extend(doc.written_lines(s.id, axis).iter().filter_map(|k| Some((i, u8::from(axis == AxisKind::Cols), Id::parse(k.split_once('/')?.0)?))));
+                t.lines.extend(
+                    doc.written_lines(s.id, axis)
+                        .iter()
+                        .filter_map(|k| Some((i, u8::from(axis == AxisKind::Cols), Id::parse(k.split_once('/')?.0)?))),
+                );
             }
             t.props.insert(i);
         }

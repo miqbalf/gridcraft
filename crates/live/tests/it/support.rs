@@ -13,7 +13,7 @@ use gridcraft_engine::{Session, io};
 use gridcraft_live::styles::StyleHash;
 use gridcraft_live::{BaseFile, GridLive, Ran};
 use gridcraft_model::{AutoFilter, Cell, Workbook};
-use serde_json::{Value as Json, json};
+use serde_json::Value as Json;
 
 /// A hub that notes the size of every submitted update.
 pub struct SpyHub {
@@ -40,7 +40,6 @@ impl Hub for SpyHub {
 }
 
 pub struct Peer {
-    pub uid: String,
     pub session: Session,
     pub live: GridLive<SpyHub>,
     pub sizes: Rc<RefCell<Vec<usize>>>,
@@ -90,8 +89,8 @@ impl Room {
 
     pub fn with(n: usize, bytes: Vec<u8>, hash: Option<StyleHash>) -> Room {
         let mut room = Room { relay: MemRelay::new(), peers: Vec::new(), bytes };
-        for i in 0..n {
-            room.join(NAMES[i], Access::Edit, hash);
+        for name in NAMES.iter().take(n) {
+            room.join(name, Access::Edit, hash);
         }
         room.settle();
         room
@@ -108,7 +107,7 @@ impl Room {
             Some(h) => GridLive::start_with(hub, ROOM, &base, access, &uid, &mut session, h),
             None => GridLive::start(hub, ROOM, &base, access, &uid, &mut session),
         };
-        self.peers.push(Peer { uid, session, live: live.unwrap(), sizes, notices: Vec::new() });
+        self.peers.push(Peer { session, live: live.unwrap(), sizes, notices: Vec::new() });
         self.peers.len() - 1
     }
 
@@ -176,7 +175,11 @@ pub fn finger(wb: &Workbook) -> String {
             let style = serde_json::to_string(wb.styles.get(cell.style)).unwrap();
             out.push_str(&format!("{} {:?} {:?} {}\n", c.a1(), cell.value, f, style));
         }
-        out.push_str(&format!("rows {:?}\ncols {:?}\n", s.rows, s.cols));
+        // A line with nothing set and no entry are the same line.
+        let set = |m: &std::collections::BTreeMap<u32, gridcraft_model::LineInfo>| {
+            m.iter().filter(|(_, l)| **l != Default::default()).map(|(k, l)| (*k, *l)).collect::<Vec<_>>()
+        };
+        out.push_str(&format!("rows {:?}\ncols {:?}\n", set(&s.rows), set(&s.cols)));
     }
     out
 }
@@ -184,10 +187,6 @@ pub fn finger(wb: &Workbook) -> String {
 /// A1 helper.
 pub fn a1(s: &str) -> CellRef {
     CellRef::parse(s).unwrap()
-}
-
-pub fn json_range(r: &str) -> Json {
-    json!({ "range": r })
 }
 
 /// The first lines where two fingerprints differ, for a failure message.

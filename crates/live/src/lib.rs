@@ -28,10 +28,10 @@ pub mod volatile;
 
 pub use axis::{Axis, AxisKind, Insertion};
 pub use doc::{CellContent, Entry, GridChange, GridDoc, GridSeed, GridTxn, HELD_MAX_BYTES, HELD_MAX_ENTRIES, Meta};
+pub use gate::NOT_YET_TEXT;
 pub use ids::{Id, cell_key, parse_cell_key};
+pub use kind::{Grid, GridCaret, GridEdit, GridPos};
 pub use layout::{Hosted, Layout, SheetLayout};
 pub use op::Op;
-pub use gate::NOT_YET_TEXT;
-pub use kind::{Grid, GridCaret, GridEdit, GridPos};
 pub use session::{BaseFile, GridLive, LiveFail, Peer, Ran, schema, volatile_for, workbook_from_state};
 pub use volatile::Volatile;

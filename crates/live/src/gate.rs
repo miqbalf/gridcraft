@@ -42,7 +42,6 @@ pub fn tables_holding(id: &str) -> usize {
     [FREE, ORDERED, LOCAL, NOT_YET].iter().filter(|t| t.binary_search(&id).is_ok()).count()
 }
 
-
 pub const FREE: &[&str] = &[
     "cell.set",
     "data.flashFill",
@@ -114,12 +113,7 @@ pub const FREE: &[&str] = &[
 ];
 
 /// Commands that change the rows or columns themselves. They go through the structure lock (G9).
-pub const ORDERED: &[&str] = &[
-    "home.deleteColumns",
-    "home.deleteRows",
-    "home.insertColumns",
-    "home.insertRows",
-];
+pub const ORDERED: &[&str] = &["home.deleteColumns", "home.deleteRows", "home.insertColumns", "home.insertRows"];
 
 /// Commands that change nothing shared: selection, view, windows, files, clipboard, queries.
 pub const LOCAL: &[&str] = &[
@@ -459,4 +453,3 @@ pub const NOT_YET: &[&str] = &[
     "view.unfreezePanes",
     "wordArt.set",
 ];
-

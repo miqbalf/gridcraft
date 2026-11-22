@@ -65,7 +65,8 @@ pub fn same_content(a: Option<&Cell>, b: Option<&Cell>) -> bool {
         (None, None) => true,
         (Some(a), Some(b)) => {
             if a.py.is_some() || b.py.is_some() {
-                return a.py.as_deref().map(|p| (&p.code, p.object)) == b.py.as_deref().map(|p| (&p.code, p.object)) && a.formula.is_none() == b.formula.is_none();
+                return a.py.as_deref().map(|p| (&p.code, p.object)) == b.py.as_deref().map(|p| (&p.code, p.object))
+                    && a.formula.is_none() == b.formula.is_none();
             }
             match (&a.formula, &b.formula) {
                 (None, None) => a.value == b.value,

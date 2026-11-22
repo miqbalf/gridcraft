@@ -169,19 +169,21 @@ impl<H: Hub> GridLive<H> {
     /// reopen), after [`GridLive::document_replaced`].
     fn bind(&mut self, session: &mut Session) -> gridcraft_engine::Result<()> {
         session.set_observer(Some(Box::new(Tap { queue: self.core.queue(), doc: self.observed.clone() })));
-        self.bind_undo(session);
+        self.bind_undo(session)?;
         let source: Arc<dyn VolatileSource> = self.map.vol.clone();
         session.set_volatile_source(self.map.doc, Some(source))
     }
 
-    /// The live undo hook binds to the document active when it is set; the live document is
-    /// active here (`run` makes it so).
-    fn bind_undo(&self, session: &mut Session) {
+    /// The live undo hook, bound to this session's document by id (not to whichever is active).
+    fn bind_undo(&self, session: &mut Session) -> gridcraft_engine::Result<()> {
         let queue = self.core.queue();
-        session.set_live_undo_hook(Some(Box::new(move |redo| {
-            queue.push(if redo { GridEdit::Redo } else { GridEdit::Undo });
-            true
-        })));
+        session.set_live_undo_hook_for(
+            self.map.doc,
+            Some(Box::new(move |redo| {
+                queue.push(if redo { GridEdit::Redo } else { GridEdit::Undo });
+                true
+            })),
+        )
     }
 
     /// The engine document of this session was re-created under `doc` (the host reopened it):
@@ -363,7 +365,10 @@ impl<H: Hub> GridLive<H> {
     /// workbook is an ordinary one again.
     pub fn stop(self, session: &mut Session) {
         session.set_observer(None);
-        session.set_live_undo_hook(None);
+        if session.live_undo_doc() == Some(self.map.doc) {
+            // `set_live_undo_hook_for` refuses a closed document; this clears the hook either way.
+            session.set_live_undo_hook(None);
+        }
         if session.document_index(self.map.doc).is_some() {
             // Clearing a source cannot fail for a document that is open.
             let _ = session.set_volatile_source(self.map.doc, None);
@@ -391,4 +396,3 @@ pub fn volatile_for(base: &Workbook, state: &[u8]) -> Result<Arc<dyn VolatileSou
     let source: Arc<dyn VolatileSource> = Volatile::new(&doc, base);
     Ok(source)
 }
-

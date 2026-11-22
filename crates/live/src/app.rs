@@ -4,7 +4,6 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-
 use craft_live::{Landed, LiveApp, LocalError};
 use gridcraft_core::{CellRef, RangeRef};
 use gridcraft_engine::{EngineError, Session};
@@ -24,7 +23,8 @@ use crate::volatile::Volatile;
 /// Told when Undo or Redo is asked for: per-user undo comes with G11.
 pub const UNDO_NOT_YET_TEXT: &str = "Undo and Redo are not available while editing live yet";
 /// Told when another peer ran an ordered edit this build cannot apply.
-pub const ORDERED_REMOTE_TEXT: &str = "Another editor changed rows or columns, which this version cannot follow yet. Reopen the file to keep editing.";
+pub const ORDERED_REMOTE_TEXT: &str =
+    "Another editor changed rows or columns, which this version cannot follow yet. Reopen the file to keep editing.";
 /// The most ranges of a caret kept.
 const CARET_RANGES_MAX: usize = 64;
 /// The most of this peer's own writes remembered for "your value was replaced" notices.
@@ -87,11 +87,11 @@ pub(crate) fn keep_view(mut fresh: Workbook, cur: &Workbook) -> Workbook {
             f.zoom = c.zoom;
             f.view_active = c.view_active;
             f.view_top_left = c.view_top_left;
-            f.view = c.view.clone();
+            f.view = c.view;
         }
         fresh.active_sheet = cur.active_sheet.clone();
     }
-    fresh.view = cur.view.clone();
+    fresh.view = cur.view;
     fresh.show_objects = cur.show_objects;
     fresh
 }
@@ -339,11 +339,8 @@ impl LiveApp<Grid> for GridApp<'_> {
 fn resolve(layout: &Layout, c: &mut GridCaret) -> bool {
     let Some(i) = layout.sheet_index(c.sheet) else { return false };
     let Some(active) = layout.cell_at(i, c.active.0, c.active.1) else { return false };
-    let ranges = c
-        .ranges
-        .iter()
-        .filter_map(|((r0, c0), (r1, c1))| Some(RangeRef::new(layout.cell_at(i, *r0, *c0)?, layout.cell_at(i, *r1, *c1)?)))
-        .collect();
+    let ranges =
+        c.ranges.iter().filter_map(|((r0, c0), (r1, c1))| Some(RangeRef::new(layout.cell_at(i, *r0, *c0)?, layout.cell_at(i, *r1, *c1)?))).collect();
     c.pos = GridPos { sheet: i, active, ranges, editing: c.editing };
     true
 }
@@ -354,4 +351,3 @@ pub(crate) fn caret_payload(layout: &Layout, sheet: usize, active: CellRef, rang
     let rs: Vec<String> = ranges.iter().take(CARET_RANGES_MAX).filter_map(|r| Some(format!("{}:{}", key(r.start)?, key(r.end)?))).collect();
     Some(json!({"s": layout.sheets.get(sheet)?.id.text(), "a": key(active)?, "r": rs, "e": editing}))
 }
-
