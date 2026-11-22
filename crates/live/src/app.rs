@@ -88,6 +88,9 @@ pub(crate) struct Mapping {
     pub lines_minted: u32,
     /// Entries a delete took away: (their uid, the cell, the value as text, `row` or `column`).
     pub removed: Vec<(String, String, String, &'static str)>,
+    /// How many times the replica was replaced under a running window (a refused run taken back,
+    /// the room's checkpoint). The undo log clears on a change of this count.
+    pub resets: u32,
 }
 
 /// One command as it went out: its group (shared by all its updates, see
@@ -570,19 +573,35 @@ impl LiveApp<Grid> for GridApp<'_> {
 
     fn resync(&mut self, replica: &GridDoc) -> Result<(), String> {
         self.map.pending.clear();
-        let layout = Layout::from_doc(replica, &self.map.base);
-        self.set_layout(layout);
+        let held = self.map.layout.clone();
+        self.set_layout(Layout::from_doc(replica, &self.map.base));
         let m = &mut *self.map;
-        m.applied_ops = replica.ops_len();
         m.index.clear();
         m.recent.clear();
         m.vol.follow(replica);
         let source: Arc<dyn gridcraft_calc::VolatileSource> = m.vol.clone();
-        let fresh = build(&m.base, replica, Some(source)).map_err(|e| e.to_string())?;
+        let fresh = match build(&m.base, replica, Some(source)) {
+            Ok(wb) => wb,
+            Err(e) => {
+                self.set_layout(held);
+                return Err(e.to_string());
+            }
+        };
         // A late joiner learns of a random function only through the state it was given.
-        m.has_random |= crate::local::has_random(&fresh);
-        let cur = self.current().ok_or_else(|| EngineError::NoDocument.to_string())?;
-        self.install(Arc::new(keep_view(fresh, &cur)))
+        self.map.has_random |= crate::local::has_random(&fresh);
+        let Some(cur) = self.current() else {
+            self.set_layout(held);
+            return Err(EngineError::NoDocument.to_string());
+        };
+        let out = self.install(Arc::new(keep_view(fresh, &cur)));
+        if self.map.restore.is_some() {
+            // An undo group is open: the engine still shows what it showed, so the layout stays
+            // what the engine's is until `retry` installs the rebuilt workbook.
+            self.set_layout(held);
+        } else {
+            self.map.applied_ops = replica.ops_len();
+        }
+        out
     }
 
     fn reset(&mut self, space: u32) {
@@ -595,9 +614,11 @@ impl LiveApp<Grid> for GridApp<'_> {
         m.unresolved.clear();
         m.index.clear();
         // A reset mid-session (a fenced run taken back, or the room's checkpoint replacing the
-        // replica) drops every local edit that was not ordered: none of them is a step to undo.
+        // replica) drops the commands not taken yet: the link has taken their edits back too.
+        // `removed` stays: those are other peers' deletes, still true. The undo log clears on a
+        // change of `resets`.
         m.sent.clear();
-        m.removed.clear();
+        m.resets = m.resets.saturating_add(1);
     }
 
     fn set_space(&mut self, space: u32) {
