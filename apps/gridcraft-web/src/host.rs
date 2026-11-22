@@ -63,7 +63,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use craft_collab::Hub as _;
-use craft_live::{Access, LiveStatus};
+use craft_live::LiveStatus;
 use craft_web_host::live::{LiveError, LiveMessage, LiveState, Peer as HostPeer};
 use craft_web_host::web::{FileData, Host, Message};
 use craft_web_host::{Mode, Outgoing, file_name, message_type};

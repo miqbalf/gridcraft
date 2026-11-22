@@ -184,7 +184,7 @@ impl LiveUi {
     fn refresh(&mut self, mut peers: Vec<Peer>, now: f64, lang: Language, names: &dyn Fn(usize) -> String) {
         // A caret on an id this window does not know yet is not drawn until it is known.
         for p in &mut peers {
-            p.caret = p.caret.take().filter(|c| !c.hidden);
+            p.caret = p.caret.take().filter(|c| !c.unknown);
         }
         self.moved.retain(|id, _| peers.iter().any(|p| &p.id == id));
         for p in &peers {
