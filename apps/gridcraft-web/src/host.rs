@@ -28,20 +28,53 @@
 //! - `gridcraft:dirty` whenever unsaved changes appear or go away, `gridcraft:failed` when the
 //!   app couldn't start.
 //!
+//! # Live editing (`craft-live/1`, `?host=parent` only)
+//!
+//! The parent page may instead send the unprefixed `live` message: `{ticket, relayUrl, room,
+//! fileUrl, fileName, proto}` (`craft-web-host`'s `live` module checks every field and refuses
+//! another `proto`). GridCraft posts the unprefixed `{type:"ready"}` once it listens.
+//!
+//! - The first `live` fetches `fileUrl` (the room's base file) with the user's cookies, only from
+//!   this page's own origin over HTTP(S) ([`crate::live_ticket::same_origin`]); a 404 is retried
+//!   briefly (the file may still be written). The URL must carry the base's `sha256`, and bytes
+//!   that hash differently are refused ([`crate::live_ticket::checked_base`]), so there is no join.
+//! - It then connects to the relay on the page's own host only ([`crate::live_ticket::same_host`];
+//!   a relative `/craft` is) over the page's `socket.io-client` (`craft-collab`'s `WebHub`),
+//!   announcing the `gridcraft/1_<build>` schema, and starts `GridLive` on the file with the
+//!   URL's hash and the ticket's access (a ticket without the update bit joins read-only).
+//!   If the fetch, the connect or the start fails, the window says why and the next `live` tries
+//!   again ([`crate::live_ticket::Joining`]).
+//! - A later `live` for the same room is the page's ticket refresh: it goes to the hub
+//!   (`Hub::set_token`). One for another room, or one that gives less access, ends the session.
+//!   A message while the file is fetched waits for the join.
+//! - Another `proto` shows "This file is being edited with a newer GridCraft. Update to join."
+//! - `live-state` `{state, reason, savedAt, peers}` goes to the parent on every change of state
+//!   and at most once a second otherwise.
+//! - While live, the workbook is not saved from this window (the document service saves the
+//!   room), so workbook saves are refused and `gridcraft:dirty` stays false. Exports still go out.
+//!
+//! Tickets are never logged.
+//!
 //! In both host modes the page starts with an empty workbook instead of a sample, saves and PDF
 //! exports are handed to the page rather than downloaded, and `?author=` names the user for new
 //! notes and comments.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use craft_collab::Hub as _;
+use craft_live::{Access, LiveStatus};
+use craft_web_host::live::{LiveError, LiveMessage, LiveState, Peer as HostPeer};
 use craft_web_host::web::{FileData, Host, Message};
 use craft_web_host::{Mode, Outgoing, file_name, message_type};
-use gridcraft_ui_egui::{Inbox, Services, SheetApp};
-use wasm_bindgen::JsValue;
+use gridcraft_live::{BaseFile, LiveFail, schema};
+use gridcraft_ui_egui::live::DynHub;
+use gridcraft_ui_egui::{Inbox, Notice, NoticeKind, Services, SheetApp};
+use wasm_bindgen::{JsCast as _, JsValue};
 
 use crate::host_save::{Answer, Receipts, SaveMessage, sync_saved};
 use crate::hostmode::open_name;
+use crate::live_ticket::{Joining, Next};
 
 /// The app id in the host messages (`gridcraft:ready`).
 const APP: &str = "gridcraft";
@@ -64,6 +97,8 @@ pub struct Bridge {
     answers: Rc<RefCell<Vec<Answer>>>,
     /// The name of the file the host sent: a save under another name is a new file.
     opened: Rc<RefCell<Option<String>>>,
+    /// The window edits a room: its document service saves the workbook, this window does not.
+    live_on: Rc<Cell<bool>>,
 }
 
 impl Bridge {
@@ -90,6 +125,7 @@ impl Bridge {
             receipts: Rc::default(),
             answers: Rc::default(),
             opened: Rc::default(),
+            live_on: Rc::default(),
         })
     }
 
@@ -115,6 +151,10 @@ impl Bridge {
 
     pub fn post_ready(&self) {
         let _ = self.host.post_ready(env!("CARGO_PKG_VERSION"), false);
+        // A live host waits for the unprefixed `ready` before it sends `live`.
+        if self.host.mode() == Mode::Parent {
+            let _ = self.host.post_live_ready();
+        }
     }
 
     pub fn post_failed(&self, error: &str) {
@@ -137,11 +177,15 @@ impl Bridge {
                 }
             }
         }
-        self.host.post_dirty(app.session.documents().iter().any(|d| d.is_dirty()));
+        // A live room is saved by its document service, so nothing here is unsaved.
+        self.host.post_dirty(!self.live_on.get() && app.session.documents().iter().any(|d| d.is_dirty()));
     }
 
     fn post_save(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
         let name = file_name(Some(path), "document");
+        if self.live_on.get() && crate::host_save::is_workbook(&name) {
+            return Err("the document service saves this file while it is edited live".into());
+        }
         let confirms = self.receipts.borrow().confirms();
         let id = confirms.then(|| self.receipts.borrow_mut().start(&name));
         let mut message = SaveMessage::new(&name, bytes);
@@ -235,4 +279,299 @@ fn deliver_open(inbox: &Inbox, ctx: &egui::Context, name: &str, data: &FileData)
     inbox.lock().unwrap_or_else(|e| e.into_inner()).push((open_name(name), array.to_vec()));
     ctx.request_repaint();
     true
+}
+
+// ---- live editing ----
+
+/// Told when the page speaks a newer live protocol than this build.
+const NEWER_TEXT: &str = "This file is being edited with a newer GridCraft. Update to join.";
+
+/// Longest wait for a base file that is not there yet, and how often it is asked for.
+const BASE_RETRIES: u32 = 4;
+const BASE_RETRY_MS: i32 = 500;
+/// The least time between two `live-state` posts that only differ in the peers or the save.
+const REPORT_EVERY_MS: f64 = 1000.0;
+
+impl Bridge {
+    /// Hear the parent's `live` messages: the first fetches the file and joins, later ones are
+    /// ticket refreshes. They wait in `events` for the next frame ([`Live::frame`]).
+    pub fn listen_live(&self, events: LiveEvents, joining: Rc<RefCell<Joining>>, ctx: egui::Context) {
+        self.host.listen_live(move |message| match message {
+            Err(LiveError::UnsupportedProto(_)) => {
+                events.borrow_mut().push(LiveEvent::Newer);
+                ctx.request_repaint();
+            }
+            // The error never quotes the message, so no ticket reaches the log.
+            Err(e) => log::warn!("live message refused: {e}"),
+            Ok(message) => {
+                let access = crate::live_ticket::ticket_access(message.ticket());
+                let next = joining.borrow_mut().message(&message.room, access);
+                match next {
+                    Next::Restarted | Next::AccessDropped => {
+                        let reason = next.end_reason().unwrap_or(crate::live_ticket::RESTARTED);
+                        log::warn!("the live session ended: {reason}");
+                        events.borrow_mut().push(LiveEvent::End(reason));
+                        ctx.request_repaint();
+                    }
+                    Next::Refresh => {
+                        events.borrow_mut().push(LiveEvent::Ticket(message.ticket().to_owned()));
+                        ctx.request_repaint();
+                    }
+                    Next::Open => {
+                        let (events, ctx, joining) = (events.clone(), ctx.clone(), joining.clone());
+                        wasm_bindgen_futures::spawn_local(async move {
+                            let fetched = match fetch_file(&message.file_url).await {
+                                Ok(bytes) => {
+                                    crate::live_ticket::checked_base(&message.file_url, &bytes).map(|hash| (bytes, hash)).map_err(str::to_owned)
+                                }
+                                Err(e) => Err(e),
+                            };
+                            let event = match fetched {
+                                Ok((bytes, hash)) => LiveEvent::Open(message, bytes, hash),
+                                Err(e) => {
+                                    // The page's next `live` (its refresh) tries again.
+                                    joining.borrow_mut().failed();
+                                    LiveEvent::Failed(e)
+                                }
+                            };
+                            events.borrow_mut().push(event);
+                            ctx.request_repaint();
+                        });
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// What the parent's `live` messages brought, for the next frame.
+pub enum LiveEvent {
+    /// The base file, fetched and checked against its hash: join with this message's ticket.
+    Open(LiveMessage, Vec<u8>, [u8; 32]),
+    /// A later `live` for the room: a fresh ticket.
+    Ticket(String),
+    /// The file could not be fetched or checked.
+    Failed(String),
+    /// The room speaks a newer protocol.
+    Newer,
+    /// The session ended (another room, less access), for this reason.
+    End(&'static str),
+}
+
+pub type LiveEvents = Rc<RefCell<Vec<LiveEvent>>>;
+
+/// The web app's side of a live session: when it joins, a ticket that came during the join, and
+/// what was last reported to the page.
+#[derive(Default)]
+pub struct Live {
+    joining: Rc<RefCell<Joining>>,
+    /// A fresh ticket that arrived while the file was fetched, for the hub once joined.
+    pending: Option<String>,
+    reported: Option<Reported>,
+    /// The newest save marker seen, and when this window saw it (page milliseconds).
+    saved: Option<(String, f64)>,
+}
+
+struct Reported {
+    state: LiveState,
+    at: f64,
+}
+
+impl Live {
+    /// The join state the `live` listener shares ([`Bridge::listen_live`]).
+    pub fn joining(&self) -> Rc<RefCell<Joining>> {
+        Rc::clone(&self.joining)
+    }
+
+    /// Act on what arrived since the last frame, then tell the page how the session stands.
+    pub fn frame(&mut self, app: &mut SheetApp, events: &LiveEvents, bridge: &Bridge) {
+        let arrived = std::mem::take(&mut *events.borrow_mut());
+        for event in arrived {
+            match event {
+                LiveEvent::Newer => tell(app, NEWER_TEXT),
+                LiveEvent::End(reason) => {
+                    if let Some(live) = app.live_mut() {
+                        live.live_mut().core_mut().end(reason);
+                    }
+                }
+                LiveEvent::Failed(e) => {
+                    log::error!("live file not fetched: {e}");
+                    not_opened(app, &e);
+                }
+                LiveEvent::Open(message, bytes, hash) => self.open(app, bridge, &message, &bytes, hash),
+                // The hub uses it for its next connect, and starts again with it after the relay
+                // refused an expired one.
+                LiveEvent::Ticket(ticket) => {
+                    if !refresh_ticket(app, &ticket) {
+                        self.pending = Some(ticket);
+                    }
+                }
+            }
+        }
+        self.report(app, bridge);
+    }
+
+    fn open(&mut self, app: &mut SheetApp, bridge: &Bridge, message: &LiveMessage, bytes: &[u8], hash: [u8; 32]) {
+        let access = crate::live_ticket::ticket_access(message.ticket());
+        let uid = crate::live_ticket::ticket_uid(message.ticket()).unwrap_or_else(|| "user".to_owned());
+        let started = relay_on_page_host(&message.relay_url)
+            .and_then(|()| {
+                craft_collab::web::WebHub::connect_as(&message.relay_url, message.ticket(), None, Some(&schema())).map_err(|e| e.to_string())
+            })
+            .and_then(|hub| {
+                let base = BaseFile { bytes, name: &message.file_name, expected_sha256: Some(hash) };
+                gridcraft_live::GridLive::start(DynHub(Box::new(hub)), &message.room, &base, access, &uid, &mut app.session)
+                    .map_err(|e| fail_text(&e))
+            })
+            .and_then(|mut live| {
+                // The page's clock, for the caret limit and the lock's wait.
+                let start = web_time::Instant::now();
+                live.set_clock(Box::new(move || start.elapsed().as_secs_f64() * 1000.0));
+                app.attach_live(live)
+            });
+        match started {
+            Ok(()) => {
+                self.joining.borrow_mut().joined(&message.room, access);
+                bridge.live_on.set(true);
+                if let Some(ticket) = self.pending.take() {
+                    refresh_ticket(app, &ticket);
+                }
+            }
+            Err(e) => {
+                // The page's next `live` (its refresh) tries again.
+                self.joining.borrow_mut().failed();
+                self.pending = None;
+                log::error!("live editing did not start: {e}");
+                not_opened(app, &e);
+            }
+        }
+    }
+
+    /// `live-state` to the page: at once when the state or its reason changes, otherwise at most
+    /// once a second (peers, save marker).
+    fn report(&mut self, app: &SheetApp, bridge: &Bridge) {
+        let Some(ui) = app.live() else { return };
+        let now = js_sys::Date::now();
+        let status = ui.live().status();
+        if let LiveStatus::Live { saved_at: Some(marker) } = status
+            && self.saved.as_ref().is_none_or(|(seen, _)| seen != marker)
+        {
+            self.saved = Some((marker.clone(), now));
+        }
+        let (state, reason) = crate::live_ticket::host_status(status);
+        let report = LiveState {
+            state,
+            reason,
+            saved_at: self.saved.as_ref().and_then(|(_, ms)| js_sys::Date::new(&JsValue::from_f64(*ms)).to_iso_string().as_string()),
+            peers: ui.peers().iter().map(|p| HostPeer { id: p.id.clone(), display: p.display.clone() }).collect(),
+        };
+        let due = match &self.reported {
+            None => true,
+            Some(last) if last.state == report => false,
+            Some(last) => last.state.state != report.state || last.state.reason != report.reason || now - last.at >= REPORT_EVERY_MS,
+        };
+        if due {
+            if let Err(e) = bridge.host.post_live_state(&report) {
+                log::warn!("live-state not delivered: {e}");
+            }
+            self.reported = Some(Reported { state: report, at: now });
+        }
+    }
+}
+
+/// A fresh ticket for the hub; false when the window is not live yet.
+fn refresh_ticket(app: &mut SheetApp, ticket: &str) -> bool {
+    match app.live_mut() {
+        Some(live) => {
+            live.live_mut().core_mut().hub_mut().set_token(ticket.to_owned());
+            true
+        }
+        None => false,
+    }
+}
+
+fn tell(app: &mut SheetApp, text: &str) {
+    let text = app.ui.language.tr(text).to_owned();
+    app.notice = Some(Notice { text, kind: NoticeKind::Warning, action: None });
+}
+
+fn not_opened(app: &mut SheetApp, error: &str) {
+    let text = app.ui.language.tr_fill("Couldn't open the file for live editing: {error}", &[("error", error)]);
+    app.notice = Some(Notice { text, kind: NoticeKind::Warning, action: None });
+}
+
+/// Why a session did not start, for the user.
+fn fail_text(fail: &LiveFail) -> String {
+    match fail {
+        LiveFail::Open(e) => e.clone(),
+        LiveFail::BaseMismatch => crate::live_ticket::BASE_CHANGED.to_owned(),
+        LiveFail::Live(e) => e.to_string(),
+    }
+}
+
+/// The relay URL must be on the page's own host (a relative `/craft` is), so the ticket goes
+/// nowhere else.
+fn relay_on_page_host(relay_url: &str) -> Result<(), String> {
+    let window = web_sys::window().ok_or("no window")?;
+    let location = window.location();
+    let page = location.href().map_err(|_| "no page address")?;
+    let page_host = location.host().map_err(|_| "no page host")?;
+    let url = web_sys::Url::new_with_base(relay_url, &page).map_err(|_| "the relay address is not a URL")?;
+    if crate::live_ticket::same_host(&url.protocol(), &url.host(), &page_host) { Ok(()) } else { Err("the relay is not on this site".into()) }
+}
+
+/// Waits `ms` milliseconds on the page's timer.
+async fn sleep(ms: i32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        if let Some(window) = web_sys::window() {
+            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
+        }
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+}
+
+/// The base file, fetched with the user's cookies from this page's own origin only. A 404 is
+/// asked again a few times (the file may be on its way), nothing else is.
+async fn fetch_file(file_url: &str) -> Result<Vec<u8>, String> {
+    let window = web_sys::window().ok_or("no window")?;
+    let location = window.location();
+    let page_origin = location.origin().map_err(|_| "no page origin")?;
+    let page = location.href().map_err(|_| "no page address")?;
+    let url = web_sys::Url::new_with_base(file_url, &page).map_err(|_| "the file address is not a URL")?;
+    if !crate::live_ticket::same_origin(&url.protocol(), &url.origin(), &page_origin) {
+        return Err("the file is not on this site".into());
+    }
+    let mut tries = 0;
+    let response = loop {
+        let init = web_sys::RequestInit::new();
+        init.set_method("GET");
+        init.set_mode(web_sys::RequestMode::SameOrigin);
+        init.set_credentials(web_sys::RequestCredentials::SameOrigin);
+        let response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str_and_init(&url.href(), &init))
+            .await
+            .map_err(|_| "the file could not be fetched")?;
+        let response: web_sys::Response = response.dyn_into().map_err(|_| "the fetch gave no response")?;
+        if response.status() == 404 && tries < BASE_RETRIES {
+            tries += 1;
+            sleep(BASE_RETRY_MS).await;
+            continue;
+        }
+        break response;
+    };
+    if !response.ok() {
+        return Err(format!("the server answered {}", response.status()));
+    }
+    let too_big = || format!("the file is over the {} MiB limit", MAX_OPEN_BYTES >> 20);
+    if let Ok(Some(length)) = response.headers().get("content-length")
+        && length.trim().parse::<u64>().is_ok_and(|n| n > MAX_OPEN_BYTES)
+    {
+        return Err(too_big());
+    }
+    let buffer = response.array_buffer().map_err(|_| "the file could not be read")?;
+    let buffer = wasm_bindgen_futures::JsFuture::from(buffer).await.map_err(|_| "the file could not be read")?;
+    let array = js_sys::Uint8Array::new(&buffer);
+    if u64::from(array.length()) > MAX_OPEN_BYTES {
+        return Err(too_big());
+    }
+    Ok(array.to_vec())
 }
