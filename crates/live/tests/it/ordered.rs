@@ -383,6 +383,12 @@ fn more_lines_than_the_cap_are_refused_and_nothing_changes() {
     assert_eq!(room.finger(1), before);
     assert_eq!(room.peers[0].live.replica().unwrap().ops_len(), 0);
     assert!(room.peers[0].sizes.borrow().is_empty(), "nothing was sent");
+    assert_eq!(room.relay.holder("grid/struct"), None, "the lock was given back");
+    assert_eq!(room.peers[0].live.status_line(), None);
+    // The layout is the document's: another peer's ordered edit lands everywhere.
+    room.run(1, "home.deleteRows", json!({"rows": "3:3"})).unwrap();
+    room.settle();
+    same_everywhere(&room, "an edit after the refusals");
 }
 
 /// Drives peer `i` until its ordered edit has run and gone out, but before the relay's answer
@@ -668,7 +674,7 @@ fn a_connection_dropped_with_the_edit_still_unsent_says_so_and_takes_it_back() {
     room.settle();
     let notices = room.notices_of(0);
     assert!(notices.iter().any(|n| n.contains("connection dropped") && n.contains("was not kept")), "{notices:?}");
-    assert!(!notices.iter().any(|n| n.contains("Another editor")), "the cause was the link: {notices:?}");
+    assert!(!notices.iter().any(|n| n.to_lowercase().contains("another editor")), "the cause was the link: {notices:?}");
     for i in 0..2 {
         assert_eq!(room.finger(i), before, "peer {i}");
     }
@@ -753,4 +759,78 @@ fn a_take_back_while_an_undo_group_is_open_keeps_the_layout_the_engine_shows() {
     assert_eq!(value_at(&room, 1, "F4"), Value::Text("typed".into()));
     assert_eq!(value_at(&room, 1, "F5"), Value::Empty);
     same_everywhere(&room, "reset with a group open");
+}
+
+/// The notices about a change to rows or columns, whatever their wording.
+fn lock_notices(room: &Room, i: usize) -> Vec<String> {
+    room.notices_of(i).iter().filter(|n| n.contains("rows or columns") || n.to_lowercase().contains("taken back")).cloned().collect()
+}
+
+#[test]
+fn a_dropped_deferred_edit_with_cells_typed_meanwhile_gets_one_true_notice() {
+    let mut room = Room::new(2);
+    let token = room.peers[1].session.group_begin("macro").unwrap();
+    room.run(0, "cell.set", json!({"cell": "D5", "input": "from alice"})).unwrap();
+    room.settle();
+    room.run(1, "home.insertRows", json!({"rows": "3:3"})).unwrap();
+    for _ in 0..6 {
+        room.pump(1);
+    }
+    // Typed in the macro while the insert waits: sent under the lock.
+    // Its submit is refused for now and still unanswered when the link drops.
+    room.relay.refuse_next_submits(1);
+    room.run(1, "cell.set", json!({"cell": "F2", "input": "typed"})).unwrap();
+    room.pump(1);
+    room.relay.drop_link(room.peers[1].live.core().hub().inner().mem());
+    room.relay.restore_link(room.peers[1].live.core().hub().inner().mem());
+    for _ in 0..4 {
+        room.pump(1);
+    }
+    room.peers[1].session.group_end(token).unwrap();
+    room.settle();
+    let told = lock_notices(&room, 1);
+    assert_eq!(told.len(), 1, "one notice for the one dropped edit: {told:?}");
+    assert!(told[0].contains("connection dropped before your change") && told[0].contains("was not made"), "{told:?}");
+    assert!(
+        !room.notices_of(1).iter().any(|n| n.contains("was being sent") || n.contains("is kept") || n.contains("The change is kept")),
+        "{:?}",
+        room.notices_of(1)
+    );
+    same_everywhere(&room, "dropped with cells typed");
+}
+
+#[test]
+fn a_lock_report_that_comes_before_the_refusal_is_not_told_as_kept() {
+    let mut room = Room::new(2);
+    let before = room.finger(0);
+    room.run(0, "home.insertRows", json!({"rows": "3:3"})).unwrap();
+    let (_, token) = room.relay.holder("grid/struct").expect("granted at the relay");
+    // The lease lapses and Bob takes the lock; Alice's submit is refused for now, then her lease
+    // is reported lost, before the refusal is read.
+    room.relay.lapse("grid/struct");
+    let mut bob = room.relay.connect("bob-raw", "Bob", true);
+    bob.send(ClientMsg::Lock { doc: ROOM.into(), scope: "grid/struct".into() }).unwrap();
+    // The refusal of her submit is held back; the lock report reaches her first.
+    *room.peers[0].hold_errors.borrow_mut() = true;
+    room.pump(0);
+    room.relay.inject(
+        room.peers[0].live.core().hub().inner().mem(),
+        craft_collab::ServerMsg::LockLost { doc: ROOM.into(), scope: "grid/struct".into(), token },
+    );
+    for _ in 0..3 {
+        room.pump(0);
+    }
+    assert!(lock_notices(&room, 0).is_empty(), "nothing is told while the run is unsettled: {:?}", room.notices_of(0));
+    *room.peers[0].hold_errors.borrow_mut() = false;
+    for _ in 0..6 {
+        room.pump(0);
+    }
+    room.settle();
+    let told = lock_notices(&room, 0);
+    assert_eq!(told.len(), 1, "one notice for the run: {told:?}");
+    assert!(told[0].contains("was not kept") && !told[0].contains("is kept"), "{told:?}");
+    for i in 0..2 {
+        assert_eq!(room.finger(i), before, "peer {i}: the edit was taken back");
+    }
+    same_everywhere(&room, "lock report before the refusal");
 }

@@ -111,7 +111,11 @@ pub struct GridLive<H: Hub> {
     rejoined_in_run: bool,
     /// `map.resets` when the current run started, and when the notices last looked.
     run_resets: u32,
-    noticed_resets: u32,
+    /// The run was already dropped and told (the rejoin before it ran): nothing more to say.
+    run_told: bool,
+    /// A lost lock waiting to be told once the run has settled: `resets` when the run began, and
+    /// whether the link rejoined during it.
+    lost_pending: Option<(u32, bool)>,
     /// The clock the lock's wait runs on (shared with the link's own).
     clock: Option<SharedClock>,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -226,7 +230,8 @@ impl<H: Hub> GridLive<H> {
             seen_joins: 0,
             rejoined_in_run: false,
             run_resets: 0,
-            noticed_resets: 0,
+            run_told: false,
+            lost_pending: None,
             clock: None,
             started: None,
             frames: 0,
@@ -447,6 +452,7 @@ impl<H: Hub> GridLive<H> {
                 // The relay gave the lock back with the old link, so a run that has not started
                 // would be refused: it is dropped here, and `finish` gives the grant back.
                 if self.deferred.take().is_some() {
+                    self.run_told = true;
                     self.map.notices.push(LOCK_LOST_UNRUN_LINK_TEXT.to_owned());
                 }
             }
@@ -461,6 +467,7 @@ impl<H: Hub> GridLive<H> {
             Polled::Nothing => {}
             Polled::Run(p) => {
                 self.rejoined_in_run = false;
+                self.run_told = false;
                 self.run_resets = self.map.resets;
                 self.run_pending(session, p);
             }
@@ -469,16 +476,36 @@ impl<H: Hub> GridLive<H> {
                 self.map.notices.push(format!("{who} is still changing the sheet's structure. Your change was not made; try again in a moment."));
             }
             Polled::LockLost { .. } => {
-                let text = if self.deferred.take().is_some() {
+                if self.deferred.take().is_some() {
                     // It never ran, but free edits made while it waited were under the lock too.
-                    if self.rejoined_in_run { LOCK_LOST_UNRUN_LINK_TEXT } else { LOCK_LOST_UNRUN_TEXT }
+                    if !self.run_told {
+                        let text = if self.rejoined_in_run { LOCK_LOST_UNRUN_LINK_TEXT } else { LOCK_LOST_UNRUN_TEXT };
+                        self.map.notices.push(text.to_owned());
+                    }
                 } else if matches!(self.core.status(), LiveStatus::Broken(_)) {
                     // The replica broke: the relay never answered for the edit.
-                    LOCK_LOST_BROKEN_TEXT
-                } else if self.map.resets == self.run_resets {
+                    if !self.run_told {
+                        self.map.notices.push(LOCK_LOST_BROKEN_TEXT.to_owned());
+                    }
+                } else {
+                    // Whether the edit was kept or taken back is only known once the run has
+                    // settled (the relay's answer to its last submit): told below, once.
+                    self.lost_pending = Some((self.run_resets, self.rejoined_in_run));
+                }
+            }
+        }
+        if let Some((resets, rejoined)) = self.lost_pending {
+            let moved = self.map.resets != resets;
+            if self.run_told {
+                // A dropped edit was told when it was dropped; edits typed meanwhile that were
+                // taken back were warned of there.
+                self.lost_pending = None;
+            } else if moved || self.core.local_settled() {
+                self.lost_pending = None;
+                let text = if !moved {
                     // Nothing was taken back: the lock report came after the edits were ordered.
                     LOCK_LOST_KEPT_TEXT
-                } else if self.rejoined_in_run {
+                } else if rejoined {
                     LOCK_LOST_LINK_TEXT
                 } else {
                     // The relay refused the edit; the link took it out of the replica, and
@@ -595,23 +622,18 @@ impl<H: Hub> GridLive<H> {
             self.core.push_notice(n);
         }
         let mut notices = self.core.take_notices();
-        let resets = self.map.resets;
-        if !matches!(self.core.status(), LiveStatus::Live { .. }) {
-            // The join's own reset (and a catch-up restart) takes nothing back.
-            self.noticed_resets = resets;
-        } else if resets != self.noticed_resets {
-            self.noticed_resets = resets;
-            {
-                // Edits were taken back. The link words that in terms of its scope (it names
-                // `SCOPE`); this crate says it for a user, once.
-                notices.retain(|n| !n.contains(SCOPE));
-                let told = notices.iter().any(|n| {
-                    [LOCK_LOST_TEXT, LOCK_LOST_LINK_TEXT, LOCK_LOST_BROKEN_TEXT, LOCK_LOST_UNRUN_TEXT, LOCK_LOST_UNRUN_LINK_TEXT, TAKEN_BACK_TEXT]
-                        .contains(&n.as_str())
-                });
-                if !told {
-                    notices.push(TAKEN_BACK_TEXT.to_owned());
-                }
+        // An ordered run taken back: the link words it in terms of its scope (it names `SCOPE`);
+        // this crate says it for a user, once, in `drive_ordered`. When nothing of ours explains
+        // it (a lock lost while still waiting), say that edits were taken back.
+        let before = notices.len();
+        notices.retain(|n| !n.contains(SCOPE));
+        if notices.len() < before && self.lost_pending.is_none() && !self.run_told {
+            let told = notices.iter().any(|n| {
+                [LOCK_LOST_TEXT, LOCK_LOST_LINK_TEXT, LOCK_LOST_BROKEN_TEXT, LOCK_LOST_UNRUN_TEXT, LOCK_LOST_UNRUN_LINK_TEXT, TAKEN_BACK_TEXT]
+                    .contains(&n.as_str())
+            });
+            if !told {
+                notices.push(TAKEN_BACK_TEXT.to_owned());
             }
         }
         notices
