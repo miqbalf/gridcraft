@@ -84,18 +84,24 @@ fn assert_equal(room: &Room, what: &str) {
     for (i, p) in room.peers.iter().enumerate() {
         assert!(matches!(p.live.status(), LiveStatus::Live { .. }), "{what}: peer {i} is {:?}; notices {:?}", p.live.status(), p.notices);
     }
+    // Every peer against peer 0 and against the workbook its own replica's state rebuilds, all
+    // in one message: which side is wrong shows at once.
     let first = room.finger(0);
-    for i in 1..room.peers.len() {
-        let other = room.finger(i);
-        assert!(first == other, "{what}: peers 0 and {i} differ\n{}", diff(&first, &other));
-    }
     let base = room.base();
+    let mut bad = Vec::new();
     for i in 0..room.peers.len() {
+        let shown = room.finger(i);
         let state = room.replica_state(i);
         let source = volatile_for(&base, &state).unwrap();
         let rebuilt = finger(&workbook_from_state(&base, &state, Some(source)).unwrap());
-        assert!(first == rebuilt, "{what}: peer {i}'s replica state differs from the peers\n{}", diff(&first, &rebuilt));
+        if shown != first {
+            bad.push(format!("peer {i} differs from peer 0\n{}", diff(&first, &shown)));
+        }
+        if shown != rebuilt {
+            bad.push(format!("peer {i} differs from its replica's state\n{}", diff(&rebuilt, &shown)));
+        }
     }
+    assert!(bad.is_empty(), "{what}:\n{}", bad.join("\n"));
 }
 
 fn hub_drop(room: &Room, i: usize) {

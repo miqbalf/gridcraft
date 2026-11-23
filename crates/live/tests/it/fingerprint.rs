@@ -39,8 +39,11 @@ pub fn diff(a: &str, b: &str) -> String {
     for i in 0..n {
         let (x, y) = (la.get(i).copied().unwrap_or("<none>"), lb.get(i).copied().unwrap_or("<none>"));
         if x != y {
-            let cut = |s: &str| s.chars().take(700).collect::<String>();
-            out.push(format!("line {i}: {} | {}", cut(x), cut(y)));
+            // Long lines (a sheet's rows) differ deep inside: show them from a little before the
+            // first character that differs.
+            let at = x.chars().zip(y.chars()).take_while(|(p, q)| p == q).count().saturating_sub(120);
+            let cut = |s: &str| s.chars().skip(at).take(700).collect::<String>();
+            out.push(format!("line {i} (from char {at}): {} | {}", cut(x), cut(y)));
             if out.len() >= 4 {
                 break;
             }

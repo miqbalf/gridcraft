@@ -508,8 +508,17 @@ impl GridApp<'_> {
             };
             naming.extend(m.index.naming(sheet, axis, ids));
             if let Some(i) = final_layout.sheet_index(sheet) {
-                if matches!(op, Op::Undelete { .. }) {
-                    undeleted_targets(&mut t, &final_layout, replica, &m.base, i, axis, ids);
+                match op {
+                    Op::Undelete { .. } => undeleted_targets(&mut t, &final_layout, replica, &m.base, i, axis, ids),
+                    // The engine gives inserted lines the format of the line before them here,
+                    // which need not be the line its author had before them: the document holds
+                    // what the author's new lines took, so they are read from it.
+                    Op::Insert { .. } => {
+                        for id in ids {
+                            t.add_line(i, axis, *id);
+                        }
+                    }
+                    Op::Delete { .. } => {}
                 }
                 if let Op::Delete { by, .. } = op
                     && by != &m.uid

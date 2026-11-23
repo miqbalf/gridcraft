@@ -102,6 +102,28 @@ fn second_insert_waits_and_lands_where_its_selection_now_is() {
 }
 
 #[test]
+fn an_inserted_line_takes_no_size_from_a_neighbour_its_author_had_not_sized() {
+    // Bob sizes row 2 (column B) while Alice's insert after it is on its way. Alice's row 2 had
+    // no size, so her new line took none and the document holds none for it; Bob's engine must
+    // not give the new line his row 2's size when the insert reaches him.
+    let cases = [
+        ("home.insertRows", json!({"rows": "3:3"}), "home.rowHeight", json!({"rows": "2:2", "height": 40})),
+        ("home.insertColumns", json!({"cols": "C:C"}), "home.columnWidth", json!({"cols": "B:B", "width": 120})),
+    ];
+    for (insert, at, size, sized) in cases {
+        let mut room = Room::new(2);
+        room.run(0, insert, at.clone()).unwrap();
+        // Alice takes the lock and shares her insert; Bob has not heard of it yet.
+        for _ in 0..4 {
+            room.pump(0);
+        }
+        room.run(1, size, sized.clone()).unwrap();
+        room.settle();
+        same_everywhere(&room, &format!("{insert} under a concurrent {size}"));
+    }
+}
+
+#[test]
 fn receiver_engine_equals_rebuild_from_state_after_each_op() {
     let mut total_ops = 0u32;
     for seed in seeds() {
