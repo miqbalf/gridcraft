@@ -23,13 +23,25 @@ pub const BUSY_TEXT: &str = "Another change to rows or columns is still going. T
 /// Told when every line a delete named was deleted by someone else first.
 pub const GONE_TEXT: &str = "Those rows or columns were already deleted.";
 /// Told when the relay refused an ordered edit because another editor held the structure lock by
-/// then (the lease lapsed): the edit is out of the sheet again and nothing of it was shared.
-pub const LOCK_LOST_TEXT: &str = "Another editor changed the sheet's rows or columns first, so your change to rows or columns was not kept. Nothing of it was shared. Do it again if you still want it.";
+/// then (this window's lease lapsed): the edit is out of the sheet again, nothing of it was shared.
+pub const LOCK_LOST_TEXT: &str = "Another editor took the lock on the sheet's rows and columns first, so your change to rows or columns was not kept. Nothing of it was shared. Do it again if you still want it.";
+/// Told when the refused edit was one that was still on its way when the connection dropped: the
+/// relay gives a lock back with the link, so the resent edit was refused and taken back.
+pub const LOCK_LOST_LINK_TEXT: &str = "The connection dropped while your change to rows or columns was being sent, so it was not kept. Nothing of it was shared. Check the sheet, then do it again if you still want it.";
+/// Told when the lock was reported lost after the run's edits were all shared: nothing was taken
+/// back.
+pub const LOCK_LOST_KEPT_TEXT: &str = "The room lost track of your lock on rows and columns after your change was shared. The change is kept.";
 /// Told when the link broke while an ordered edit that had run was being shared: the relay never
 /// answered for it, so it may not have reached the others.
 pub const LOCK_LOST_BROKEN_TEXT: &str = "The link to the room broke while your change to rows or columns was being shared, so it may not have reached the others. Reopen the file and check the sheet.";
-/// Told when the lock was lost before an ordered edit that waited for an open undo group ran.
-pub const LOCK_LOST_UNRUN_TEXT: &str = "The connection dropped before your change to rows or columns was made. Nothing was changed. Try again.";
+/// Told when the lock was lost before an ordered edit that waited for an open undo group ran. Free
+/// edits made while it waited were under the same lock and may have been taken back.
+pub const LOCK_LOST_UNRUN_TEXT: &str = "You lost the lock on the sheet's rows and columns before your change to rows or columns was made, so it was not made. Other edits you made while it waited may have been taken back too; check the sheet.";
+/// As [`LOCK_LOST_UNRUN_TEXT`], when the connection dropped while the edit waited.
+pub const LOCK_LOST_UNRUN_LINK_TEXT: &str = "The connection dropped before your change to rows or columns was made, so it was not made. Other edits you made while it waited may have been taken back too; check the sheet.";
+/// Told when edits were taken back and no other notice says why (a lock lost while still waiting,
+/// or the room's checkpoint replacing this window's replica).
+pub const TAKEN_BACK_TEXT: &str = "Some of your recent changes could not be shared and were taken back.";
 
 /// A line on one sheet's axis, by id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -216,7 +228,7 @@ impl<H: Hub> Hub for Tracked<H> {
 
 /// Sends what the lock's queue asks for, best effort: a failed send is the same as a lost
 /// message, which the queue's wait and the relay's lease already cover. The one place the
-/// lock's messages leave this crate (the fencing token of a later relay joins here).
+/// lock's messages leave this crate (the fencing token rides in `core.unlock` itself).
 pub(crate) fn send_actions<H: Hub>(core: &mut craft_live::LiveEditing<Tracked<H>, crate::kind::Grid>, actions: &[craft_live::ordered::Action]) {
     use craft_live::ordered::Action;
     for a in actions {

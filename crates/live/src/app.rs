@@ -99,6 +99,45 @@ pub(crate) struct Mapping {
     pub replay_busy: bool,
     /// Undos (`false`) and redos (`true`) asked for while one waited, in order.
     pub held: Vec<bool>,
+    /// How many times the replica was replaced under a running window (a refused run taken back,
+    /// the room's checkpoint). The undo log clears on a change of this count.
+    pub resets: u32,
+    /// The `resets` count the undo state was last cleared for: it clears once per count.
+    pub undo_resets: u32,
+}
+
+impl Mapping {
+    /// Clears the undo state (steps, queued and running ordered undos, held undos, skipped-key
+    /// notes, landed changes) once per `resets` count, and tells the user once if anything was
+    /// cleared. The reset hook and the session's frame both call it: the second finds the count
+    /// already seen and does nothing. Today only `LiveApp::reset` moves the count in production,
+    /// so the frame's calls (`pump`, `after_pump`, `run`) act only for a count moved without the
+    /// hook (the test hook, or a future path); they are a guard, not a path to rely on. An ordered
+    /// undo already in the lock's queue is out of reach here: it carries its count
+    /// ([`Replay::resets`]) and the session drops it when it comes back.
+    pub(crate) fn clear_undo_for_resets(&mut self) {
+        if self.undo_resets == self.resets {
+            return;
+        }
+        self.undo_resets = self.resets;
+        let had = !self.undo.is_empty()
+            || !self.replays.is_empty()
+            || self.replay.is_some()
+            || !self.held.is_empty()
+            || self.replay_busy
+            || !self.undo_skipped.is_empty()
+            || !self.landing.is_empty();
+        if had {
+            self.notices.push(undo::UNDO_RESET_TEXT.to_owned());
+        }
+        self.undo = UndoLog::default();
+        self.replays.clear();
+        self.replay = None;
+        self.held.clear();
+        self.replay_busy = false;
+        self.undo_skipped.clear();
+        self.landing.clear();
+    }
 }
 
 /// One command as it went out: its group (shared by all its updates, see
@@ -559,7 +598,7 @@ impl GridApp<'_> {
         let writes = match step {
             UndoStep::Free { writes } => writes,
             ordered @ UndoStep::Ordered { .. } => {
-                m.replays.push(Replay { redo, step: ordered });
+                m.replays.push(Replay { redo, step: ordered, resets: m.resets });
                 return Ok(Vec::new());
             }
         };
@@ -851,19 +890,35 @@ impl LiveApp<Grid> for GridApp<'_> {
 
     fn resync(&mut self, replica: &GridDoc) -> Result<(), String> {
         self.map.pending.clear();
-        let layout = Layout::from_doc(replica, &self.map.base);
-        self.set_layout(layout);
+        let held = self.map.layout.clone();
+        self.set_layout(Layout::from_doc(replica, &self.map.base));
         let m = &mut *self.map;
-        m.applied_ops = replica.ops_len();
         m.index.clear();
         m.recent.clear();
         m.vol.follow(replica);
         let source: Arc<dyn gridcraft_calc::VolatileSource> = m.vol.clone();
-        let fresh = build(&m.base, replica, Some(source)).map_err(|e| e.to_string())?;
+        let fresh = match build(&m.base, replica, Some(source)) {
+            Ok(wb) => wb,
+            Err(e) => {
+                self.set_layout(held);
+                return Err(e.to_string());
+            }
+        };
         // A late joiner learns of a random function only through the state it was given.
-        m.has_random |= crate::local::has_random(&fresh);
-        let cur = self.current().ok_or_else(|| EngineError::NoDocument.to_string())?;
-        self.install(Arc::new(keep_view(fresh, &cur)))
+        self.map.has_random |= crate::local::has_random(&fresh);
+        let Some(cur) = self.current() else {
+            self.set_layout(held);
+            return Err(EngineError::NoDocument.to_string());
+        };
+        let out = self.install(Arc::new(keep_view(fresh, &cur)));
+        if self.map.restore.is_some() {
+            // An undo group is open: the engine still shows what it showed, so the layout stays
+            // what the engine's is until `retry` installs the rebuilt workbook.
+            self.set_layout(held);
+        } else {
+            self.map.applied_ops = replica.ops_len();
+        }
+        out
     }
 
     fn reset(&mut self, space: u32) {
@@ -876,18 +931,13 @@ impl LiveApp<Grid> for GridApp<'_> {
         m.unresolved.clear();
         m.index.clear();
         // A reset mid-session (a fenced run taken back, or the room's checkpoint replacing the
-        // replica) drops every local edit that was not ordered: none of them is a step to undo.
+        // replica) drops the commands not taken yet: the link has taken their edits back too.
+        // `removed` stays: those are other peers' deletes, still true. The undo log clears on a
+        // change of `resets`.
         m.sent.clear();
-        m.removed.clear();
+        m.resets = m.resets.saturating_add(1);
         // The undo steps name keys and ops of the replica that was replaced: none can be trusted.
-        if !m.undo.is_empty() || !m.replays.is_empty() || m.replay.is_some() || !m.held.is_empty() || m.replay_busy {
-            m.notices.push(undo::UNDO_RESET_TEXT.to_owned());
-        }
-        m.undo = UndoLog::default();
-        m.replays.clear();
-        m.replay = None;
-        m.held.clear();
-        m.replay_busy = false;
+        m.clear_undo_for_resets();
     }
 
     fn set_space(&mut self, space: u32) {

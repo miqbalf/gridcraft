@@ -25,7 +25,8 @@ use crate::kind::{Grid, GridEdit, GridPos};
 use crate::layout::Layout;
 use crate::local::has_random;
 use crate::ordered::{
-    BUSY_TEXT, LOCK_LOST_BROKEN_TEXT, LOCK_LOST_TEXT, LOCK_LOST_UNRUN_TEXT, Pending, SCOPE, Tracked, request, resolve, send_actions,
+    BUSY_TEXT, LOCK_LOST_BROKEN_TEXT, LOCK_LOST_KEPT_TEXT, LOCK_LOST_LINK_TEXT, LOCK_LOST_TEXT, LOCK_LOST_UNRUN_LINK_TEXT, LOCK_LOST_UNRUN_TEXT,
+    Pending, SCOPE, TAKEN_BACK_TEXT, Tracked, request, resolve, send_actions,
 };
 use crate::remote::build;
 use crate::styles::{StyleHash, fnv1a64};
@@ -106,6 +107,15 @@ pub struct GridLive<H: Hub> {
     /// How many join answers the hub has seen, and how many of them were told.
     joins: Arc<AtomicU64>,
     seen_joins: u64,
+    /// Whether the link rejoined since the current run started.
+    rejoined_in_run: bool,
+    /// `map.resets` when the current run started, and when the notices last looked.
+    run_resets: u32,
+    /// The run was already dropped and told (the rejoin before it ran): nothing more to say.
+    run_told: bool,
+    /// A lost lock waiting to be told once the run has settled: `resets` when the run began, and
+    /// whether the link rejoined during it.
+    lost_pending: Option<(u32, bool)>,
     /// The clock the lock's wait runs on (shared with the link's own).
     clock: Option<SharedClock>,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -202,6 +212,8 @@ impl<H: Hub> GridLive<H> {
             recent: std::collections::BTreeMap::new(),
             lines_minted: 0,
             removed: Vec::new(),
+            resets: 0,
+            undo_resets: 0,
             sent: Vec::new(),
             group: 0,
             undo: crate::undo::UndoLog::default(),
@@ -224,6 +236,10 @@ impl<H: Hub> GridLive<H> {
             deferred: None,
             joins,
             seen_joins: 0,
+            rejoined_in_run: false,
+            run_resets: 0,
+            run_told: false,
+            lost_pending: None,
             clock: None,
             started: None,
             frames: 0,
@@ -285,6 +301,9 @@ impl<H: Hub> GridLive<H> {
     /// One frame: retries what an open undo group held back, shares the local edits, takes in
     /// the other editors' edits and carets, and says who else is here.
     pub fn pump(&mut self, session: &mut Session) -> Vec<Peer> {
+        // A reset the app's hook did not see: nothing of the old undo state may run on the new sheet.
+        // Today only the test hook moves the count without the hook: a guard, not a real path.
+        self.map.clear_undo_for_resets();
         if self.core.live().unconfirmed_edits() == 0 {
             // Everything this window wrote has been ordered: no delete can have missed it.
             self.map.recent.clear();
@@ -312,6 +331,9 @@ impl<H: Hub> GridLive<H> {
     }
 
     fn after_pump(&mut self, session: &Session) {
+        // A reset the app's hook did not see still moved the count: the undo state clears here.
+        // Today only the test hook moves the count without the hook: a guard, not a real path.
+        self.map.clear_undo_for_resets();
         if self.core.live().doc().is_some_and(GridDoc::needs_resync) && !self.broken_told {
             // craft-live gives no way to replace a replica in place, and a full state must never
             // be applied onto the stuck one: end the link, and the reopened file builds a new one.
@@ -390,12 +412,22 @@ impl<H: Hub> GridLive<H> {
         }
     }
 
-    /// An ordered undo or redo that never ran (nothing was written) goes back on its stack.
+    /// An ordered undo or redo that never ran (nothing was written) goes back on its stack,
+    /// unless the sheet was reloaded since it was taken off: then the history it belonged to was
+    /// cleared (and the user told), so it is dropped.
     fn replay_unrun(&mut self, p: &Pending) {
         if let Some(r) = &p.undo {
-            self.map.undo.put_back(r.step.clone(), r.redo);
+            if !self.replay_stale(r) {
+                self.map.undo.put_back(r.step.clone(), r.redo);
+            }
             self.replay_over();
         }
+    }
+
+    /// The replay was taken off its stack before the last reset: its keys and ops belong to the
+    /// replaced replica.
+    fn replay_stale(&self, r: &crate::undo::Replay) -> bool {
+        r.resets != self.map.resets
     }
 
     /// "Alice changed these rows since; not undone" when a later op by someone else touched the
@@ -420,6 +452,8 @@ impl<H: Hub> GridLive<H> {
     /// # Errors
     /// The refusal, or the command's own error, as text for the user.
     pub fn run(&mut self, session: &mut Session, id: &str, params: Json) -> Result<Ran, String> {
+        // A reset the app's hook did not see: a stale undo must not run on the rebuilt sheet.
+        self.map.clear_undo_for_resets();
         match class(id) {
             Class::Local => {
                 self.activate(session)?;
@@ -519,18 +553,30 @@ impl<H: Hub> GridLive<H> {
             if self.seen_joins > 0 {
                 let actions = self.ordered.rejoined(now);
                 self.send(&actions);
+                self.rejoined_in_run = true;
+                // The relay gave the lock back with the old link, so a run that has not started
+                // would be refused: it is dropped here, and `finish` gives the grant back.
+                if let Some(p) = self.deferred.take() {
+                    self.replay_unrun(&p);
+                    self.run_told = true;
+                    self.map.notices.push(LOCK_LOST_UNRUN_LINK_TEXT.to_owned());
+                }
             }
             self.seen_joins = joins;
         }
-        // The queue's own state stays the judge, deferred edit or not: a rejoin while the edit
-        // waits for an open undo group ends as `LockLost`, never as a run without the lock.
-        let polled = match self.ordered.poll(self.core.newest_seq(), now) {
+        let polled = self.ordered.poll(self.core.newest_seq(), now);
+        let polled = match polled {
             Polled::Nothing => self.deferred.take().map_or(Polled::Nothing, Polled::Run),
             other => other,
         };
         match polled {
             Polled::Nothing => {}
-            Polled::Run(p) => self.run_pending(session, p),
+            Polled::Run(p) => {
+                self.rejoined_in_run = false;
+                self.run_told = false;
+                self.run_resets = self.map.resets;
+                self.run_pending(session, p);
+            }
             Polled::GaveUp { holder, item } => {
                 self.replay_unrun(&item);
                 let who = self.holder_name(&holder);
@@ -538,18 +584,43 @@ impl<H: Hub> GridLive<H> {
             }
             Polled::LockLost { .. } => {
                 if let Some(p) = self.deferred.take() {
-                    // It never ran: nothing was changed or shared.
+                    // It never ran, but free edits made while it waited were under the lock too.
                     self.replay_unrun(&p);
-                    self.map.notices.push(LOCK_LOST_UNRUN_TEXT.to_owned());
+                    if !self.run_told {
+                        let text = if self.rejoined_in_run { LOCK_LOST_UNRUN_LINK_TEXT } else { LOCK_LOST_UNRUN_TEXT };
+                        self.map.notices.push(text.to_owned());
+                    }
                 } else if matches!(self.core.status(), LiveStatus::Broken(_)) {
                     // The replica broke: the relay never answered for the edit.
-                    self.map.notices.push(LOCK_LOST_BROKEN_TEXT.to_owned());
+                    if !self.run_told {
+                        self.map.notices.push(LOCK_LOST_BROKEN_TEXT.to_owned());
+                    }
                 } else {
-                    // The relay refused the edit (another editor held the lock by then). The link
-                    // has taken it out of the replica and `LiveApp::reset` and `resync` have put
-                    // the engine back at the room's state: only the user needs telling.
-                    self.map.notices.push(LOCK_LOST_TEXT.to_owned());
+                    // Whether the edit was kept or taken back is only known once the run has
+                    // settled (the relay's answer to its last submit): told below, once.
+                    self.lost_pending = Some((self.run_resets, self.rejoined_in_run));
                 }
+            }
+        }
+        if let Some((resets, rejoined)) = self.lost_pending {
+            let moved = self.map.resets != resets;
+            if self.run_told {
+                // A dropped edit was told when it was dropped; edits typed meanwhile that were
+                // taken back were warned of there.
+                self.lost_pending = None;
+            } else if moved || self.core.local_settled() {
+                self.lost_pending = None;
+                let text = if !moved {
+                    // Nothing was taken back: the lock report came after the edits were ordered.
+                    LOCK_LOST_KEPT_TEXT
+                } else if rejoined {
+                    LOCK_LOST_LINK_TEXT
+                } else {
+                    // The relay refused the edit; the link took it out of the replica, and
+                    // `LiveApp::reset` and `resync` put the engine back at the room's state.
+                    LOCK_LOST_TEXT
+                };
+                self.map.notices.push(text.to_owned());
             }
         }
         if self.deferred.is_none() {
@@ -577,8 +648,8 @@ impl<H: Hub> GridLive<H> {
             self.replay_unrun(&p);
             return;
         }
-        if !self.map.pending.is_empty() || self.map.restore.is_some() {
-            // The engine has not applied everything the room holds (an undo group is open).
+        if !self.map.pending.is_empty() || self.map.restore.is_some() || session.in_group(self.map.doc) {
+            // The engine has not applied everything the room holds, or an undo group is open.
             self.deferred = Some(p);
             return;
         }
@@ -588,6 +659,11 @@ impl<H: Hub> GridLive<H> {
             return;
         }
         if let Some(r) = &p.undo {
+            if self.replay_stale(r) {
+                // The sheet was reloaded while it waited: the history was cleared, so it never runs.
+                self.replay_over();
+                return;
+            }
             // Checked again now the lock is held: an op may have come in while it waited.
             if let Some(text) = self.replay_refusal(r) {
                 self.map.notices.push(text);
@@ -676,13 +752,46 @@ impl<H: Hub> GridLive<H> {
         for n in std::mem::take(&mut self.map.notices) {
             self.core.push_notice(n);
         }
-        // The link words a refused run in terms of its scope; the lock-lost notice above says it
-        // for a user, so the two do not both reach the screen.
         let mut notices = self.core.take_notices();
-        if notices.iter().any(|n| n == LOCK_LOST_TEXT) {
-            notices.retain(|n| !n.starts_with("another editor took "));
+        // An ordered run taken back: the link words it in terms of its scope (it names `SCOPE`);
+        // this crate says it for a user, once, in `drive_ordered`. When nothing of ours explains
+        // it (a lock lost while still waiting), say that edits were taken back.
+        let before = notices.len();
+        notices.retain(|n| !n.contains(SCOPE));
+        if notices.len() < before && self.lost_pending.is_none() && !self.run_told {
+            let told = notices.iter().any(|n| {
+                [LOCK_LOST_TEXT, LOCK_LOST_LINK_TEXT, LOCK_LOST_BROKEN_TEXT, LOCK_LOST_UNRUN_TEXT, LOCK_LOST_UNRUN_LINK_TEXT, TAKEN_BACK_TEXT]
+                    .contains(&n.as_str())
+            });
+            if !told {
+                notices.push(TAKEN_BACK_TEXT.to_owned());
+            }
         }
         notices
+    }
+
+    /// Moves the reset count without the app's reset hook, as a rebuild the hook does not see
+    /// would. For tests only.
+    #[cfg(any(test, feature = "test-util"))]
+    #[doc(hidden)]
+    pub fn count_reset_without_hook(&mut self) {
+        self.map.resets = self.map.resets.saturating_add(1);
+    }
+
+    /// Notes a line another peer deleted under this window's entry, as a remote delete does, for
+    /// the next frame to tell. For tests only.
+    #[cfg(any(test, feature = "test-util"))]
+    #[doc(hidden)]
+    pub fn note_removed(&mut self, by: &str, cell: &str, value: &str, row: bool) {
+        self.map.removed.push((by.to_owned(), cell.to_owned(), value.to_owned(), if row { "row" } else { "column" }));
+    }
+
+    /// How many times the replica was replaced under this window (a refused run taken back, the
+    /// room's checkpoint). The undo log must clear its steps when this changes: every local edit
+    /// that was not ordered is out of the document.
+    #[must_use]
+    pub fn resets(&self) -> u32 {
+        self.map.resets
     }
 
     /// Whether the host may take an edit now.
