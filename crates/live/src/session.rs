@@ -213,6 +213,7 @@ impl<H: Hub> GridLive<H> {
             lines_minted: 0,
             removed: Vec::new(),
             resets: 0,
+            undo_resets: 0,
             sent: Vec::new(),
             group: 0,
             undo: crate::undo::UndoLog::default(),
@@ -300,6 +301,8 @@ impl<H: Hub> GridLive<H> {
     /// One frame: retries what an open undo group held back, shares the local edits, takes in
     /// the other editors' edits and carets, and says who else is here.
     pub fn pump(&mut self, session: &mut Session) -> Vec<Peer> {
+        // A reset the app's hook did not see: nothing of the old undo state may run on the new sheet.
+        self.map.clear_undo_for_resets();
         if self.core.live().unconfirmed_edits() == 0 {
             // Everything this window wrote has been ordered: no delete can have missed it.
             self.map.recent.clear();
@@ -327,6 +330,8 @@ impl<H: Hub> GridLive<H> {
     }
 
     fn after_pump(&mut self, session: &Session) {
+        // A reset the app's hook did not see still moved the count: the undo state clears here.
+        self.map.clear_undo_for_resets();
         if self.core.live().doc().is_some_and(GridDoc::needs_resync) && !self.broken_told {
             // craft-live gives no way to replace a replica in place, and a full state must never
             // be applied onto the stuck one: end the link, and the reopened file builds a new one.
@@ -435,6 +440,8 @@ impl<H: Hub> GridLive<H> {
     /// # Errors
     /// The refusal, or the command's own error, as text for the user.
     pub fn run(&mut self, session: &mut Session, id: &str, params: Json) -> Result<Ran, String> {
+        // A reset the app's hook did not see: a stale undo must not run on the rebuilt sheet.
+        self.map.clear_undo_for_resets();
         match class(id) {
             Class::Local => {
                 self.activate(session)?;
@@ -744,6 +751,14 @@ impl<H: Hub> GridLive<H> {
             }
         }
         notices
+    }
+
+    /// Moves the reset count without the app's reset hook, as a rebuild the hook does not see
+    /// would. For tests only.
+    #[cfg(any(test, feature = "test-util"))]
+    #[doc(hidden)]
+    pub fn count_reset_without_hook(&mut self) {
+        self.map.resets = self.map.resets.saturating_add(1);
     }
 
     /// How many times the replica was replaced under this window (a refused run taken back, the

@@ -104,6 +104,38 @@ pub(crate) struct Mapping {
     /// How many times the replica was replaced under a running window (a refused run taken back,
     /// the room's checkpoint). The undo log clears on a change of this count.
     pub resets: u32,
+    /// The `resets` count the undo state was last cleared for: it clears once per count.
+    pub undo_resets: u32,
+}
+
+impl Mapping {
+    /// Clears the undo state (steps, queued and running ordered undos, held undos, skipped-key
+    /// notes, landed changes) once per `resets` count, and tells the user once if anything was
+    /// cleared. The reset hook and the session's frame both call it: the second finds the count
+    /// already seen and does nothing.
+    pub(crate) fn clear_undo_for_resets(&mut self) {
+        if self.undo_resets == self.resets {
+            return;
+        }
+        self.undo_resets = self.resets;
+        let had = !self.undo.is_empty()
+            || !self.replays.is_empty()
+            || self.replay.is_some()
+            || !self.held.is_empty()
+            || self.replay_busy
+            || !self.undo_skipped.is_empty()
+            || !self.landing.is_empty();
+        if had {
+            self.notices.push(undo::UNDO_RESET_TEXT.to_owned());
+        }
+        self.undo = UndoLog::default();
+        self.replays.clear();
+        self.replay = None;
+        self.held.clear();
+        self.replay_busy = false;
+        self.undo_skipped.clear();
+        self.landing.clear();
+    }
 }
 
 /// One command as it went out: its group (shared by all its updates, see
@@ -903,14 +935,7 @@ impl LiveApp<Grid> for GridApp<'_> {
         m.sent.clear();
         m.resets = m.resets.saturating_add(1);
         // The undo steps name keys and ops of the replica that was replaced: none can be trusted.
-        if !m.undo.is_empty() || !m.replays.is_empty() || m.replay.is_some() || !m.held.is_empty() || m.replay_busy {
-            m.notices.push(undo::UNDO_RESET_TEXT.to_owned());
-        }
-        m.undo = UndoLog::default();
-        m.replays.clear();
-        m.replay = None;
-        m.held.clear();
-        m.replay_busy = false;
+        m.clear_undo_for_resets();
     }
 
     fn set_space(&mut self, space: u32) {

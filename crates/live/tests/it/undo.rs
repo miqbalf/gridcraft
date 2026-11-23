@@ -363,6 +363,77 @@ fn a_replaced_replica_clears_the_undo_history() {
     same_everywhere(&room, "after the swap");
 }
 
+fn told_cleared(room: &Room, i: usize) -> usize {
+    room.notices_of(i).iter().filter(|n| n.contains("Your undo history was cleared")).count()
+}
+
+#[test]
+fn a_reset_seen_only_through_the_count_clears_undo_and_tells_once() {
+    let mut room = Room::new(2);
+    room.run(0, "cell.set", json!({"cell": "B2", "input": "100"})).unwrap();
+    room.settle();
+    let before = room.finger(0);
+    room.peers[0].live.count_reset_without_hook();
+    room.settle();
+    assert_eq!(told_cleared(&room, 0), 1, "told once: {:?}", room.notices_of(0));
+    room.settle();
+    assert_eq!(told_cleared(&room, 0), 1, "not told again: {:?}", room.notices_of(0));
+    undo(&mut room, 0);
+    assert_eq!(room.finger(0), before, "nothing was left to undo");
+    same_everywhere(&room, "after the count moved");
+}
+
+#[test]
+fn a_reset_with_nothing_to_clear_stays_quiet() {
+    let mut room = Room::new(2);
+    room.peers[0].live.count_reset_without_hook();
+    room.settle();
+    assert_eq!(told_cleared(&room, 0), 0, "{:?}", room.notices_of(0));
+    // The hook's own path, with an empty history, is quiet too.
+    let state = room.replica_state(0);
+    let p = &mut room.peers[0];
+    p.live.apply_checkpoint(&mut p.session, &state).unwrap();
+    room.settle();
+    assert_eq!(told_cleared(&room, 0), 0, "{:?}", room.notices_of(0));
+}
+
+#[test]
+fn both_signals_for_one_reset_tell_once_and_a_later_reset_tells_again() {
+    let mut room = Room::new(2);
+    room.run(0, "cell.set", json!({"cell": "B2", "input": "100"})).unwrap();
+    room.settle();
+    let state = room.replica_state(0);
+    let p = &mut room.peers[0];
+    p.live.apply_checkpoint(&mut p.session, &state).unwrap();
+    room.settle();
+    room.settle();
+    assert_eq!(told_cleared(&room, 0), 1, "{:?}", room.notices_of(0));
+    // A new step, then a second reset: told again, once.
+    room.run(0, "cell.set", json!({"cell": "C3", "input": "7"})).unwrap();
+    room.settle();
+    room.peers[0].live.count_reset_without_hook();
+    room.settle();
+    assert_eq!(told_cleared(&room, 0), 2, "{:?}", room.notices_of(0));
+}
+
+#[test]
+fn undo_after_a_reset_never_applies_a_stale_group_to_the_rebuilt_sheet() {
+    let mut room = Room::new(2);
+    room.run(0, "home.insertRows", json!({"rows": "3:3"})).unwrap();
+    room.run(0, "cell.set", json!({"cell": "D4", "input": "1"})).unwrap();
+    room.settle();
+    let before = room.finger(0);
+    room.peers[0].live.count_reset_without_hook();
+    // Undo asked at once, before any frame: the stale steps must not run.
+    room.run(0, "edit.undo", json!({})).unwrap();
+    room.run(0, "edit.undo", json!({})).unwrap();
+    room.settle();
+    for i in 0..2 {
+        assert_eq!(room.finger(i), before, "peer {i}: no stale step ran");
+    }
+    same_everywhere(&room, "after a stale undo");
+}
+
 #[test]
 fn an_ordered_undo_that_gave_up_can_be_asked_again() {
     let mut room = Room::new(2);
