@@ -21,6 +21,9 @@ pub struct SpyHub {
     pub sizes: Rc<RefCell<Vec<usize>>>,
     /// For every submit, whether it carried a fence.
     pub fenced: Rc<RefCell<Vec<bool>>>,
+    /// While set, the relay's error answers (a refused submit) are held back.
+    pub hold_errors: Rc<RefCell<bool>>,
+    held: Vec<ServerMsg>,
     /// How many lock requests this hub sent.
     pub locks: Rc<RefCell<usize>>,
 }
@@ -44,7 +47,15 @@ impl Hub for SpyHub {
         self.inner.send(msg)
     }
     fn poll(&mut self) -> Vec<ServerMsg> {
-        self.inner.poll()
+        let mut now = self.inner.poll();
+        if *self.hold_errors.borrow() {
+            let (errors, rest): (Vec<_>, Vec<_>) = now.into_iter().partition(|m| matches!(m, ServerMsg::Error { .. }));
+            self.held.extend(errors);
+            return rest;
+        }
+        let mut out = std::mem::take(&mut self.held);
+        out.append(&mut now);
+        out
     }
     fn connected(&self) -> bool {
         self.inner.connected()
@@ -59,6 +70,7 @@ pub struct Peer {
     pub live: GridLive<SpyHub>,
     pub sizes: Rc<RefCell<Vec<usize>>>,
     pub fenced: Rc<RefCell<Vec<bool>>>,
+    pub hold_errors: Rc<RefCell<bool>>,
     pub locks: Rc<RefCell<usize>>,
     pub notices: Vec<String>,
 }
@@ -118,15 +130,23 @@ impl Room {
         let hub = self.relay.connect(&uid, name, access == Access::Edit);
         let sizes = Rc::new(RefCell::new(Vec::new()));
         let fenced = Rc::new(RefCell::new(Vec::new()));
+        let hold_errors = Rc::new(RefCell::new(false));
         let locks = Rc::new(RefCell::new(0));
-        let hub = SpyHub { inner: hub, sizes: sizes.clone(), fenced: fenced.clone(), locks: locks.clone() };
+        let hub = SpyHub {
+            inner: hub,
+            sizes: sizes.clone(),
+            fenced: fenced.clone(),
+            hold_errors: hold_errors.clone(),
+            held: Vec::new(),
+            locks: locks.clone(),
+        };
         let mut session = Session::new();
         let base = BaseFile { bytes: &self.bytes, name: FILE, expected_sha256: None };
         let live = match hash {
             Some(h) => GridLive::start_with(hub, ROOM, &base, access, &uid, &mut session, h),
             None => GridLive::start(hub, ROOM, &base, access, &uid, &mut session),
         };
-        self.peers.push(Peer { session, live: live.unwrap(), sizes, fenced, locks, notices: Vec::new() });
+        self.peers.push(Peer { session, live: live.unwrap(), sizes, fenced, hold_errors, locks, notices: Vec::new() });
         self.peers.len() - 1
     }
 
