@@ -124,6 +124,34 @@ fn an_inserted_line_takes_no_size_from_a_neighbour_its_author_had_not_sized() {
 }
 
 #[test]
+fn an_insert_next_to_a_deleted_range_end_agrees_with_the_document() {
+    // Bob types a sum over rows 2-6 before he hears that Alice deleted row 2, so the document's
+    // formula names a deleted row: it reads as A2:A5. Then a row is inserted at row 2, right
+    // where the deleted row was, by Bob or by Alice (who gets Bob's formula with her lock).
+    // The receiver side (a formula that reached the room before an insert whose author had not
+    // seen it) is covered by the convergence traces.
+    for bob_inserts in [true, false] {
+        let mut room = Room::new(2);
+        room.run(0, "home.deleteRows", json!({"rows": "2:2"})).unwrap();
+        for _ in 0..4 {
+            room.pump(0);
+        }
+        room.run(1, "cell.set", json!({"cell": "E1", "input": "=SUM(A2:A6)"})).unwrap();
+        if bob_inserts {
+            room.settle();
+            room.run(1, "home.insertRows", json!({"rows": "2:2"})).unwrap();
+        } else {
+            room.run(0, "home.insertRows", json!({"rows": "2:2"})).unwrap();
+            for _ in 0..4 {
+                room.pump(0);
+            }
+        }
+        room.settle();
+        same_everywhere(&room, &format!("insert at a deleted range top, bob_inserts={bob_inserts}"));
+    }
+}
+
+#[test]
 fn receiver_engine_equals_rebuild_from_state_after_each_op() {
     let mut total_ops = 0u32;
     for seed in seeds() {
