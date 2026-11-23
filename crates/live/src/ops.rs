@@ -265,7 +265,8 @@ impl Author<'_> {
     }
 
     /// The steps of every insert and delete in `r`, in order, and the plan entries that go
-    /// with them: the size the new lines inherited, and the ranges a delete shrank.
+    /// with them: the ranges a delete (or an insert next to a deleted line) shrank. What the new
+    /// lines took from the line before them is the planner's (`Planner::inserted`).
     pub(crate) fn report(&mut self, r: &gridcraft_engine::EditReport) -> Result<(), craft_live::LocalError> {
         let refuse = || craft_live::LocalError::Refused(crate::gate::NOT_YET_TEXT.to_owned());
         for (i, e) in &r.edits {
@@ -291,32 +292,6 @@ impl Author<'_> {
                     let op_id = self.mint().0;
                     self.steps.push(Step::Insert { sheet, axis: *axis, ins, ids: ids.clone() });
                     self.steps.push(Step::Op(Op::Insert { id: op_id, by: self.uid.to_owned(), sheet, axis: *axis, prev, ids: ids.clone() }));
-                    // The lines took the size of the line before them: that is part of the state.
-                    if let Some(after) = r.after.sheet(i) {
-                        for (n, id) in ids.iter().enumerate() {
-                            let Some(p) = u32::try_from(n).ok().and_then(|n| at.checked_add(n)) else { continue };
-                            let info = crate::remote::line_at(after, *axis, p);
-                            let part = crate::remote::size_part(*axis);
-                            if let Some(size) = info.size
-                                && let Some(num) = serde_json::Number::from_f64(f64::from(size))
-                            {
-                                self.plan.line(
-                                    sheet,
-                                    *axis,
-                                    crate::remote::line_key(*id, part),
-                                    crate::split::Put::Set(serde_json::Value::Number(num)),
-                                );
-                            }
-                            if *axis == AxisKind::Rows && info.custom {
-                                self.plan.line(
-                                    sheet,
-                                    *axis,
-                                    crate::remote::line_key(*id, "hc"),
-                                    crate::split::Put::Set(serde_json::Value::Bool(true)),
-                                );
-                            }
-                        }
-                    }
                 }
                 Edit::Delete { axis, at, count } => {
                     if *count as usize > LINES_MAX {

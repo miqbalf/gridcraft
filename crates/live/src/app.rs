@@ -12,6 +12,7 @@ use serde_json::Value;
 
 use crate::doc::{CellContent, Entry, GridChange, GridDoc};
 use crate::ids::{Id, parse_cell_key};
+use crate::axis::AxisKind;
 use crate::kind::{Grid, GridCaret, GridEdit};
 use crate::layout::Layout;
 use crate::local::Planner;
@@ -264,6 +265,7 @@ impl GridApp<'_> {
         for e in edits {
             match e {
                 GridEdit::Command(r) if r.doc == m.doc => {
+                    let mut inserted = Vec::new();
                     let replay = if r.edits.is_empty() {
                         None
                     } else {
@@ -271,7 +273,8 @@ impl GridApp<'_> {
                             return Err(LocalError::Refused(crate::gate::NOT_YET_TEXT.to_owned()));
                         }
                         ordered = true;
-                        let wb = replay_before(&r.before, &r.edits).ok_or_else(|| LocalError::Refused(crate::gate::NOT_YET_TEXT.to_owned()))?;
+                        let mut wb = replay_before(&r.before, &r.edits).ok_or_else(|| LocalError::Refused(crate::gate::NOT_YET_TEXT.to_owned()))?;
+                        let from = steps.len();
                         let mut author = Author {
                             base: &m.base,
                             replica,
@@ -284,6 +287,15 @@ impl GridApp<'_> {
                             plan: &mut plan,
                         };
                         author.report(r)?;
+                        // The new lines took the format of the line before them, in the replay
+                        // too, so the planner would see nothing to write: they start blank there
+                        // instead, and every part they took (size, set by hand, style) is written.
+                        inserted = new_lines(&layout, steps.get(from..).unwrap_or_default());
+                        for (i, axis, p) in &inserted {
+                            if let Some(sh) = wb.sheet_mut(*i) {
+                                if *axis == AxisKind::Rows { sh.rows.remove(p) } else { sh.cols.remove(p) };
+                            }
+                        }
                         Some(wb)
                     };
                     let mut planner = Planner {
@@ -298,6 +310,7 @@ impl GridApp<'_> {
                         resync: false,
                         random: false,
                         before: replay.as_ref(),
+                        inserted: &inserted,
                     };
                     planner.report(r, &mut plan)?;
                     random |= planner.random;
@@ -966,6 +979,22 @@ impl LiveApp<Grid> for GridApp<'_> {
             crate::presence::resolve_at(&self.map.layout, self.map.layout_rev, c);
         }
     }
+}
+
+/// Where the lines that `steps` inserted are shown in `layout`: (sheet index, axis, position).
+fn new_lines(layout: &Layout, steps: &[Step]) -> Vec<(usize, AxisKind, u32)> {
+    let mut out = Vec::new();
+    for s in steps {
+        let Step::Insert { sheet, axis, ids, .. } = s else { continue };
+        let Some(i) = layout.sheet_index(*sheet) else { continue };
+        let Some(sl) = layout.sheets.get(i) else { continue };
+        for id in ids {
+            if let gridcraft_formula::ids::Lookup::At(p) = sl.axis(*axis).pos_of(*id) {
+                out.push((i, *axis, p));
+            }
+        }
+    }
+    out
 }
 
 /// Notes the entries this peer typed that a delete by `by` took away (it had not seen them).

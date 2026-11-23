@@ -526,6 +526,7 @@ fn a_row_the_engine_fits_by_itself_is_not_a_line_edit() {
     let (b, a) = (r.before.sheets[0].rows.get(&29).and_then(|l| l.size), r.after.sheets[0].rows.get(&29).and_then(|l| l.size));
     assert_ne!(b, a, "the row grew to fit the wrapped text");
     assert!(r.lines.is_empty(), "every peer fits its own rows: {:?}", r.lines);
+    assert!(r.fitted.contains(&(0, 29)), "the fitted row is named apart: {:?}", r.fitted);
     assert!(r.cells.contains(&(0, at("B30"))));
 }
 

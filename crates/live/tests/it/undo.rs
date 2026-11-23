@@ -95,6 +95,24 @@ fn undo_skips_a_key_someone_changed_since_and_says_who() {
 }
 
 #[test]
+fn a_height_left_by_a_partial_undo_follows_a_later_fit_everywhere() {
+    // Alice sets row 5 to 30, Bob then to 40. Alice's undo leaves Bob's size and takes back the
+    // "set by hand" flag: row 5 is 40 high but fitted to its content from now on. A later fill
+    // that writes row 5 without changing a cell makes Alice's engine fit the row; the fitted
+    // height must reach the room as well.
+    let mut room = Room::new(2);
+    room.run(0, "home.rowHeight", json!({"rows": "5:5", "height": 30})).unwrap();
+    room.settle();
+    room.run(1, "home.rowHeight", json!({"rows": "5:5", "height": 40})).unwrap();
+    room.settle();
+    undo(&mut room, 0);
+    same_everywhere(&room, "after the partial undo");
+    room.run(0, "edit.fillDown", json!({"range": "E4:E5"})).unwrap();
+    room.settle();
+    same_everywhere(&room, "after the fill");
+}
+
+#[test]
 fn undo_of_insert_deletes_my_rows_on_every_peer() {
     let mut room = Room::new(2);
     let base = room.finger(0);

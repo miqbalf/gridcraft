@@ -41,6 +41,9 @@ pub(crate) struct Planner<'a> {
     pub random: bool,
     /// The report's `before` with its structural edits replayed (set for an ordered edit).
     pub before: Option<&'a Workbook>,
+    /// The lines the edit inserted (sheet index, axis, position): blank in `before`, so what
+    /// they took from the line before them is written.
+    pub inserted: &'a [(usize, AxisKind, u32)],
 }
 
 fn refused<T>() -> Result<T, LocalError> {
@@ -65,6 +68,10 @@ impl Planner<'_> {
         // Rows the engine fitted to their content by itself are not reported as edits, but peers
         // do not fit rows, so the fitted height travels.
         lines.extend(r.cells.iter().map(|(s, c)| (*s, 0, c.row)));
+        // A row can be fitted again by a command that wrote it without changing a cell (a fill
+        // of what was there): its height changed all the same, and travels too.
+        lines.extend(r.fitted.iter().map(|(s, row)| (*s, 0, *row)));
+        lines.extend(self.inserted.iter().map(|(s, a, p)| (*s, u8::from(*a == AxisKind::Cols), *p)));
         for (sheet, cols, idx) in lines {
             let axis = if cols == 1 { AxisKind::Cols } else { AxisKind::Rows };
             self.line(r, sheet, axis, idx, plan)?;

@@ -35,6 +35,10 @@ pub struct EditReport {
     pub cells: Vec<(usize, CellRef)>,
     /// Rows/columns whose [`LineInfo`] differs (after replay).
     pub lines: Vec<(usize, Axis, u32)>,
+    /// Rows whose height the engine fitted to their content by itself (not edits, so not in
+    /// `lines`), by sheet index. A live mapping may still share the height it measured: a peer
+    /// that does not fit the row would otherwise keep the old one.
+    pub fitted: Vec<(usize, u32)>,
     /// Sheets whose shared properties (default width/height) changed.
     pub sheet_props: Vec<usize>,
     /// Everything else that differs: not shared in M1 (the safety net, H8).
@@ -44,7 +48,12 @@ pub struct EditReport {
 impl EditReport {
     /// Whether the report names no change at all.
     pub fn is_empty(&self) -> bool {
-        self.edits.is_empty() && self.cells.is_empty() && self.lines.is_empty() && self.sheet_props.is_empty() && self.unshared.is_empty()
+        self.edits.is_empty()
+            && self.cells.is_empty()
+            && self.lines.is_empty()
+            && self.fitted.is_empty()
+            && self.sheet_props.is_empty()
+            && self.unshared.is_empty()
     }
 }
 
@@ -196,6 +205,7 @@ fn diff(doc: u64, command: &str, params: &Json, before: Arc<Workbook>, after: Ar
         edits: Vec::new(),
         cells: Vec::new(),
         lines: Vec::new(),
+        fitted: Vec::new(),
         sheet_props: Vec::new(),
         unshared: Vec::new(),
     };
@@ -293,8 +303,8 @@ fn push_once(v: &mut Vec<Unshared>, u: Unshared) {
 }
 
 /// `fit`: a row height the engine measured by itself (the row is not set by hand) is not an edit:
-/// every peer fits its own rows, with its own fonts.
-fn lines_diff(i: usize, axis: Axis, fit: bool, b: &BTreeMap<u32, LineInfo>, a: &BTreeMap<u32, LineInfo>, out: &mut Vec<(usize, Axis, u32)>) {
+/// every peer fits its own rows, with its own fonts. Such rows go to `fitted` instead.
+fn lines_diff(i: usize, axis: Axis, fit: bool, b: &BTreeMap<u32, LineInfo>, a: &BTreeMap<u32, LineInfo>, r: &mut EditReport) {
     let mut keys: Vec<u32> = b.keys().chain(a.keys()).copied().collect();
     keys.sort_unstable();
     keys.dedup();
@@ -305,8 +315,10 @@ fn lines_diff(i: usize, axis: Axis, fit: bool, b: &BTreeMap<u32, LineInfo>, a: &
             continue;
         }
         let measured = fit && axis == Axis::Rows && !x.custom && !y.custom && LineInfo { size: None, ..*x } == LineInfo { size: None, ..*y };
-        if !measured {
-            out.push((i, axis, k));
+        if measured {
+            r.fitted.push((i, k));
+        } else {
+            r.lines.push((i, axis, k));
         }
     }
 }
@@ -319,8 +331,8 @@ fn sheet_diff(i: usize, b: &Sheet, a: &Sheet, command: &str, r: &mut EditReport)
     r.cells.extend(cells.into_iter().map(|c| (i, c)));
     // Heights follow content on every peer; only an explicit AutoFit command is an edit.
     let fit = command != "home.autofitRowHeight";
-    lines_diff(i, Axis::Rows, fit, &b.rows, &a.rows, &mut r.lines);
-    lines_diff(i, Axis::Cols, false, &b.cols, &a.cols, &mut r.lines);
+    lines_diff(i, Axis::Rows, fit, &b.rows, &a.rows, r);
+    lines_diff(i, Axis::Cols, false, &b.cols, &a.cols, r);
     if b.default_col_width != a.default_col_width || b.default_row_height != a.default_row_height {
         r.sheet_props.push(i);
     }

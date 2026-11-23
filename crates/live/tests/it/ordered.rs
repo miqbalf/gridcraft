@@ -152,6 +152,24 @@ fn an_insert_next_to_a_deleted_range_end_agrees_with_the_document() {
 }
 
 #[test]
+fn an_inserted_line_takes_the_whole_line_format_before_it_on_every_peer() {
+    // A whole row (column) formatted, then a line inserted after it: the new line takes that
+    // format on the author's engine, so it must take it in the document too.
+    let cases = [
+        ("home.fillColor", json!({"range": "2:2", "color": "#FF0000"}), "home.insertRows", json!({"rows": "3:3"})),
+        ("home.fillColor", json!({"range": "B:B", "color": "#FF0000"}), "home.insertColumns", json!({"cols": "C:C"})),
+    ];
+    for (fmt, whole, insert, at) in cases {
+        let mut room = Room::new(2);
+        room.run(0, fmt, whole.clone()).unwrap();
+        room.settle();
+        room.run(0, insert, at.clone()).unwrap();
+        room.settle();
+        same_everywhere(&room, &format!("{insert} after a formatted line"));
+    }
+}
+
+#[test]
 fn receiver_engine_equals_rebuild_from_state_after_each_op() {
     let mut total_ops = 0u32;
     for seed in seeds() {
