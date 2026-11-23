@@ -2595,6 +2595,8 @@ dependencies = [
 name = "gridcraft-ui-egui"
 version = "0.19.1"
 dependencies = [
+ "craft-collab",
+ "craft-live",
  "craft-ui",
  "craft-update",
  "craft-window",
@@ -2604,6 +2606,7 @@ dependencies = [
  "epaint_default_fonts",
  "gridcraft-chart",
  "gridcraft-engine",
+ "gridcraft-live",
  "gridcraft-xlsx",
  "image",
  "log",

@@ -58,6 +58,9 @@ fn tip_text(ui: &Ui, tip: &str) -> String {
 /// While editing live: a control for a command the session refuses is greyed, and its tooltip
 /// says why. Outside live editing this is `f(ui)` and nothing else.
 fn gated<R>(ui: &mut Ui, tip: &str, menu: bool, f: impl FnOnce(&mut Ui) -> R) -> R {
+    if menu {
+        crate::live::note_menu_tip(ui.ctx(), tip);
+    }
     if !crate::live::tip_blocked(ui.ctx(), tip, menu) {
         return f(ui);
     }
@@ -161,7 +164,19 @@ fn big_split_button_ungated(ui: &mut Ui, icon: Icon, label: &str, tip: &str) -> 
     let split = rect.top() + 38.0;
     let main_rect = Rect::from_min_max(rect.min, pos2(rect.right(), split));
     let arrow_rect = Rect::from_min_max(pos2(rect.left(), split), rect.max);
-    let main = ui.interact(main_rect, ui.scope_id().with((label, "big-split-main")), Sense::click());
+    // Only the main part greyed while editing live: the menu under the arrow still holds things
+    // the session allows.
+    let main_blocked = crate::live::tip_main_blocked(ui.ctx(), tip);
+    let main_id = ui.scope_id().with((label, "big-split-main"));
+    let main = if main_blocked {
+        ui.scope(|ui| {
+            ui.disable();
+            ui.interact(main_rect, main_id, Sense::click())
+        })
+        .inner
+    } else {
+        ui.interact(main_rect, main_id, Sense::click())
+    };
     let arrow = ui.interact(arrow_rect, ui.scope_id().with((label, "big-split-arrow")), Sense::click());
     if main.hovered() || arrow.hovered() {
         ui.painter().rect_filled(rect, 5.0, t.hover);
@@ -176,10 +191,11 @@ fn big_split_button_ungated(ui: &mut Ui, icon: Icon, label: &str, tip: &str) -> 
     paint_big_label(ui, rect, &lines, true);
     let name = label.replace('\n', " ");
     let enabled = ui.is_enabled();
-    main.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, &name));
+    main.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled && !main_blocked, &name));
     arrow.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, format!("{name} options")));
     let tip = tip_text(ui, tip);
-    (main.on_hover_text(tip.clone()), arrow.on_hover_text(tip))
+    let main = if main_blocked { main.on_disabled_hover_text(crate::live::blocked_tip(ui.ctx())) } else { main.on_hover_text(tip.clone()) };
+    (main, arrow.on_hover_text(tip))
 }
 
 /// Size of the dropdown arrow beside a big button's last label line.

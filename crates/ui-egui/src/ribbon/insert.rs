@@ -106,7 +106,7 @@ pub(super) fn insert(app: &mut SheetApp, ui: &mut Ui) {
                 let r = small_button(ui, icon, "", tip, true);
                 control_keytip(app, ui, &r, cid);
                 let forced_c = invoke(app, cid);
-                egui::Popup::menu(&r).open_memory(popup_command(forced_c, r.clicked())).show(|ui| {
+                egui::Popup::menu(&r).open_memory(popup_command(app, forced_c, &r)).show(|ui| {
                     for (label, k, s) in &subs {
                         if ui.button(*label).clicked() {
                             act(app, "insert.chart", json!({"type": k, "subtype": s}));
@@ -142,7 +142,7 @@ pub(super) fn insert(app: &mut SheetApp, ui: &mut Ui) {
                 let r = small_button(ui, icon, "", tip, true);
                 control_keytip(app, ui, &r, cid);
                 let forced_c = invoke(app, cid);
-                egui::Popup::menu(&r).open_memory(popup_command(forced_c, r.clicked())).show(|ui| {
+                egui::Popup::menu(&r).open_memory(popup_command(app, forced_c, &r)).show(|ui| {
                     for (label, k, s) in &subs {
                         if ui.button(*label).clicked() {
                             act(app, "insert.chart", json!({"type": k, "subtype": s}));
@@ -243,7 +243,7 @@ pub(super) fn insert(app: &mut SheetApp, ui: &mut Ui) {
     control_keytip(app, ui, &sym, "insert.symbol");
     // Opened by its key tip too (Alt+I, S): the gallery picks the symbol, nothing is inserted before.
     let forced = invoke(app, "insert.symbol");
-    egui::Popup::menu(&sym).open_memory(popup_command(forced, sym.clicked())).show(|ui| {
+    egui::Popup::menu(&sym).open_memory(popup_command(app, forced, &sym)).show(|ui| {
         ui.set_width(260.0);
         ui.horizontal_wrapped(|ui| {
             for ch in [

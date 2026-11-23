@@ -162,7 +162,7 @@ pub(super) fn home(app: &mut SheetApp, ui: &mut Ui) {
             // or Esc changes the prefix, which closes it again (`ribbon_keys`).
             let prefix = app.keytips.prefix().unwrap_or_default().to_owned();
             let keyed = keytip_table::opens_menu(&prefix, "home.borders");
-            egui::Popup::menu(&ba).open_memory(popup_command(keyed, ba.clicked())).show(|ui| {
+            egui::Popup::menu(&ba).open_memory(popup_command(app, keyed, &ba)).show(|ui| {
                 for (label, preset) in [
                     ("Bottom Border", "bottom"),
                     ("Top Border", "top"),
@@ -205,10 +205,8 @@ pub(super) fn home(app: &mut SheetApp, ui: &mut Ui) {
                 act(app, "home.fillColor", json!({"color": fill}));
             }
             let forced = invoke(app, "home.fillColor");
-            egui::Popup::menu(&fa)
-                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                .open_memory(popup_command(forced, fa.clicked()))
-                .show(|ui| {
+            egui::Popup::menu(&fa).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).open_memory(popup_command(app, forced, &fa)).show(
+                |ui| {
                     if let Some(c) = color_palette(ui, &theme_colors(app), "No Fill") {
                         if c != "none" {
                             app.grid.last_fill = c.clone();
@@ -216,7 +214,8 @@ pub(super) fn home(app: &mut SheetApp, ui: &mut Ui) {
                         act(app, "home.fillColor", json!({"color": c}));
                         ui.close();
                     }
-                });
+                },
+            );
             let fc = app.grid.last_font_color.clone();
             let fc_c = gridcraft_engine::model::Color::from_hex(&fc).and_then(|c| c.resolve(&Default::default())).map(theme::color32);
             let (c, ca) = split_button(ui, Icon::FontColor, fc_c, "Font Color");
@@ -225,10 +224,8 @@ pub(super) fn home(app: &mut SheetApp, ui: &mut Ui) {
                 act(app, "home.fontColor", json!({"color": fc}));
             }
             let forced = invoke(app, "home.fontColor");
-            egui::Popup::menu(&ca)
-                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                .open_memory(popup_command(forced, ca.clicked()))
-                .show(|ui| {
+            egui::Popup::menu(&ca).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).open_memory(popup_command(app, forced, &ca)).show(
+                |ui| {
                     if let Some(c) = color_palette(ui, &theme_colors(app), "Automatic") {
                         if c != "none" {
                             app.grid.last_font_color = c.clone();
@@ -236,7 +233,8 @@ pub(super) fn home(app: &mut SheetApp, ui: &mut Ui) {
                         act(app, "home.fontColor", json!({"color": if c == "none" { "auto".to_string() } else { c }}));
                         ui.close();
                     }
-                });
+                },
+            );
         });
     });
     sep(ui);
@@ -257,7 +255,7 @@ pub(super) fn home(app: &mut SheetApp, ui: &mut Ui) {
             let o = small_button(ui, Icon::Orientation, "", "Orientation", true);
             control_keytip(app, ui, &o, "home.orientation");
             let forced_o = invoke(app, "home.orientation");
-            egui::Popup::menu(&o).open_memory(popup_command(forced_o, o.clicked())).show(|ui| {
+            egui::Popup::menu(&o).open_memory(popup_command(app, forced_o, &o)).show(|ui| {
                 menu_items(
                     app,
                     ui,

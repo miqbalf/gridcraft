@@ -48,7 +48,7 @@ pub(super) fn automate(app: &mut SheetApp, ui: &mut Ui) {
         if !recent.is_empty() {
             ui.label(egui::RichText::new(app.ui.language.tr("Recent")).small().color(t.text_dim));
             for n in &recent {
-                if ui.add(egui::Button::new(n.as_str()).frame(false).min_size(vec2(200.0, 22.0))).clicked() {
+                if macro_item(app, ui, n, "").clicked() {
                     crate::macro_ui::run_macro(app, n);
                 }
             }
@@ -58,8 +58,7 @@ pub(super) fn automate(app: &mut SheetApp, ui: &mut Ui) {
             ui.label(egui::RichText::new("No macros in this workbook").italics().color(t.text_dim));
         }
         for (n, desc, _) in macros.iter().take(30) {
-            let r = ui.add(egui::Button::new(n.as_str()).frame(false).min_size(vec2(200.0, 22.0)));
-            let r = if desc.is_empty() { r } else { r.on_hover_text(desc) };
+            let r = macro_item(app, ui, n, desc);
             if r.clicked() {
                 crate::macro_ui::run_macro(app, n);
             }
@@ -94,5 +93,18 @@ pub(super) fn automate(app: &mut SheetApp, ui: &mut Ui) {
     control_keytip(app, ui, &__k, "about");
     if __k.clicked() {
         app.open_dialog("about", json!({}));
+    }
+}
+
+/// A macro in the Run Macro menu: greyed with the reason while editing live refuses running one.
+fn macro_item(app: &SheetApp, ui: &mut egui::Ui, name: &str, desc: &str) -> egui::Response {
+    let refused = app.live_gates("macro.run");
+    let r = ui.add_enabled(!refused, egui::Button::new(name).frame(false).min_size(vec2(200.0, 22.0)));
+    if refused {
+        r.on_disabled_hover_text(crate::live::blocked_tip(ui.ctx()))
+    } else if desc.is_empty() {
+        r
+    } else {
+        r.on_hover_text(desc)
     }
 }

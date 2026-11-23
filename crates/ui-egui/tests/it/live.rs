@@ -548,7 +548,12 @@ fn a_session_started_on_another_engine_session_is_refused() {
     own.new_workbook();
     let app = crate::common::prepare(SheetApp::new(own, Services { live: Some(live), ..Default::default() }));
     assert!(app.live().is_none());
-    assert!(app.message.as_ref().is_some_and(|(_, m)| m.contains("not started")), "{:?}", app.message);
+    // Told on the first frame, in the language the window has by then (the preferences load after
+    // construction).
+    assert!(app.message.is_none(), "not before the language is known");
+    let mut h = harness(app);
+    h.step();
+    assert!(h.state().message.as_ref().is_some_and(|(_, m)| m.contains("not started")), "{:?}", h.state().message);
 }
 
 /// Hovers the control and returns whether the refusal reason shows as its tooltip.
@@ -612,4 +617,91 @@ fn ending_live_editing_leaves_the_room_by_name() {
     h.state_mut().run("file.close", json!({"force": true})).expect("closes");
     settle(&mut rig, &mut h);
     assert_eq!(*rig.left.lock().expect("lock"), vec![ROOM.to_owned()], "Alice told the relay she left, once");
+}
+
+/// Every dropdown, gallery and split button the ribbon draws, by tooltip.
+fn ribbon_menu_tips() -> Vec<String> {
+    let app = crate::common::prepare(SheetApp::new(Session::new(), Services::default()));
+    let mut h = crate::common::harness_with(crate::common::builder().with_size(vec2(2600.0, 900.0)), app, 3);
+    for tab in gridcraft_ui_egui::ribbon::TABS {
+        h.state_mut().ui.ribbon_tab = (*tab).into();
+        for _ in 0..4 {
+            h.step();
+        }
+    }
+    gridcraft_ui_egui::live::menu_tips_seen(&h.ctx)
+}
+
+#[test]
+fn every_ribbon_dropdown_and_gallery_is_classified_for_the_live_gate() {
+    let tips = ribbon_menu_tips();
+    assert!(tips.len() > 30, "the walk found the ribbon's menus: {tips:?}");
+    let unknown: Vec<&String> = tips.iter().filter(|t| gridcraft_ui_egui::live::menu_tip_class(t).is_none()).collect();
+    assert!(
+        unknown.is_empty(),
+        "these controls open a popup the live gate does not know: add each to MENU_COMMANDS (its command is refused), \
+         PER_ITEM_TIPS (menu_items greys its items) or OPEN_TIPS (it runs nothing refused): {unknown:#?}"
+    );
+}
+
+#[test]
+fn every_gate_table_entry_names_a_real_refused_command() {
+    let (_rig, app) = rig(Access::Edit);
+    let drawn = ribbon_menu_tips();
+    for (tip, id) in gridcraft_ui_egui::live::menu_tables() {
+        if let Some(id) = id {
+            assert!(app.live_gates(id), "{tip}: {id} is not refused, so the entry greys a working control");
+        }
+        // Controls on contextual tabs (a chart or table selected) are not drawn in this walk.
+        let contextual = ["Add Chart Element", "Change Chart Type"].contains(&tip);
+        assert!(contextual || drawn.iter().any(|t| t == tip), "{tip}: no such control is drawn, the entry is stale");
+    }
+}
+
+#[test]
+fn the_remaining_galleries_and_one_sided_menus_are_greyed_or_left_usable_as_they_should() {
+    let (mut rig, app) = rig(Access::Edit);
+    let mut h = harness(app);
+    h.state_mut().ui.ribbon_tab = "Insert".into();
+    settle(&mut rig, &mut h);
+    // Icons, an Equation and a chart gallery run refused commands.
+    for label in ["Icons", "Pie or Doughnut", "Column or Bar"] {
+        let found = h.query_all_by_label(label).next().map(|n| n.accesskit_node().is_disabled());
+        assert!(found != Some(false), "{label} is greyed (or has no label of its own)");
+    }
+    assert!(h.get_by_label("Icons").accesskit_node().is_disabled());
+    assert!(hover_shows_reason(&mut h, "Icons"));
+    // Data Validation holds "Circle Invalid Data", which the session shares: the menu stays open.
+    h.state_mut().ui.ribbon_tab = "Data".into();
+    settle(&mut rig, &mut h);
+    assert!(!h.get_by_label("Data Validation").accesskit_node().is_disabled());
+    // Run Macro: the main part is refused, the arrow (the Macros dialog) is not.
+    h.state_mut().ui.ribbon_tab = "Automate".into();
+    settle(&mut rig, &mut h);
+    assert!(h.get_by_label("Run Macro").accesskit_node().is_disabled(), "the main part is greyed");
+    assert!(!h.get_by_label("Run Macro options").accesskit_node().is_disabled(), "the menu stays usable");
+}
+
+#[test]
+fn a_key_tip_does_not_open_the_gallery_of_a_greyed_control() {
+    // Without live editing the key tip opens the Symbol gallery ...
+    let mut h = harness(crate::common::prepare(SheetApp::new(Session::new(), Services::default())));
+    h.state_mut().ui.ribbon_tab = "Insert".into();
+    h.step();
+    h.state_mut().ui.keytip_invoke_next = Some("insert.symbol");
+    for _ in 0..4 {
+        h.step();
+    }
+    assert!(h.query_by_label("\u{20ac}").is_some(), "the gallery opened");
+    // ... and while editing live (where Symbol is refused) it shows the reason instead.
+    let (mut rig, app) = rig(Access::Edit);
+    let mut h = harness(app);
+    h.state_mut().ui.ribbon_tab = "Insert".into();
+    settle(&mut rig, &mut h);
+    h.state_mut().ui.keytip_invoke_next = Some("insert.symbol");
+    for _ in 0..4 {
+        h.step();
+    }
+    assert!(h.query_by_label("\u{20ac}").is_none(), "the gallery stayed shut");
+    assert!(notice_text(h.state()).contains(gridcraft_live::NOT_YET_TEXT), "{:?}", notice_text(h.state()));
 }

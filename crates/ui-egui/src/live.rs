@@ -90,16 +90,35 @@ struct Blocked {
     /// Split buttons and menus, by the command their main part or gallery runs: a label shared
     /// with another command (a "Clear" menu of allowed items) must not grey them.
     menus: Arc<BTreeSet<String>>,
+    /// Split buttons whose main part runs a refused command but whose menu holds other things.
+    mains: Arc<BTreeSet<String>>,
 }
 
 /// The split buttons and menus whose command is not shared, by control name and the command id
 /// the control runs (its main part, or every item of its gallery).
 const MENU_COMMANDS: &[(&str, &str)] = &[
     ("Add Chart Element", "chart.addElement"),
+    ("Column or Bar", "insert.chart"),
+    ("Date & Time", "formulas.insertFunction"),
+    ("Financial", "formulas.insertFunction"),
+    ("Insert a picture", "insert.picture"),
+    ("Logical", "formulas.insertFunction"),
+    ("Lookup & Reference", "formulas.insertFunction"),
+    ("Math & Trig", "formulas.insertFunction"),
+    ("More Functions", "formulas.insertFunction"),
+    ("Paper Size", "pageLayout.size"),
+    ("Recently Used", "formulas.insertFunction"),
+    ("Text", "formulas.insertFunction"),
+    ("Hierarchy & more", "insert.chart"),
+    ("Insert an equation, or pick one from the gallery", "insert.equation"),
+    ("Insert an icon", "insert.icons"),
+    ("Line or Area", "insert.chart"),
+    ("Pie or Doughnut", "insert.chart"),
+    ("Scatter or Bubble", "insert.chart"),
+    ("Statistic", "insert.chart"),
     ("Calculation Options", "formulas.calculationOptions"),
     ("Change Chart Type", "chart.changeType"),
     ("Conditional Formatting", "home.conditionalFormat"),
-    ("Data Validation", "data.validation"),
     ("Decorative Text", "insert.wordArt"),
     ("Format as Table", "home.formatAsTable"),
     ("Freeze Panes", "view.freezePanes"),
@@ -107,13 +126,82 @@ const MENU_COMMANDS: &[(&str, &str)] = &[
     ("Merge & Center", "home.mergeCenter"),
     ("Page Layout|Orientation", "pageLayout.orientation"),
     ("Print Area", "pageLayout.printArea"),
-    ("Run a macro on the selection", "macro.run"),
     ("Shapes", "insert.shape"),
     ("Sparklines", "insert.sparkline"),
     ("Symbol", "insert.symbol"),
     ("Themes", "pageLayout.theme"),
     ("Use in Formula", "formulas.useInFormula"),
 ];
+
+/// Split buttons whose main part runs a refused command while the menu under the arrow holds other
+/// things (the Macros dialog): only the main part is greyed.
+const MAIN_COMMANDS: &[(&str, &str)] = &[("Run a macro on the selection", "macro.run")];
+
+/// Dropdowns whose popup is `menu_items` (it greys each item by its own command) or lists
+/// commands one by one, so the control itself stays enabled.
+const PER_ITEM_TIPS: &[&str] = &[
+    "Accounting Number Format",
+    "Clear",
+    "Data Validation",
+    "Delete",
+    "Fill",
+    "Find & Select",
+    "Format",
+    "Insert",
+    "Notes",
+    "Orientation",
+    "Page Breaks",
+    "Paste",
+    "Sort & Filter",
+    "Underline",
+    "What-If Analysis",
+];
+
+/// Dropdowns and galleries that run no command the gate refuses (dialogs, pickers).
+const OPEN_TIPS: &[&str] =
+    &["AutoSum", "Borders", "Cell Styles", "Error Checking", "Fill Color", "Font Color", "Share: export or save a copy", "Switch Windows"];
+
+const SEEN_MENUS_ID: &str = "gridcraft.live.menus-seen";
+
+/// Notes that a dropdown, gallery or split button called `tip` was drawn.
+pub(crate) fn note_menu_tip(ctx: &egui::Context, tip: &str) {
+    ctx.data_mut(|d| {
+        let seen = d.get_temp_mut_or_default::<Arc<std::sync::Mutex<BTreeSet<String>>>>(egui::Id::NULL.with(SEEN_MENUS_ID));
+        if let Ok(mut set) = seen.lock() {
+            set.insert(tip.to_owned());
+        }
+    });
+}
+
+/// The dropdowns, galleries and split buttons drawn so far in this context, by tooltip (for the
+/// test that every one of them is classified for the live gate).
+#[doc(hidden)]
+#[must_use]
+pub fn menu_tips_seen(ctx: &egui::Context) -> Vec<String> {
+    let seen = ctx.data_mut(|d| d.get_temp::<Arc<std::sync::Mutex<BTreeSet<String>>>>(egui::Id::NULL.with(SEEN_MENUS_ID)));
+    seen.and_then(|s| s.lock().ok().map(|set| set.iter().cloned().collect())).unwrap_or_default()
+}
+
+/// How the live gate treats the dropdown, gallery or split button `tip`: `Some(Some(id))` greys it
+/// whole by that command, `Some(None)` leaves it to its items or to nothing refused, `None` when
+/// the gate does not know the control (a new one must be added to a table in this file).
+#[doc(hidden)]
+#[must_use]
+pub fn menu_tip_class(tip: &str) -> Option<Option<&'static str>> {
+    if let Some((_, id)) = MENU_COMMANDS.iter().chain(MAIN_COMMANDS).find(|(t, _)| *t == tip) {
+        return Some(Some(id));
+    }
+    (PER_ITEM_TIPS.contains(&tip) || OPEN_TIPS.contains(&tip)).then_some(None)
+}
+
+/// Every control the tables of this file name, for the test that none is stale.
+#[doc(hidden)]
+#[must_use]
+pub fn menu_tables() -> Vec<(&'static str, Option<&'static str>)> {
+    let mut all: Vec<_> = MENU_COMMANDS.iter().chain(MAIN_COMMANDS).map(|(t, id)| (*t, Some(*id))).collect();
+    all.extend(PER_ITEM_TIPS.iter().chain(OPEN_TIPS).map(|t| (*t, None)));
+    all
+}
 
 /// A live window's state: the session, who else is here, and what the presence drawing needs.
 pub struct LiveUi {
@@ -142,6 +230,7 @@ impl LiveUi {
         let blocked = Blocked {
             labels: Arc::new(blocked_names(&live)),
             menus: Arc::new(MENU_COMMANDS.iter().filter(|(_, id)| !live.allows(id)).map(|(tip, _)| (*tip).to_owned()).collect()),
+            mains: Arc::new(MAIN_COMMANDS.iter().filter(|(_, id)| !live.allows(id)).map(|(tip, _)| (*tip).to_owned()).collect()),
         };
         LiveUi {
             live,
@@ -287,20 +376,28 @@ impl LiveUi {
     }
 }
 
+/// What is wrong with attaching `live` to `session`, as the English text that `tr` translates.
+fn attach_problem(session: &gridcraft_engine::Session, live: &Live) -> Option<&'static str> {
+    let doc = live.doc();
+    if session.document_index(doc).is_none() {
+        return Some(ATTACH_NO_DOC_TEXT);
+    }
+    (session.live_undo_doc() != Some(doc)).then_some(ATTACH_OTHER_SESSION_TEXT)
+}
+
 /// Whether `live` was started on `session`: its workbook is open there and carries the session's
 /// edit hook. A session started elsewhere would let this window edit with nothing shared.
 ///
 /// # Errors
 /// What is wrong, as text for the user.
 pub fn check_attached(session: &gridcraft_engine::Session, live: &Live, lang: Language) -> Result<(), String> {
-    let doc = live.doc();
-    if session.document_index(doc).is_none() {
-        return Err(lang.tr(ATTACH_NO_DOC_TEXT).to_owned());
-    }
-    if session.live_undo_doc() != Some(doc) {
-        return Err(lang.tr(ATTACH_OTHER_SESSION_TEXT).to_owned());
-    }
-    Ok(())
+    attach_problem(session, live).map_or(Ok(()), |why| Err(lang.tr(why).to_owned()))
+}
+
+/// The window's start-up refusal of a live session, as the key to translate once the user's language
+/// is known: `SheetApp::new` runs before the preferences load.
+pub(crate) fn startup_refusal(session: &gridcraft_engine::Session, live: &Live) -> Option<&'static str> {
+    attach_problem(session, live)
 }
 
 /// The ribbon names (catalog labels) of the commands the gate refuses. A label shared with a
@@ -322,12 +419,22 @@ pub(crate) fn tip_blocked(ctx: &egui::Context, tip: &str, menu: bool) -> bool {
     if menu { b.menus.contains(tip) } else { b.labels.contains(&tip.replace('\n', " ")) }
 }
 
+/// Whether only the main part of the split button `tip` is refused.
+pub(crate) fn tip_main_blocked(ctx: &egui::Context, tip: &str) -> bool {
+    ctx.data(|d| d.get_temp::<Blocked>(egui::Id::NULL.with(BLOCKED_ID))).is_some_and(|b| b.mains.contains(tip))
+}
+
 /// The tooltip of a greyed control.
 pub(crate) fn blocked_tip(ctx: &egui::Context) -> String {
     crate::i18n::current(ctx).tr(NOT_YET_TEXT).to_owned()
 }
 
 impl SheetApp {
+    /// Tells why a greyed control did not open: the live session refuses what it runs.
+    pub(crate) fn tell_control_refused(&mut self, ctx: &egui::Context) {
+        self.notice = Some(Notice { text: blocked_tip(ctx), kind: NoticeKind::Info, action: None });
+    }
+
     /// The live session, if the window is in one.
     #[must_use]
     pub fn live(&self) -> Option<&LiveUi> {
@@ -408,6 +515,11 @@ impl SheetApp {
     /// One frame of a live window: anchors the open editor, takes in the room, moves the editor
     /// with its row, and shows what the room told.
     pub(crate) fn live_frame(&mut self, ctx: &egui::Context) {
+        // A live session refused when the window was built is told in the user's language now.
+        if let Some(why) = self.live_refusal.take() {
+            let lang = self.ui.language;
+            self.message = Some(("GridCraft".into(), lang.tr_fill(NOT_STARTED_TEXT, &[("why", lang.tr(why))])));
+        }
         let Some(mut lu) = self.live.take() else { return };
         if self.session.document_index(lu.doc).is_none() {
             self.end_live(ctx, lu);
