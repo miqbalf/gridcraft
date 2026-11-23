@@ -301,5 +301,38 @@ fn the_desktop_route_is_looked_up_once_per_workbook_and_path() {
     h.state_mut().session.active_mut().unwrap().path = Some("/home/u/Nextcloud/B.xlsx".into());
     h.run_steps(10);
     click_title_bar_share(&mut h);
-    assert_eq!(*lookups.lock().unwrap(), ["/home/u/Nextcloud/A.xlsx", "/home/u/Nextcloud/B.xlsx"]);
+    // A cached "none" is checked once more when Share is pressed (a file that has become synced).
+    assert_eq!(*lookups.lock().unwrap(), ["/home/u/Nextcloud/A.xlsx", "/home/u/Nextcloud/B.xlsx", "/home/u/Nextcloud/B.xlsx"]);
+}
+
+#[test]
+fn a_workbook_that_becomes_synced_gets_share_without_reopening() {
+    let log = Log::default();
+    let synced = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = synced.clone();
+    let services = Services {
+        share_route: Some(Box::new(move |path: &std::path::Path| {
+            if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                ShareRoute::NextcloudDesktop {
+                    server: "https://cloud.example.test".into(),
+                    user: "u".into(),
+                    remote_path: format!("/{}", path.file_name().unwrap().to_string_lossy()),
+                }
+            } else {
+                ShareRoute::None
+            }
+        })),
+        ..deliveries(&log)
+    };
+    let mut h = harness(services, Some("/home/u/Documents/Budget.xlsx"));
+    h.run_steps(5);
+    click_title_bar_share(&mut h);
+    assert!(no_nextcloud_shown(&h), "not synced yet");
+    assert!(log.lock().unwrap().urls.is_empty());
+    // The Nextcloud client now syncs the folder; the workbook stays open.
+    h.state_mut().toast = None;
+    synced.store(true, std::sync::atomic::Ordering::SeqCst);
+    click_title_bar_share(&mut h);
+    assert_eq!(log.lock().unwrap().urls, vec![craft_share::sharing_url("https://cloud.example.test", "/Budget.xlsx")]);
+    assert!(!no_nextcloud_shown(&h));
 }
