@@ -21,7 +21,7 @@ gridcraft-ui-egui = { workspace = true }
 # The page command API (storytold/craft-libs#413): window.gridcraft over the control channel.
 craft-web-api = { git = "https://github.com/storytold/craft-libs", rev = "aa84415bae3b765fef6b7ef42404f66ad1cff9d9", version = "0.1.0" }
 # The host saves/save-failed/fonts and share messages are on the miqbalf fork's feat/share-hook until merged upstream.
-craft-web-host = { git = "https://github.com/miqbalf/craft-libs", rev = "0434267cbc03705d1a4a22986bfc533ae92b812b", version = "0.1.0" }
+craft-web-host = { git = "https://github.com/miqbalf/craft-libs", rev = "f5a8116c2885800051c06ebb8d466331fa210583", version = "0.1.0" }
 egui = { workspace = true }
 log = { workspace = true }
 serde_json = { workspace = true }

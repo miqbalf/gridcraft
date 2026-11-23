@@ -25,8 +25,8 @@ fn tree() -> Vec<(&'static str, Vec<Entry>)> {
                 ("Save", "file.save", Some("CMD+S")),
                 ("Save As…", "file.saveAs", Some("CMD+SHIFT+S")),
                 ("Export as PDF…", "file.exportPdf", None),
-                ("Export as CSV…", "dialog:saveCopy:csv", None),
-                ("Save as Web Page…", "dialog:saveCopy:html", None),
+                ("Export as CSV…", "file.exportCsv", None),
+                ("Save as Web Page…", "file.exportHtml", None),
                 ("-", "", None),
                 ("Page Setup…", "dialog:pageSetup", None),
                 ("Print…", "file.print", Some("CMD+P")),
@@ -360,7 +360,6 @@ impl NativeMenu {
             } else if let Some(rest) = id.strip_prefix("dialog:") {
                 let (name, arg) = rest.split_once(':').unwrap_or((rest, ""));
                 let params: Value = match (name, arg) {
-                    ("saveCopy", fmt) => json!({"format": fmt}),
                     ("find", "replace") => json!({"replace": true}),
                     ("note", _) => json!({"threaded": false}),
                     ("comment", _) => json!({"threaded": true}),
@@ -400,6 +399,12 @@ mod tests {
         let item = file.iter().find(|e| e.0 == "Export as PDF…").expect("Export as PDF… in the File menu");
         assert_eq!(item.1, "file.exportPdf");
         assert!(gridcraft_engine::find_command("file.exportPdf").is_some());
+        // Every Save As / Export item is a command (the window turns one with no path into Save
+        // As in that type), never a dialog of its own.
+        for label in ["Save As…", "Export as CSV…", "Save as Web Page…"] {
+            let item = file.iter().find(|e| e.0 == label).unwrap_or_else(|| panic!("{label} in the File menu"));
+            assert!(gridcraft_engine::find_command(item.1).is_some(), "{label} runs a command, not {}", item.1);
+        }
     }
 
     #[test]

@@ -204,6 +204,12 @@ fn services() -> Services {
             }
             dialog.save_file().and_then(|p| p.to_str().map(str::to_string))
         })),
+        // Save As / Export: the system dialog for the one type chosen; the copy is written where
+        // it says and the workbook keeps its own file.
+        pick_save_as: Some(Box::new(|suggested: &str, label: &str, ext: &str| {
+            rfd::FileDialog::new().set_file_name(suggested).add_filter(label, &[ext]).save_file().and_then(|p| p.to_str().map(str::to_string))
+        })),
+        runtime: Some(gridcraft_ui_egui::craft_share::export::Runtime::Desktop),
         open_url: Some(Box::new(|url: &str| open_with_system(url))),
         // Share: Nextcloud sharing in the browser for a workbook in a folder the Nextcloud client
         // syncs; anywhere else "No Nextcloud connected".

@@ -1147,7 +1147,8 @@ impl Session {
     pub fn execute_headless(&mut self, id: &str, params: Json) -> Result<Json> {
         let r = self.execute(id, params);
         let requests = self.take_ui_requests();
-        let asked_for_file = requests.iter().any(|q| matches!(q, UiRequest::Dialog(name, _) if name == "open" || name == "saveAs"));
+        let asked_for_file =
+            requests.iter().any(|q| matches!(q, UiRequest::Dialog(name, _) if name == "open" || name == "saveAs" || name == "saveAsCopy"));
         // A call that only opened a dialog is not recorded (see `execute`), so the recording
         // has no step to take back here.
         if r.is_ok() && asked_for_file {

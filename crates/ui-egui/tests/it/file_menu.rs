@@ -143,8 +143,8 @@ fn save_actions_include_the_cell_draft_and_close_keeps_the_unsaved_prompt() {
     assert!(h.state().editor.is_some());
     choose(&mut h, "Save");
     assert!(h.state().editor.is_none(), "opening File commits the cell draft");
-    assert_eq!(page(&h), Some("saveAs"), "a workbook without a file saves through Save As");
-    click(&mut h, "Download (.xlsx)");
+    // A workbook without a file is saved by plain Save (a download on the web); the Save As
+    // page is for copies.
     assert!(h.state().backstage.is_none());
     choose(&mut h, "Save As");
     click(&mut h, "Download (.xlsx)");
@@ -526,7 +526,8 @@ fn the_palette_export_as_pdf_asks_where_to_save() {
     // The palette and menus go through run_or_alert.
     h.state_mut().run_or_alert("file.exportPdf", serde_json::json!({}));
     assert!(asked.lock().unwrap().first().is_some_and(|s| s.ends_with(".pdf")), "the picker is offered a .pdf name");
-    assert!(std::fs::read(dir.join("Report.pdf")).unwrap().starts_with(b"%PDF-"), "the PDF is written, whatever extension the picker returned");
+    // The picker's name is kept and the PDF's extension added (`craft_share::export::picked_path`).
+    assert!(std::fs::read(dir.join("Report.xlsx.pdf")).unwrap().starts_with(b"%PDF-"), "the PDF is written, whatever extension the picker returned");
     assert!(h.state().message.is_none());
     let d = h.state().session.active().unwrap();
     assert!(d.path.is_none(), "a PDF is a copy, not the workbook's file");
@@ -661,46 +662,32 @@ fn options_sets_maximum_iterations_and_change_only_while_iteration_is_on() {
     assert!(h.state().message.is_none());
 }
 
-/// Share › Export as Web Page (and the native File menu's Save as Web Page) asks for a name in its
-/// own dialog. A bare name has no folder: written as typed it lands in the process's working
-/// directory, where nobody looks for it (#1212). The save picker chooses the folder instead.
+/// The native File menu's Save as Web Page (`file.exportHtml` with no path) asks the save picker
+/// where the copy goes: nothing is written to the process's working directory, where nobody looks
+/// for it (#1212), and a write that fails is reported.
 #[test]
-fn save_a_copy_with_a_bare_name_asks_where_to_save_it() {
+fn save_as_web_page_from_the_menu_asks_where_to_save_it() {
     let dir = std::env::temp_dir().join(format!("gridcraft-save-copy-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let asked = Arc::new(Mutex::new(Vec::<String>::new()));
-    let (capture, target) = (asked.clone(), dir.clone());
+    let answer = Arc::new(Mutex::new(dir.join("Chosen.html").to_string_lossy().into_owned()));
+    let (capture, target) = (asked.clone(), answer.clone());
     let mut h = harness(Services {
         pick_save: Some(Box::new(move |suggested| {
             capture.lock().unwrap().push(suggested.to_string());
-            Some(target.join("Chosen.html").to_string_lossy().into_owned())
+            Some(target.lock().unwrap().clone())
         })),
         ..Default::default()
     });
     h.state_mut().run("cell.set", serde_json::json!({"cell": "A1", "input": "42"})).unwrap();
-    let save_copy = |h: &mut egui_kittest::Harness<'static, SheetApp>, path: &str| {
-        h.state_mut().open_dialog("saveCopy", serde_json::json!({"format": "html"}));
-        h.run_steps(3);
-        h.state_mut().dialog.as_mut().unwrap().values.insert("path".into(), serde_json::json!(path));
-        h.run_steps(2);
-        h.get_by_label("   OK   ").click();
-        h.run_steps(3);
-    };
-    let name = format!("gridcraft-save-copy-{}", std::process::id());
-    save_copy(&mut h, &name);
-    let stray = std::path::PathBuf::from(format!("{name}.html"));
-    let written_in_cwd = stray.exists();
-    let _ = std::fs::remove_file(&stray);
-    assert!(!written_in_cwd, "a bare name is not written to the working directory");
-    assert_eq!(*asked.lock().unwrap(), vec![format!("{name}.html")], "the picker is offered the typed name");
+    h.state_mut().run_or_alert("file.exportHtml", serde_json::json!({}));
+    assert_eq!(*asked.lock().unwrap(), vec!["Book1.html".to_string()], "the picker is offered the workbook's name");
+    assert!(!std::path::Path::new("Book1.html").exists(), "nothing is written to the working directory");
     assert!(std::fs::read_to_string(dir.join("Chosen.html")).unwrap().contains("42"), "the page is written where the picker says");
     assert!(h.state().message.is_none());
-    // A full path skips the picker; a write that fails is reported, not swallowed.
-    save_copy(&mut h, &dir.join("Named.html").to_string_lossy());
-    assert!(dir.join("Named.html").exists());
-    save_copy(&mut h, &dir.join("missing").join("Lost.html").to_string_lossy());
+    *answer.lock().unwrap() = dir.join("missing").join("Lost.html").to_string_lossy().into_owned();
+    h.state_mut().run_or_alert("file.exportHtml", serde_json::json!({}));
     assert!(h.state().message.is_some(), "a failed write is reported");
-    assert_eq!(asked.lock().unwrap().len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

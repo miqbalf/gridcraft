@@ -12,10 +12,10 @@
 //! - `gridcraft:open` (from the host): `{ name, bytes }`. It opens like a workbook picked with
 //!   File › Open or dropped on the window; a file over [`MAX_OPEN_BYTES`] is refused before it is
 //!   copied.
-//! - `gridcraft:save` (to the host): `{ name, saveAs, bytes, export }` for every file GridCraft
-//!   would otherwise download. With `export: false`, the host stores the XLSX workbook; with
-//!   `export: true`, it stores a separate file (such as a PDF) without replacing the workbook.
-//!   `saveAs` is `false`, except for a host that answers saves (below).
+//! - `gridcraft:save` (to the host): `{ name, saveAs, bytes, export }` for a plain Save of the
+//!   workbook, which the host stores. Save As and every export are copies that download to the
+//!   user's computer (`craft_web_host::web::download`) and never reach the host, so `export` is
+//!   always `false` now. `saveAs` is `false`, except for a host that answers saves (below).
 //! - `gridcraft:host` with `saves: true` (from the host): the host stores saves and answers each.
 //!   `gridcraft:save` then carries an `id`, and `saveAs` is `true` for a workbook under another
 //!   name than the file the host opened. The workbook counts as saved only on
@@ -33,15 +33,16 @@
 //! - `gridcraft:dirty` whenever unsaved changes appear or go away, `gridcraft:failed` when the
 //!   app couldn't start.
 //!
-//! In both host modes the page starts with an empty workbook instead of a sample, saves and PDF
-//! exports are handed to the page rather than downloaded, and `?author=` names the user for new
-//! notes and comments.
+//! In both host modes the page starts with an empty workbook instead of a sample, plain saves are
+//! handed to the page rather than downloaded (Save As and exports still download), and `?author=`
+//! names the user for new notes and comments.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use craft_web_host::web::{FileData, Host, Message};
 use craft_web_host::{Mode, Outgoing, file_name, message_type};
+use gridcraft_ui_egui::craft_share::export::Runtime;
 use gridcraft_ui_egui::{Inbox, Services, SheetApp};
 use wasm_bindgen::JsValue;
 
@@ -101,8 +102,8 @@ impl Bridge {
         })
     }
 
-    /// Send saved and exported files to the host instead of downloading them, and hear files
-    /// from it.
+    /// Send plain saves of the workbook to the host instead of downloading them, and hear files
+    /// from it. Save As copies keep `Services::download_copy`, the browser download.
     pub fn connect(&self, services: &mut Services, ctx: egui::Context) {
         // The page's files have their own inbox, so the workbook each opens is known to be the
         // page's (`Services::host_doc`); File › Open and drops use the app's inbox.
@@ -139,6 +140,8 @@ impl Bridge {
     /// name it was saved as, and the host hears when unsaved changes appear or go away (the
     /// crate does not repeat a state it already reported).
     pub fn sync(&self, app: &mut SheetApp) {
+        // Save As downloads either way; only plain Save asks whether the page stores saves.
+        app.services.runtime = Some(Runtime::web(self.receipts.borrow().confirms()));
         let saved = std::mem::take(&mut *self.saved.borrow_mut());
         sync_saved(&saved, app);
         self.apply_share(app);

@@ -1,6 +1,7 @@
 //! The browser shell: web `Services`, drag-and-drop, and the eframe web runner.
 
 use gridcraft_engine::Session;
+use gridcraft_ui_egui::craft_share::export::Runtime;
 use gridcraft_ui_egui::{Inbox, Services, SheetApp};
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen::JsValue;
@@ -219,6 +220,10 @@ fn services(inbox: Inbox, ctx: egui::Context) -> Services {
                 ctx.request_repaint();
             });
         })),
+        // Save As and Export: the copy downloads, framed by a page or not (never handed to it).
+        runtime: Some(Runtime::Web),
+        download_copy: Some(Box::new(|name: &str, mime: &str, bytes: &[u8]| craft_web_host::web::download(name, mime, bytes))),
+        // Plain Save of the workbook: a host page takes this over (`host`).
         download: Some(Box::new(|name: &str, bytes: &[u8]| {
             if let Err(e) = download(name, bytes) {
                 log::error!("download of {name} failed: {e}");
@@ -416,9 +421,7 @@ fn download(name: &str, bytes: &[u8]) -> Result<(), String> {
         // Anything but the user cancelling (no user gesture, a denied permission, a failed write)
         // falls back to an ordinary download, so a save never fails silently.
         let fallback = move |bytes: &[u8]| {
-            if let Some(w) = web_sys::window()
-                && let Err(e) = trigger_anchor_download(&w, &name_owned, bytes)
-            {
+            if let Err(e) = craft_web_host::web::download(&name_owned, mime_for(&name_owned), bytes) {
                 log::error!("download fallback failed: {e}");
             }
         };
@@ -447,7 +450,7 @@ fn download(name: &str, bytes: &[u8]) -> Result<(), String> {
     }
 
     // Fallback for browsers without showSaveFilePicker (e.g. Firefox, Safari):
-    trigger_anchor_download(&window, name, bytes)
+    craft_web_host::web::download(name, mime_for(name), bytes)
 }
 
 async fn write_file_handle(handle: &JsValue, bytes: &[u8]) -> Result<(), String> {
@@ -469,28 +472,5 @@ async fn write_file_handle(handle: &JsValue, bytes: &[u8]) -> Result<(), String>
         js_sys::Reflect::get(&stream, &JsValue::from_str("close")).map_err(js)?.dyn_into().map_err(|_| "close is not a function".to_string())?;
     let close_prom: js_sys::Promise = close_fn.call0(&stream).map_err(js)?.dyn_into().map_err(|_| "not a promise".to_string())?;
     wasm_bindgen_futures::JsFuture::from(close_prom).await.map_err(js)?;
-    Ok(())
-}
-
-fn trigger_anchor_download(window: &web_sys::Window, name: &str, bytes: &[u8]) -> Result<(), String> {
-    let js = |e: wasm_bindgen::JsValue| format!("{e:?}");
-    let document = window.document().ok_or("no document")?;
-    let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(bytes));
-    let opts = web_sys::BlobPropertyBag::new();
-    opts.set_type(mime_for(name));
-    let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &opts).map_err(js)?;
-    let url = web_sys::Url::create_object_url_with_blob(&blob).map_err(js)?;
-    let a: web_sys::HtmlAnchorElement = document.create_element("a").map_err(js)?.dyn_into().map_err(|_| "not an anchor".to_string())?;
-    a.set_href(&url);
-    a.set_download(name);
-    a.style().set_property("display", "none").map_err(js)?;
-    let body = document.body().ok_or("no body")?;
-    body.append_child(&a).map_err(js)?;
-    a.click();
-    a.remove();
-    let revoke = wasm_bindgen::closure::Closure::once_into_js(move || {
-        web_sys::Url::revoke_object_url(&url).ok();
-    });
-    window.set_timeout_with_callback_and_timeout_and_arguments_0(revoke.unchecked_ref(), 10_000).map_err(js)?;
     Ok(())
 }

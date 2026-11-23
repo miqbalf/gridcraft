@@ -4,6 +4,8 @@ type PickSave = Box<dyn Fn(&str) -> Option<String>>;
 type OpenUrl = Box<dyn Fn(&str)>;
 type CopyHtml = Box<dyn FnMut(&str, &str) -> Result<(), String>>;
 type Download = Box<dyn Fn(&str, &[u8])>;
+type DownloadCopy = Box<dyn Fn(&str, &str, &[u8]) -> Result<(), String>>;
+type PickSaveAs = Box<dyn Fn(&str, &str, &str) -> Option<String>>;
 type PrintPdf = Box<dyn Fn(&[u8])>;
 type HostShare = Box<dyn Fn() -> Result<(), String>>;
 type ShareRoute = Box<dyn Fn(&std::path::Path) -> craft_share::ShareRoute>;
@@ -16,7 +18,15 @@ pub struct Services {
     /// Desktop: submit the PDF with the chosen settings on a worker.
     pub print_native: Option<printing::Submit>,
     pub pick_open: Option<Box<dyn Fn() -> Option<String>>>,
+    /// Plain Save of a workbook with no file yet: the save picker (suggested name).
     pub pick_save: Option<PickSave>,
+    /// Desktop Save As / Export: the system save dialog for one type (suggested name, the type's
+    /// translated label, its extension). Without it Save As uses [`Services::pick_save`].
+    pub pick_save_as: Option<PickSaveAs>,
+    /// Where the window runs, for Save As (`craft_share::export::Runtime`). The web shell says
+    /// `Web`, or `WebHosted` once a hosting page stores saves; `None` is the desktop when there
+    /// is a save picker and the web otherwise.
+    pub runtime: Option<craft_share::export::Runtime>,
     /// Native picture picker (PNG/JPEG), separate from workbook opening.
     pub pick_picture: Option<Box<dyn Fn() -> Option<String>>>,
     /// Browser picture picker. Each dialog owns its inbox, so canceled picks cannot
@@ -37,8 +47,12 @@ pub struct Services {
     /// Read the picture on the system clipboard for the ribbon and menu Paste commands when it
     /// holds no text (Cmd/Ctrl+V gets it from egui's `Event::PasteImage`).
     pub paste_image: Option<Box<dyn FnMut() -> Option<image::RgbaImage>>>,
-    /// Web: deliver a file to the user (name, bytes).
+    /// Web: deliver a plain Save of the workbook (name, bytes). Framed by a page that stores
+    /// files, this hands the workbook to the page.
     pub download: Option<Download>,
+    /// Web: a Save As / Export copy downloads to the user's computer (name, MIME type, bytes),
+    /// framed or not; never handed to a hosting page (`craft_web_host::web::download`).
+    pub download_copy: Option<DownloadCopy>,
     /// Web: start an asynchronous file pick; the bytes arrive later in `inbox`.
     pub open_async: Option<Box<dyn Fn()>>,
     /// Files delivered asynchronously (name, bytes), opened on the next frame.

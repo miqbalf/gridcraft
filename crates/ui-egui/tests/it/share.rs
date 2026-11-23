@@ -280,7 +280,8 @@ fn the_exports_stay_in_the_more_menu() {
     h.run_steps(3);
     h.get_by_label("Export as CSV…").click();
     h.run_steps(3);
-    assert_eq!(h.state().dialog.as_ref().map(|d| d.name.as_str()), Some("saveCopy"), "Export › CSV still saves a copy");
+    assert!(log.lock().unwrap().delivered.last().is_some_and(|n| n.ends_with(".csv")), "Export › CSV still saves a copy");
+    assert!(h.state().dialog.is_none());
 }
 
 #[test]

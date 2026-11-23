@@ -94,11 +94,6 @@ impl SheetApp {
         {
             self.selected_object = Some(gridcraft_engine::model::ObjRef::new(gridcraft_engine::model::ObjKind::Chart, chart));
         }
-        if id == "file.exportPdf"
-            && let Ok(r) = &r
-        {
-            self.deliver_pdf(r);
-        }
         // The scan stopped at its cell allowance: say that some cells were not checked.
         if id == "data.circleInvalid"
             && let Ok(r) = &r
@@ -126,10 +121,14 @@ impl SheetApp {
             }
             return self.print_now(params);
         }
-        // Menu-style Export as PDF with no file named: ask where to save, like Save As does.
-        // Programmatic callers use `run` and keep getting the PDF bytes back.
-        if id == "file.exportPdf" && self.services.pick_save.is_some() && params.get("path").and_then(Json::as_str).is_none_or(str::is_empty) {
-            return self.export_pdf_with_picker(params);
+        // Menu-style Export as PDF with no file named is Save As in PDF (`save_as`): the save
+        // dialog on the desktop, a download on the web. Programmatic callers of `run` on the
+        // desktop keep getting the PDF bytes back.
+        if id == "file.exportPdf" && params.get("path").and_then(Json::as_str).is_none_or(str::is_empty) {
+            if let Err(e) = self.save_as_copy_with("pdf", params) {
+                self.alert(e);
+            }
+            return;
         }
         // Recommended Charts with no chart type named (ribbon button, keytip, command search) asks
         // which chart to insert; programmatic callers of `run` still get the first recommendation.
@@ -187,6 +186,18 @@ impl SheetApp {
                 Ok(Json::Null)
             }
             "file.share" => self.share(),
+            // Export with no file named is Save As in that format (`save_as`); with a `path`,
+            // automation writes the file there.
+            "file.exportCsv" | "file.exportHtml" if p.get("path").and_then(Json::as_str).is_none_or(str::is_empty) => {
+                self.save_as_copy(if id == "file.exportCsv" { "csv" } else { "html" })
+            }
+            // On the web the PDF downloads as a copy; on the desktop `run` returns its bytes.
+            "file.exportPdf"
+                if p.get("path").and_then(Json::as_str).is_none_or(str::is_empty)
+                    && self.save_as_runtime().save_as_delivery() == craft_share::export::Delivery::Download =>
+            {
+                self.save_as_copy_with("pdf", p.clone())
+            }
             "app.checkForUpdates" | "help.checkForUpdates" => {
                 self.check_for_updates();
                 Ok(Json::Null)
@@ -419,6 +430,9 @@ impl SheetApp {
                     self.open_path(&path);
                 }
             }
+            // Save As with no type chosen (`file.saveAs` without a path): a copy (`save_as`).
+            "saveAsCopy" => self.open_save_as(&params),
+            // Plain Save of a workbook with no file yet (`file.save`): its file is picked here.
             "saveAs" => {
                 let suggested = self.session.active().map(|d| d.display_title()).unwrap_or_else(|| "Book1".into());
                 if let Some(pick) = &self.services.pick_save {

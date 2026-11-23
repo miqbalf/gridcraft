@@ -194,6 +194,13 @@ fn saving_and_switching_context_commit_to_the_original_text_box() {
         edit_box(&mut h, id);
         replace(&mut h, "Saved from the text editor");
         key(&mut h, Key::S, modifiers);
+        if modifiers.shift {
+            // Save As opens the Save As page (the draft is already in); its copy downloads.
+            assert_eq!(h.state().backstage.as_ref().map(|b| b.page.id()), Some("saveAs"));
+            h.state_mut().save_as_copy("xlsx").unwrap();
+            h.state_mut().backstage = None;
+            h.run_steps(2);
+        }
         let (saved, _) = gridcraft_engine::io::open_bytes("shortcut.xlsx", &downloaded.lock().unwrap()).unwrap();
         assert_eq!(shape_text(&saved, 0, id), "Saved from the text editor");
         downloaded.lock().unwrap().clear();
