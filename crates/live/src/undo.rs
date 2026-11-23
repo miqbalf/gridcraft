@@ -269,6 +269,9 @@ pub(crate) struct Replay {
     /// A redo (the step came off the redo stack).
     pub redo: bool,
     pub step: Step,
+    /// The `resets` count when it came off its stack: once the count moves, the step names keys
+    /// and ops of a replaced replica, and it is dropped, never put back or run.
+    pub resets: u32,
 }
 
 /// The ordered step of a command's ops, or `None` when there are none. `Err` when the ops cannot

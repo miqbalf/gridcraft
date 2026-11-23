@@ -112,7 +112,11 @@ impl Mapping {
     /// Clears the undo state (steps, queued and running ordered undos, held undos, skipped-key
     /// notes, landed changes) once per `resets` count, and tells the user once if anything was
     /// cleared. The reset hook and the session's frame both call it: the second finds the count
-    /// already seen and does nothing.
+    /// already seen and does nothing. Today only `LiveApp::reset` moves the count in production,
+    /// so the frame's calls (`pump`, `after_pump`, `run`) act only for a count moved without the
+    /// hook (the test hook, or a future path); they are a guard, not a path to rely on. An ordered
+    /// undo already in the lock's queue is out of reach here: it carries its count
+    /// ([`Replay::resets`]) and the session drops it when it comes back.
     pub(crate) fn clear_undo_for_resets(&mut self) {
         if self.undo_resets == self.resets {
             return;
@@ -596,7 +600,7 @@ impl GridApp<'_> {
         let writes = match step {
             UndoStep::Free { writes } => writes,
             ordered @ UndoStep::Ordered { .. } => {
-                m.replays.push(Replay { redo, step: ordered });
+                m.replays.push(Replay { redo, step: ordered, resets: m.resets });
                 return Ok(Vec::new());
             }
         };

@@ -302,6 +302,7 @@ impl<H: Hub> GridLive<H> {
     /// the other editors' edits and carets, and says who else is here.
     pub fn pump(&mut self, session: &mut Session) -> Vec<Peer> {
         // A reset the app's hook did not see: nothing of the old undo state may run on the new sheet.
+        // Today only the test hook moves the count without the hook: a guard, not a real path.
         self.map.clear_undo_for_resets();
         if self.core.live().unconfirmed_edits() == 0 {
             // Everything this window wrote has been ordered: no delete can have missed it.
@@ -331,6 +332,7 @@ impl<H: Hub> GridLive<H> {
 
     fn after_pump(&mut self, session: &Session) {
         // A reset the app's hook did not see still moved the count: the undo state clears here.
+        // Today only the test hook moves the count without the hook: a guard, not a real path.
         self.map.clear_undo_for_resets();
         if self.core.live().doc().is_some_and(GridDoc::needs_resync) && !self.broken_told {
             // craft-live gives no way to replace a replica in place, and a full state must never
@@ -410,12 +412,22 @@ impl<H: Hub> GridLive<H> {
         }
     }
 
-    /// An ordered undo or redo that never ran (nothing was written) goes back on its stack.
+    /// An ordered undo or redo that never ran (nothing was written) goes back on its stack,
+    /// unless the sheet was reloaded since it was taken off: then the history it belonged to was
+    /// cleared (and the user told), so it is dropped.
     fn replay_unrun(&mut self, p: &Pending) {
         if let Some(r) = &p.undo {
-            self.map.undo.put_back(r.step.clone(), r.redo);
+            if !self.replay_stale(r) {
+                self.map.undo.put_back(r.step.clone(), r.redo);
+            }
             self.replay_over();
         }
+    }
+
+    /// The replay was taken off its stack before the last reset: its keys and ops belong to the
+    /// replaced replica.
+    fn replay_stale(&self, r: &crate::undo::Replay) -> bool {
+        r.resets != self.map.resets
     }
 
     /// "Alice changed these rows since; not undone" when a later op by someone else touched the
@@ -647,6 +659,11 @@ impl<H: Hub> GridLive<H> {
             return;
         }
         if let Some(r) = &p.undo {
+            if self.replay_stale(r) {
+                // The sheet was reloaded while it waited: the history was cleared, so it never runs.
+                self.replay_over();
+                return;
+            }
             // Checked again now the lock is held: an op may have come in while it waited.
             if let Some(text) = self.replay_refusal(r) {
                 self.map.notices.push(text);
@@ -759,6 +776,14 @@ impl<H: Hub> GridLive<H> {
     #[doc(hidden)]
     pub fn count_reset_without_hook(&mut self) {
         self.map.resets = self.map.resets.saturating_add(1);
+    }
+
+    /// Notes a line another peer deleted under this window's entry, as a remote delete does, for
+    /// the next frame to tell. For tests only.
+    #[cfg(any(test, feature = "test-util"))]
+    #[doc(hidden)]
+    pub fn note_removed(&mut self, by: &str, cell: &str, value: &str, row: bool) {
+        self.map.removed.push((by.to_owned(), cell.to_owned(), value.to_owned(), if row { "row" } else { "column" }));
     }
 
     /// How many times the replica was replaced under this window (a refused run taken back, the
