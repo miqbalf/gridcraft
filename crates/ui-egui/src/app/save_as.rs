@@ -57,7 +57,7 @@ impl SheetApp {
         let plan = self.save_as_plan(id)?;
         match plan.delivery {
             Delivery::Download => {
-                let bytes = self.copy_bytes(plan.format, pdf_params)?;
+                let bytes = self.copy_bytes(plan.format, pdf_params, None)?;
                 self.deliver_download(&plan.file_name, plan.format.mime, &bytes)?;
                 Ok(json!({"name": plan.file_name, "delivered": "download", "bytes": bytes.len()}))
             }
@@ -75,7 +75,7 @@ impl SheetApp {
                 if to.renamed && std::path::Path::new(&to.path).exists() {
                     return Err(format!("{} already exists; choose another name.", to.path));
                 }
-                let bytes = self.copy_bytes(plan.format, pdf_params)?;
+                let bytes = self.copy_bytes(plan.format, pdf_params, Some(&to.path))?;
                 gridcraft_engine::io::write_file(&to.path, &bytes).map_err(|e| e.to_string())?;
                 Ok(json!({"path": to.path, "delivered": "file", "bytes": bytes.len()}))
             }
@@ -121,8 +121,11 @@ impl SheetApp {
         }
     }
 
-    /// The bytes of the copy: the engine's encoder for workbook formats, the print for PDF.
-    fn copy_bytes(&mut self, format: ExportFormat, pdf_params: Json) -> Result<Vec<u8>, String> {
+    /// The bytes of the copy: the engine's encoder for workbook formats, the print for PDF. A copy
+    /// written at `path` (the desktop) is encoded for that file: links to other workbooks are
+    /// rebased for its folder and its own name goes into PivotChart links (`file.saveBytes
+    /// {path}`), as Save did, without making it the workbook's file.
+    fn copy_bytes(&mut self, format: ExportFormat, pdf_params: Json, path: Option<&str>) -> Result<Vec<u8>, String> {
         self.store_view_state();
         let r = if format.id == "pdf" {
             let mut params = if pdf_params.is_object() { pdf_params } else { json!({}) };
@@ -130,6 +133,8 @@ impl SheetApp {
                 map.remove("path");
             }
             self.session.run("file.exportPdf", params)?
+        } else if let Some(path) = path {
+            self.session.run("file.saveBytes", json!({"path": path}))?
         } else {
             self.session.run("file.saveBytes", json!({"format": format.id}))?
         };
@@ -139,18 +144,25 @@ impl SheetApp {
             .ok_or_else(|| "The copy could not be encoded.".to_string())
     }
 
-    /// A browser download, never the hosting page: [`crate::Services::download_copy`]. A page
-    /// that does not store saves may fall back to the plain download.
+    /// Web automation (`run("file.exportPdf")` with no path, the control channel): the caller gets
+    /// the PDF bytes back from the engine, as before, and the browser also downloads it as a
+    /// copy, never handed to a hosting page. The desktop only returns the bytes.
+    pub(super) fn deliver_pdf_result(&mut self, result: &Json) {
+        if result.get("path").is_some() || self.save_as_runtime().save_as_delivery() != Delivery::Download {
+            return;
+        }
+        let Some(bytes) = result.get("base64").and_then(Json::as_str).and_then(gridcraft_engine::io::base64_decode) else { return };
+        let delivered = self.save_as_plan("pdf").and_then(|plan| self.deliver_download(&plan.file_name, plan.format.mime, &bytes));
+        if let Err(e) = delivered {
+            self.alert(e);
+        }
+    }
+
+    /// A browser download, never the hosting page: [`crate::Services::download_copy`] only. A
+    /// window without it says so; the plain-Save `download`, which a hosting page replaces with
+    /// its own save, is never used for a copy.
     fn deliver_download(&self, name: &str, mime: &str, bytes: &[u8]) -> Result<(), String> {
-        if let Some(download) = &self.services.download_copy {
-            return download(name, mime, bytes);
-        }
-        match &self.services.download {
-            Some(download) if self.save_as_runtime() != Runtime::WebHosted => {
-                download(name, bytes);
-                Ok(())
-            }
-            _ => Err("Downloading a copy is not available in this window.".into()),
-        }
+        let download = self.services.download_copy.as_ref().ok_or("Downloading a copy is not available in this window.")?;
+        download(name, mime, bytes)
     }
 }

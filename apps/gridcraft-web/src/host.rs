@@ -42,7 +42,6 @@ use std::rc::Rc;
 
 use craft_web_host::web::{FileData, Host, Message};
 use craft_web_host::{Mode, Outgoing, file_name, message_type};
-use gridcraft_ui_egui::craft_share::export::Runtime;
 use gridcraft_ui_egui::{Inbox, Services, SheetApp};
 use wasm_bindgen::JsValue;
 
@@ -111,11 +110,14 @@ impl Bridge {
         services.host_inbox = Some(host_inbox.clone());
         self.listen(host_inbox, ctx);
         let bridge = self.clone();
-        services.download = Some(Box::new(move |name: &str, bytes: &[u8]| {
-            if let Err(e) = bridge.post_save(name, bytes) {
-                log::error!("couldn't hand {name} to the page: {e}");
-            }
-        }));
+        crate::delivery::hosted(
+            services,
+            Box::new(move |name: &str, bytes: &[u8]| {
+                if let Err(e) = bridge.post_save(name, bytes) {
+                    log::error!("couldn't hand {name} to the page: {e}");
+                }
+            }),
+        );
     }
 
     /// `?author=`: the host's name for the user signs new notes and comments.
@@ -141,7 +143,7 @@ impl Bridge {
     /// crate does not repeat a state it already reported).
     pub fn sync(&self, app: &mut SheetApp) {
         // Save As downloads either way; only plain Save asks whether the page stores saves.
-        app.services.runtime = Some(Runtime::web(self.receipts.borrow().confirms()));
+        app.services.runtime = Some(crate::delivery::host_runtime(self.receipts.borrow().confirms()));
         let saved = std::mem::take(&mut *self.saved.borrow_mut());
         sync_saved(&saved, app);
         self.apply_share(app);

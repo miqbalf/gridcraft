@@ -247,15 +247,26 @@ pub fn show(app: &mut SheetApp, ui: &mut Ui) {
     }
 }
 
-/// Save: plain Save, then back to the sheet. A new workbook asks for its file first (the save
-/// picker on the desktop, a download or the hosting page on the web); the Save As page is for
-/// copies, which never become the workbook's file.
+/// Save: plain Save. A workbook with a file saves it and returns to the sheet. A new workbook
+/// gets its file as it always did (the Save As page is only for copies now, so it no longer goes
+/// there): the save picker on the desktop, where the view returns to the sheet only once the
+/// workbook has its file (a cancelled pick keeps the view); a download or the hosting page on the
+/// web.
 fn save(app: &mut SheetApp, out: &mut Outcome) {
     if !app.commit_edit(0, 0, false, false) {
         return;
     }
-    app.run_or_alert("file.save", json!({}));
-    out.close = true;
+    if app.session.active().is_some_and(|d| d.path.is_some()) {
+        app.run_or_alert("file.save", json!({}));
+        out.close = true;
+        return;
+    }
+    let before = app.session.active().map(|d| (d.path.clone(), d.is_dirty()));
+    app.open_dialog("saveAs", json!({}));
+    let after = app.session.active().map(|d| (d.path.clone(), d.is_dirty()));
+    if after != before || app.services.pick_save.is_none() {
+        out.close = true;
+    }
 }
 
 // ---------------------------------------------------------------- navigation
@@ -387,6 +398,7 @@ fn recent_list(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &mut Ou
             t.text_dim,
         );
     }
+    #[cfg(not(target_arch = "wasm32"))]
     let now = crate::now_ms() / 1000.0;
     for path in app.ui.recent.iter().take(limit).cloned().collect::<Vec<_>>() {
         let (name, folder) = split_path(&path);
@@ -404,9 +416,11 @@ fn recent_list(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &mut Ou
         text.text(pos2(rect.left() + 42.0, rect.center().y + 9.0), Align2::LEFT_CENTER, &folder, theme::ui_font(11.5), t.text_dim);
         if modified_w > 0.0 {
             let (words, color) = match known.get(&path) {
+                #[cfg(not(target_arch = "wasm32"))]
                 Some(Modified::At(seconds)) => (age(lang, now - seconds), t.text_dim),
+                #[cfg(not(target_arch = "wasm32"))]
                 Some(Modified::Unknown) => (lang.tr("Not available").to_string(), t.text_disabled),
-                None => (String::new(), t.text_dim),
+                _ => (String::new(), t.text_dim),
             };
             p.text(pos2(rect.right() - modified_w, rect.center().y), Align2::LEFT_CENTER, words, theme::ui_font(12.0), color);
         }
@@ -420,12 +434,15 @@ fn recent_list(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &mut Ou
     }
 }
 
-/// What the file system said about a recent workbook.
+/// What the file system said about a recent workbook. The web build has no file system to ask,
+/// so it has no answers either.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Modified {
     /// When it was last changed, in seconds since 1970.
+    #[cfg(not(target_arch = "wasm32"))]
     At(f64),
     /// It can't be reached: moved, deleted, or on a drive that is away.
+    #[cfg(not(target_arch = "wasm32"))]
     Unknown,
 }
 
@@ -488,7 +505,9 @@ fn ask(_ctx: egui::Context, _paths: Vec<String>, _found: Arc<Mutex<HashMap<Strin
 
 /// How long ago, in words. The clock's time zone isn't known here, so the list tells ages rather
 /// than dates, which could be a day out. From two days on the counts are never one, so each
-/// language needs one form of "days", "weeks", "months" and "years".
+/// language needs one form of "days", "weeks", "months" and "years". Desktop only: the web build
+/// has no file times.
+#[cfg(not(target_arch = "wasm32"))]
 fn age(lang: Language, seconds: f64) -> String {
     const DAY: f64 = 86_400.0;
     let s = if seconds.is_finite() { seconds.max(0.0) } else { 0.0 };

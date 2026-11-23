@@ -23,9 +23,13 @@ struct Calls {
 type Log = Arc<Mutex<Calls>>;
 
 fn deliveries(log: &Log) -> Services {
-    let (d, u) = (log.clone(), log.clone());
+    let (d, c, u) = (log.clone(), log.clone(), log.clone());
     Services {
         download: Some(Box::new(move |name: &str, _: &[u8]| d.lock().unwrap().delivered.push(name.into()))),
+        download_copy: Some(Box::new(move |name: &str, _: &str, _: &[u8]| {
+            c.lock().unwrap().delivered.push(name.into());
+            Ok(())
+        })),
         open_url: Some(Box::new(move |url: &str| u.lock().unwrap().urls.push(url.into()))),
         ..Default::default()
     }

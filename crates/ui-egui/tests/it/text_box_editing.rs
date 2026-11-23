@@ -190,6 +190,11 @@ fn saving_and_switching_context_commit_to_the_original_text_box() {
     let downloaded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let sink = downloaded.clone();
     h.state_mut().services.download = Some(Box::new(move |_, bytes| *sink.lock().unwrap() = bytes.to_vec()));
+    let copy_sink = downloaded.clone();
+    h.state_mut().services.download_copy = Some(Box::new(move |_, _, bytes| {
+        *copy_sink.lock().unwrap() = bytes.to_vec();
+        Ok(())
+    }));
     for modifiers in [Modifiers::COMMAND, Modifiers::COMMAND | Modifiers::SHIFT] {
         edit_box(&mut h, id);
         replace(&mut h, "Saved from the text editor");

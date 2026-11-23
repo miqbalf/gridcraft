@@ -146,19 +146,20 @@ fn on_the_web_every_save_as_and_export_entry_point_downloads_a_copy() {
         title_bar_export(&mut h, item);
         last_copy_is(&log, ext);
     }
-    // The macOS menu bar's and the palette's commands, and the control channel without a path.
+    // The macOS menu bar's and the palette's commands (menu-style, `run_or_alert`).
     for (id, ext) in [("file.exportPdf", "pdf"), ("file.exportCsv", "csv"), ("file.exportHtml", "html")] {
         h.state_mut().run_or_alert(id, json!({}));
         last_copy_is(&log, ext);
         command_search(&mut h, id);
         last_copy_is(&log, ext);
-        control_run(&mut h, id, json!({}));
-        last_copy_is(&log, ext);
     }
+    // The control channel: Save As in a type, and automation's PDF (bytes back, and a copy).
     control_run(&mut h, "file.saveAs", json!({"format": "json"}));
     last_copy_is(&log, "json");
+    control_run(&mut h, "file.exportPdf", json!({}));
+    last_copy_is(&log, "pdf");
     let out = log.lock().unwrap();
-    assert_eq!(out.copies.len(), SAVE_AS.formats().len() + 3 + 4 + 9 + 1, "every entry point delivered one copy");
+    assert_eq!(out.copies.len(), SAVE_AS.formats().len() + 3 + 4 + 6 + 2, "every entry point delivered one copy");
     assert!(out.copies.iter().all(|(name, ..)| name.starts_with("Book1.")), "copies are named after the workbook");
     assert!(out.saves.is_empty(), "no Save As goes the plain Save way");
     drop(out);
@@ -287,4 +288,119 @@ fn file_save_of_a_new_workbook_is_a_plain_save_that_gives_it_its_file() {
     assert_eq!(path.as_deref(), Some(target.as_str()), "Save makes the picked file the workbook's");
     assert!(!dirty);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Automation (`run`, the control channel) keeps each command's own behaviour: Export as CSV or
+/// web page needs a `path` and honours its options; Export as PDF with no path returns the bytes.
+#[test]
+fn automation_keeps_the_commands_own_behaviour() {
+    let log = Log::default();
+    let mut h = harness(web(&log, Some(Runtime::Web)));
+    for id in ["file.exportCsv", "file.exportHtml"] {
+        let e = h.state_mut().run(id, json!({})).unwrap_err();
+        assert!(e.contains("path"), "{id}: {e}");
+    }
+    let pdf = h.state_mut().run("file.exportPdf", json!({"range": "A1:B2"})).unwrap();
+    assert!(pdf.get("base64").and_then(serde_json::Value::as_str).is_some_and(|b| !b.is_empty()), "the PDF bytes come back: {pdf}");
+    last_copy_is(&log, "pdf");
+    assert!(log.lock().unwrap().saves.is_empty());
+
+    let dir = std::env::temp_dir().join(format!("gridcraft-automation-export-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut h = harness(Services { pick_save_as: Some(Box::new(|_, _, _| panic!("automation opens no dialog"))), ..Default::default() });
+    h.state_mut().run("cell.set", json!({"cell": "A2", "input": "=1/3"})).unwrap();
+    let csv = dir.join("values.csv");
+    h.state_mut().run("file.exportCsv", json!({"path": &csv, "values": true})).unwrap();
+    assert!(std::fs::read_to_string(&csv).unwrap().contains("0.333333"), "`values: true` writes full precision");
+    let desktop_pdf = h.state_mut().run("file.exportPdf", json!({})).unwrap();
+    assert!(desktop_pdf.get("base64").is_some(), "desktop automation gets the PDF bytes, with no dialog");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The desktop copy is encoded for the file it goes to: a relative link to another workbook still
+/// names the same file from the copy's folder, as plain Save to another folder does. The workbook
+/// keeps its own file and link.
+#[test]
+fn a_desktop_copy_in_another_folder_keeps_relative_links_on_the_same_file() {
+    let a = std::env::temp_dir().join(format!("gridcraft-copy-link-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&a);
+    let b = a.join("b");
+    std::fs::create_dir_all(&b).unwrap();
+    let dest = a.join("Dest.xlsx");
+    std::fs::write(&dest, gridcraft_xlsx::testing::linked_workbook("Source.xlsx")).unwrap();
+    let target = b.join("Copy.xlsx").to_string_lossy().into_owned();
+    let mut h = crate::support::services_harness(
+        Services { runtime: Some(Runtime::Desktop), pick_save_as: Some(Box::new(move |_, _, _| Some(target.clone()))), ..Default::default() },
+        4,
+    );
+    h.state_mut().run("file.open", json!({"path": &dest})).unwrap();
+    h.run_steps(2);
+    assert!(h.state_mut().save_as_copy_or_alert("xlsx"), "{:?}", h.state().message);
+    assert_eq!(gridcraft_xlsx::testing::link_target(&std::fs::read(b.join("Copy.xlsx")).unwrap()), "../Source.xlsx");
+    assert_eq!(h.state().session.active().unwrap().path.as_deref(), Some(dest.to_str().unwrap()), "the window stays on Dest.xlsx");
+    let _ = std::fs::remove_dir_all(&a);
+}
+
+/// Desktop entry points other than the Save As page: the title bar's Export menu, the menu bar's
+/// Export as CSV and Export as PDF (with its options), F12 without the File tab, and a
+/// cancelled dialog, which writes nothing and says nothing.
+#[test]
+fn desktop_menus_and_keys_save_copies_through_the_typed_dialog() {
+    let dir = std::env::temp_dir().join(format!("gridcraft-desktop-entry-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+    let answer = Arc::new(Mutex::new(Some(dir.join("Out").to_string_lossy().into_owned())));
+    let (capture, pick) = (asked.clone(), answer.clone());
+    let mut h = harness(Services {
+        runtime: Some(Runtime::Desktop),
+        pick_save_as: Some(Box::new(move |_, _, ext| {
+            capture.lock().unwrap().push(ext.into());
+            pick.lock().unwrap().clone()
+        })),
+        ..Default::default()
+    });
+    let before = doc_state(&h);
+    title_bar_export(&mut h, "Export as Web Page (.html)…");
+    assert!(dir.join("Out.html").exists());
+    h.state_mut().run_or_alert("file.exportCsv", json!({}));
+    assert!(dir.join("Out.csv").exists());
+    h.state_mut().run_or_alert("file.exportPdf", json!({"range": "A1:A1"}));
+    assert!(std::fs::read(dir.join("Out.pdf")).unwrap().starts_with(b"%PDF-"));
+    h.state_mut().chrome.file_tab = false;
+    h.key_press(Key::F12);
+    h.run_steps(2);
+    assert!(dir.join("Out.xlsx").exists(), "F12 without the File tab saves a workbook copy");
+    assert_eq!(*asked.lock().unwrap(), ["html", "csv", "pdf", "xlsx"], "each dialog offers the chosen type");
+    *answer.lock().unwrap() = None;
+    assert!(!h.state_mut().save_as_copy_or_alert("tsv"));
+    assert!(!dir.join("Out.tsv").exists() && h.state().message.is_none(), "a cancelled dialog writes nothing and says nothing");
+    assert_eq!(doc_state(&h), before);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// File › Save of a new workbook is plain Save, as it always was: on the desktop the picked file
+/// becomes the workbook's (a cancelled pick keeps the File view open); on the web it downloads, or
+/// goes to a page that stores saves. Save As copies are not involved.
+#[test]
+fn file_save_of_a_new_workbook_on_the_web_and_hosted_is_the_plain_save() {
+    for runtime in [Runtime::Web, Runtime::WebHosted] {
+        let log = Log::default();
+        let mut h = harness(web(&log, Some(runtime)));
+        h.get_by_label("File").click();
+        h.run_steps(3);
+        click(&mut h, "Save");
+        let out = log.lock().unwrap();
+        assert_eq!(out.saves.len(), 1, "{runtime:?}: the workbook goes the plain-Save way");
+        assert!(out.saves[0].ends_with(".xlsx"));
+        assert!(out.copies.is_empty(), "{runtime:?}: no Save As copy");
+        drop(out);
+        assert_eq!(page(&h), None);
+    }
+    let mut h = harness(Services { pick_save: Some(Box::new(|_| None)), ..Default::default() });
+    h.get_by_label("File").click();
+    h.run_steps(3);
+    click(&mut h, "Save");
+    assert!(h.state().backstage.is_some(), "a cancelled pick keeps the File view");
+    assert!(doc_state(&h).0.is_none());
 }

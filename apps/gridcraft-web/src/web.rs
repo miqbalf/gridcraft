@@ -1,7 +1,6 @@
 //! The browser shell: web `Services`, drag-and-drop, and the eframe web runner.
 
 use gridcraft_engine::Session;
-use gridcraft_ui_egui::craft_share::export::Runtime;
 use gridcraft_ui_egui::{Inbox, Services, SheetApp};
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen::JsValue;
@@ -191,7 +190,7 @@ impl eframe::App for WebShell {
 fn services(inbox: Inbox, ctx: egui::Context) -> Services {
     let open_inbox = inbox.clone();
     let picture_ctx = ctx.clone();
-    Services {
+    let mut services = Services {
         copy_html: Some(Box::new(copy_html)),
         open_async: Some(Box::new(move || {
             let inbox = open_inbox.clone();
@@ -220,15 +219,6 @@ fn services(inbox: Inbox, ctx: egui::Context) -> Services {
                 ctx.request_repaint();
             });
         })),
-        // Save As and Export: the copy downloads, framed by a page or not (never handed to it).
-        runtime: Some(Runtime::Web),
-        download_copy: Some(Box::new(|name: &str, mime: &str, bytes: &[u8]| craft_web_host::web::download(name, mime, bytes))),
-        // Plain Save of the workbook: a host page takes this over (`host`).
-        download: Some(Box::new(|name: &str, bytes: &[u8]| {
-            if let Err(e) = download(name, bytes) {
-                log::error!("download of {name} failed: {e}");
-            }
-        })),
         print: Some(Box::new(|bytes: &[u8]| {
             if let Err(e) = print_pdf(bytes) {
                 log::error!("print failed: {e}");
@@ -246,7 +236,19 @@ fn services(inbox: Inbox, ctx: egui::Context) -> Services {
         })),
         inbox: Some(inbox),
         ..Default::default()
-    }
+    };
+    // Save As and Export copies download, framed by a page or not (never handed to it); plain
+    // Save downloads too, until a hosting page takes it over (`host`).
+    crate::delivery::browser(
+        &mut services,
+        Box::new(|name: &str, mime: &str, bytes: &[u8]| craft_web_host::web::download(name, mime, bytes)),
+        Box::new(|name: &str, bytes: &[u8]| {
+            if let Err(e) = download(name, bytes) {
+                log::error!("download of {name} failed: {e}");
+            }
+        }),
+    );
+    services
 }
 
 /// Start inside the copy gesture; deferring `write` can lose browser user activation.

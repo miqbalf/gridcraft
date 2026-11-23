@@ -133,9 +133,13 @@ fn escape_leaves_file_fields_before_closing_the_view() {
 #[test]
 fn save_actions_include_the_cell_draft_and_close_keeps_the_unsaved_prompt() {
     let downloads = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
-    let capture = downloads.clone();
+    let (capture, copies) = (downloads.clone(), downloads.clone());
     let mut h = harness(Services {
         download: Some(Box::new(move |name, bytes| capture.lock().unwrap().push((name.to_string(), bytes.to_vec())))),
+        download_copy: Some(Box::new(move |name, _, bytes| {
+            copies.lock().unwrap().push((name.to_string(), bytes.to_vec()));
+            Ok(())
+        })),
         ..Default::default()
     });
     h.input_mut().events.push(egui::Event::Text("123".into()));
@@ -286,9 +290,13 @@ fn file_account_shows_the_version_and_opens_about() {
 #[test]
 fn export_as_pdf_is_delivered_as_a_download() {
     let files = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
-    let capture = files.clone();
+    let (capture, copies) = (files.clone(), files.clone());
     let mut h = harness(Services {
         download: Some(Box::new(move |name, bytes| capture.lock().unwrap().push((name.to_string(), bytes.to_vec())))),
+        download_copy: Some(Box::new(move |name, _, bytes| {
+            copies.lock().unwrap().push((name.to_string(), bytes.to_vec()));
+            Ok(())
+        })),
         ..Default::default()
     });
     h.state_mut().run("file.exportPdf", serde_json::json!({})).unwrap();
