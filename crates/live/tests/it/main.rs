@@ -2,6 +2,8 @@
 
 mod axis;
 mod doc;
+#[cfg(any(feature = "test-util", feature = "native-hub"))]
+mod fingerprint;
 #[cfg(feature = "test-util")]
 mod free;
 #[cfg(feature = "test-util")]
@@ -12,8 +14,12 @@ mod junk;
 mod ordered;
 #[cfg(feature = "test-util")]
 mod presence;
+#[cfg(feature = "native-hub")]
+mod relay;
 #[cfg(feature = "test-util")]
 mod support;
+#[cfg(feature = "test-util")]
+mod trace;
 #[cfg(feature = "test-util")]
 mod undo;
 #[cfg(feature = "test-util")]
@@ -55,8 +61,14 @@ impl Rng {
 
 /// How many seeds each random test runs: `GRIDCRAFT_LIVE_SEEDS`, default 24.
 pub fn seeds() -> Vec<u64> {
+    seeds_or(24)
+}
+
+/// The seeds of a random test: `GRIDCRAFT_LIVE_SEED` runs one, else `GRIDCRAFT_LIVE_SEEDS` of
+/// them, else `default`.
+pub fn seeds_or(default: u64) -> Vec<u64> {
     match std::env::var("GRIDCRAFT_LIVE_SEED").ok().and_then(|v| v.trim().parse().ok()) {
         Some(one) => vec![one],
-        None => (0..std::env::var("GRIDCRAFT_LIVE_SEEDS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(24)).collect(),
+        None => (0..std::env::var("GRIDCRAFT_LIVE_SEEDS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)).collect(),
     }
 }
