@@ -259,11 +259,13 @@ pub struct SheetApp {
     /// Why a live session given at construction was refused: shown once the language is known.
     pub(crate) live_refusal: Option<&'static str>,
     /// Copies of live edits the room could not take (`gridcraft_live::UNMERGED_TEXT`), waiting to
-    /// be saved: (name, `.xlsx` bytes), oldest first.
-    pub(crate) pending_unmerged: Vec<(String, Vec<u8>)>,
+    /// be saved, oldest first.
+    pub(crate) pending_unmerged: Vec<gridcraft_live::UnmergedCopy>,
     /// Copies handed to a page that answers each, by the id it will answer: kept until it says
     /// it stored them.
-    pub(crate) copies_sent: Vec<(String, (String, Vec<u8>))>,
+    pub(crate) copies_sent: Vec<live::SentCopy>,
+    /// The host's clock at the last hand-over, in seconds, for [`live::COPY_ANSWER_SECS`].
+    pub(crate) copy_clock: f64,
     /// The page could not store a copy: from then on copies are downloaded when offered.
     pub(crate) page_refused_copy: bool,
     pub printing: printing::State,

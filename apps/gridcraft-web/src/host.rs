@@ -57,9 +57,10 @@
 //! - Local edits craft-live had to drop (taken back, a resync, damage, a replaced or refused
 //!   replica) and edits the room never confirmed when the session ended come back as a copy of the
 //!   workbook, `"{stem} (unmerged YYYY-MM-DD HHMM).xlsx"`. It goes to the page at once as a
-//!   `gridcraft:save` with `saveAs: true` (with an id `copy-N` for a host that answers saves) and
-//!   stays in the window until the page says `saved`; on `save-failed`, the info bar's Save a copy
-//!   downloads it.
+//!   `gridcraft:save` with `saveAs: true` and an id `copy-N` (a host that does not answer saves
+//!   gets a browser download instead) and stays in the window until the page says `saved`; on
+//!   `save-failed`, or no answer within 30 seconds, the info bar's Save a copy downloads it. A
+//!   run taken back is not saved unasked: its notice offers the copy.
 //!
 //! Tickets are never logged.
 //!
@@ -200,7 +201,7 @@ impl Bridge {
         }
         // A copy of unmerged live edits goes to the page as soon as there is one, and stays in
         // the window until the page says it stored it.
-        app.hand_over_copies();
+        app.hand_over_copies(js_sys::Date::now() / 1000.0);
         for answer in std::mem::take(&mut *self.copy_answers.borrow_mut()) {
             let (id, answer) = match answer {
                 Answer::Saved { id, name } => (id, Ok(name)),
@@ -214,19 +215,23 @@ impl Bridge {
         self.host.post_dirty(crate::live_ticket::page_dirty(self.live_on.get(), docs_dirty, app.live_unconfirmed(), app.copies_unsaved()));
     }
 
-    /// The copy of unmerged live edits, as a new file (`saveAs: true`). A host that answers saves
-    /// gets an id for it, so the window keeps the copy until the page says it stored it (or not).
+    /// The copy of unmerged live edits, as a new file (`saveAs: true`) with an id, so the window
+    /// keeps the copy until the page says it stored it (or not). A host that does not answer
+    /// saves has no `saveAs` in its contract, so the copy is the browser's download instead,
+    /// which is the person's own (`Ok(None)`).
     fn post_copy(&self, path: &str, bytes: &[u8]) -> Result<Option<String>, String> {
         let (name, save_as) = crate::live_ticket::copy_save(path);
-        let id = self.receipts.borrow().confirms().then(|| {
-            self.copies.set(self.copies.get() + 1);
-            format!("copy-{}", self.copies.get())
-        });
+        if !self.receipts.borrow().confirms() {
+            crate::web::download(&name, bytes)?;
+            return Ok(None);
+        }
+        self.copies.set(self.copies.get() + 1);
+        let id = format!("copy-{}", self.copies.get());
         let mut message = SaveMessage::new(&name, bytes);
         message.save_as = save_as;
-        message.id = id.as_deref();
+        message.id = Some(&id);
         self.save_target.post(message).map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")))?;
-        Ok(id)
+        Ok(Some(id))
     }
 
     fn post_save(&self, path: &str, bytes: &[u8]) -> Result<(), String> {

@@ -761,7 +761,7 @@ fn closing_the_live_workbook_with_offline_edits_hands_the_page_a_copy_kept_until
     assert!(h.state().live_unconfirmed(), "the edit is not in the room yet");
     h.state_mut().run("file.close", json!({"force": true})).expect("closes");
     h.step();
-    h.state_mut().hand_over_copies();
+    h.state_mut().hand_over_copies(0.0);
     let copy = posted.borrow().first().cloned().expect("the page got the copy");
     assert!(copy.0.starts_with("book (unmerged "), "{}", copy.0);
     assert_eq!(copy_value(&copy, "E5"), Value::Text("offline".into()));
@@ -780,12 +780,12 @@ fn a_copy_the_page_could_not_store_waits_and_save_a_copy_downloads_it() {
     type_offline(&mut rig, &mut h, "offline");
     h.state_mut().run("file.close", json!({"force": true})).expect("closes");
     h.step();
-    h.state_mut().hand_over_copies();
+    h.state_mut().hand_over_copies(0.0);
     assert_eq!(posted.borrow().len(), 1);
     assert!(h.state_mut().copy_answered("copy-1", Err("quota".into())));
     assert!(h.state().copies_waiting(), "it waits again");
     let action = h.state().notice.as_ref().and_then(|n| n.action.clone()).expect("the info bar offers it");
-    h.state_mut().hand_over_copies();
+    h.state_mut().hand_over_copies(0.0);
     assert_eq!(posted.borrow().len(), 1, "no second automatic hand-over to a page that refused");
     h.state_mut().open_dialog(&action.1, json!({}));
     let copy = downloaded.borrow().first().cloned().expect("downloaded");
@@ -804,7 +804,66 @@ fn a_session_the_host_ends_keeps_the_edits_the_room_never_confirmed() {
     h.step();
     assert!(!h.state().live_unconfirmed(), "a broken link's edits are the copy now");
     assert!(h.state().copies_unsaved(), "and the copy counts");
-    h.state_mut().hand_over_copies();
+    h.state_mut().hand_over_copies(0.0);
     let copy = posted.borrow().first().cloned().expect("the page got the copy");
     assert_eq!(copy_value(&copy, "E5"), Value::Text("unsent".into()));
+}
+
+#[test]
+fn a_copy_the_page_never_answers_goes_back_to_the_download_list() {
+    let (services, posted, downloaded) = copy_services();
+    let (mut rig, app) = rig_with(Access::Edit, services);
+    let mut h = harness(app);
+    settle(&mut rig, &mut h);
+    type_offline(&mut rig, &mut h, "offline");
+    h.state_mut().run("file.close", json!({"force": true})).expect("closes");
+    h.step();
+    h.state_mut().hand_over_copies(100.0);
+    assert_eq!(posted.borrow().len(), 1);
+    assert!(!h.state().copies_waiting(), "handed over, waiting for the answer");
+    h.state_mut().hand_over_copies(100.0 + gridcraft_ui_egui::live::COPY_ANSWER_SECS / 2.0);
+    assert!(!h.state().copies_waiting(), "still waiting");
+    h.state_mut().hand_over_copies(100.0 + gridcraft_ui_egui::live::COPY_ANSWER_SECS);
+    assert!(h.state().copies_waiting(), "no answer in time: it waits to be downloaded");
+    assert_eq!(posted.borrow().len(), 1, "not handed to the silent page again");
+    let action = h.state().notice.as_ref().and_then(|n| n.action.clone()).expect("the info bar offers it");
+    h.state_mut().open_dialog(&action.1, json!({}));
+    assert_eq!(downloaded.borrow().len(), 1, "downloaded");
+    assert!(!h.state_mut().copy_answered("copy-1", Ok(None)), "a late answer names no copy");
+}
+
+#[test]
+fn a_run_taken_back_is_offered_on_its_own_notice_and_never_saved_unasked() {
+    let (services, posted, _) = copy_services();
+    let (mut rig, app) = rig_with(Access::Edit, services);
+    let mut h = harness(app);
+    settle(&mut rig, &mut h);
+    h.state_mut().run("home.insertRows", json!({"rows": "3:3"})).expect("queued");
+    rig.relay.lapse("grid/struct");
+    let mut raw = rig.relay.connect("bob-raw", "Bob", true);
+    raw.send(ClientMsg::Lock { doc: ROOM.into(), scope: "grid/struct".into() }).expect("sent");
+    settle(&mut rig, &mut h);
+    h.state_mut().hand_over_copies(0.0);
+    assert!(posted.borrow().is_empty(), "offered, not saved");
+    assert!(h.state().copies_waiting());
+    // The info bar shows one notice at a time (the undo history's comes first): go to the take-back's.
+    let is_take_back = |text: &str| gridcraft_live::TAKE_BACK_TEXTS.iter().any(|t| text.starts_with(t));
+    let mut seen = Vec::new();
+    for _ in 0..5 {
+        let text = notice_text(h.state());
+        if is_take_back(&text) {
+            break;
+        }
+        seen.push(text);
+        h.state_mut().notice = None;
+        h.step();
+    }
+    let notice = h.state().notice.clone().expect("a notice");
+    assert!(is_take_back(&notice.text), "the take-back notice, after {seen:?}: {:?}", notice.text);
+    assert!(seen.iter().all(|t| !t.contains(gridcraft_live::UNMERGED_TEXT)), "no second notice for the copy: {seen:?}");
+    assert!(!notice.text.contains(gridcraft_live::UNMERGED_TEXT), "one notice");
+    let action = notice.action.expect("it offers the copy");
+    h.state_mut().open_dialog(&action.1, json!({}));
+    let copy = posted.borrow().first().cloned().expect("saved when asked");
+    assert_eq!(copy_value(&copy, "A4"), Value::Number(3.0), "the copy holds the inserted row");
 }

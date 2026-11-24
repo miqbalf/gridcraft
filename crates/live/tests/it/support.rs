@@ -270,6 +270,16 @@ impl Room {
         }
     }
 
+    /// Takes peer `i`'s unmerged copies as a host does (before the notices), and the notices
+    /// that came with them.
+    pub fn take_copies(&mut self, i: usize) -> Vec<gridcraft_live::UnmergedCopy> {
+        let p = &mut self.peers[i];
+        let copies = p.live.take_unmerged();
+        let n = p.live.take_notices();
+        p.notices.extend(n);
+        copies
+    }
+
     pub fn notices_of(&self, i: usize) -> &[String] {
         &self.peers[i].notices
     }

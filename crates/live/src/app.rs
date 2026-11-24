@@ -112,16 +112,10 @@ pub(crate) struct Mapping {
 }
 
 impl Mapping {
-    /// Keeps `state` (the replica with local edits the room lacks) for the unmerged copy, and
-    /// tells the person once while a copy waits.
+    /// Keeps `state` (the replica with local edits the room lacks) for the unmerged copy. The
+    /// person is told once the copy is built ([`crate::GridLive::take_unmerged`]), never before.
     pub(crate) fn keep_unmerged(&mut self, state: Vec<u8>) {
-        match self.unmerged.as_mut() {
-            Some(u) => u.states.push(state),
-            None => {
-                self.unmerged = Some(crate::unmerged::Unmerged { states: vec![state], at: None });
-                self.notices.push(crate::unmerged::UNMERGED_TEXT.to_owned());
-            }
-        }
+        self.unmerged.get_or_insert_with(Default::default).states.push(state);
     }
 
     /// Clears the undo state (steps, queued and running ordered undos, held undos, skipped-key

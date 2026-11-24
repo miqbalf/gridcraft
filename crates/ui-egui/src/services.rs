@@ -6,8 +6,9 @@ type CopyHtml = Box<dyn FnMut(&str, &str) -> Result<(), String>>;
 type Download = Box<dyn Fn(&str, &[u8])>;
 type PrintPdf = Box<dyn Fn(&[u8])>;
 /// Hands the copy of unmerged live edits (name, bytes) to the host page as a new file. `Ok(Some(id))`
-/// when the page will answer it ([`crate::SheetApp::copy_answered`]), `Ok(None)` when it was
-/// taken with no answer to come, `Err` when it could not be handed over.
+/// when the page will answer it ([`crate::SheetApp::copy_answered`]), `Ok(None)` when the host
+/// downloaded it instead (a page that does not answer saves), `Err` when it could not be handed
+/// over.
 pub type SaveCopy = Box<dyn FnMut(&str, &[u8]) -> Result<Option<String>, String>>;
 
 /// Host services the platform shell provides (file pickers, opening URLs).

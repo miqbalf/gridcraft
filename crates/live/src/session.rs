@@ -6,7 +6,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
-use craft_collab::{Hub, LiveError, Replica};
+use craft_collab::{ClientMsg, Hub, LiveError, Replica};
 use craft_live::ordered::{Action, Ordered, Polled};
 use craft_live::{Access, LiveApp, LiveEditing, LiveStatus, uid_of};
 use gridcraft_calc::VolatileSource;
@@ -128,6 +128,10 @@ pub struct GridLive<H: Hub> {
     room: String,
     /// The person's local date and time, for the unmerged copy's name (the web host gives one).
     wall: Option<WallClock>,
+    /// The names the unmerged copies were given.
+    copy_names: crate::unmerged::Names,
+    /// Notices gathered and not taken yet ([`GridLive::take_notices`]).
+    told: Vec<String>,
 }
 
 type WallClock = Box<dyn FnMut() -> chrono::NaiveDateTime + Send>;
@@ -254,6 +258,8 @@ impl<H: Hub> GridLive<H> {
             broken_sent: false,
             room: room.to_owned(),
             wall: None,
+            copy_names: crate::unmerged::Names::default(),
+            told: Vec::new(),
         };
         if let Err(e) = live.bind(session) {
             // Do not leave the document open in the host's session.
@@ -350,23 +356,45 @@ impl<H: Hub> GridLive<H> {
         }
     }
 
-    /// The `.xlsx` bytes of the base with this replica's local edits that craft-live was about
-    /// to drop (a run taken back, a resync, damage, a replaced or a refused replica, or a
-    /// session ended with edits the room never confirmed), and the copy's name
-    /// ([`crate::unmerged_name`]); `None` otherwise. Taken once; every hand-over since the last
-    /// take is in it. A notice ([`crate::UNMERGED_TEXT`]) says when one starts waiting: hosts
-    /// call this after every pump.
-    pub fn take_unmerged(&mut self) -> Option<(String, Vec<u8>)> {
+    /// The copies of this replica's local edits that craft-live was about to drop (a run taken
+    /// back, a resync, damage, a replaced or a refused replica, or a session ended with edits the
+    /// room never confirmed): the base with them as `.xlsx`, named uniquely
+    /// ([`crate::unmerged_name`]). Empty when none waits. Taken once; every hand-over since the
+    /// last take is in it. Hosts call this after every pump, before [`GridLive::take_notices`].
+    ///
+    /// The person is told only once a copy exists: [`crate::UNMERGED_TEXT`], or for a run taken
+    /// back its own notice, which the host gives the copy's Save action. A kept state that builds
+    /// into no workbook comes back as a recovery file ([`crate::RECOVERY_TEXT`]): nothing kept is
+    /// ever dropped.
+    pub fn take_unmerged(&mut self) -> Vec<crate::UnmergedCopy> {
+        self.gather_notices();
         self.stamp_unmerged();
-        let u = self.map.unmerged.take()?;
-        let at = u.at.unwrap_or_default();
-        match crate::unmerged::copy_bytes(&self.map.base, &u.states) {
-            Ok(bytes) => Some((crate::unmerged::unmerged_name(&self.map.name, at), bytes)),
-            Err(e) => {
-                log::warn!("gridcraft-live: the unmerged copy could not be built: {e}");
-                None
-            }
+        let Some(u) = self.map.unmerged.take() else { return Vec::new() };
+        let built = crate::unmerged::build(&self.map.base, &u.states);
+        let mut copies = Vec::new();
+        for bytes in built.workbooks {
+            let name = self.copy_names.next(&self.map.name, u.at, "xlsx");
+            copies.push(crate::UnmergedCopy { name, bytes, taken_back: u.taken_back, recovery: false });
         }
+        if !copies.is_empty() && !u.taken_back {
+            self.told.push(crate::unmerged::UNMERGED_TEXT.to_owned());
+        }
+        for bytes in built.unbuilt {
+            let name = self.copy_names.next(&self.map.name, u.at, "yrs");
+            copies.push(crate::UnmergedCopy { name, bytes, taken_back: u.taken_back, recovery: true });
+        }
+        if copies.iter().any(|c| c.recovery) {
+            self.told.push(crate::unmerged::RECOVERY_TEXT.to_owned());
+        }
+        copies
+    }
+
+    /// Keeps `state` as if craft-live had handed it over (an unbuildable state, for the test that
+    /// it does not sink the others).
+    #[cfg(feature = "test-util")]
+    #[doc(hidden)]
+    pub fn keep_unmerged_state(&mut self, state: Vec<u8>) {
+        self.map.keep_unmerged(state);
     }
 
     /// Whether a copy of unmerged edits waits for [`GridLive::take_unmerged`].
@@ -381,13 +409,13 @@ impl<H: Hub> GridLive<H> {
         self.wall = Some(clock);
     }
 
-    /// Local edits the room does not have yet, kept as the unmerged copy before this session
-    /// goes: unless the link is up and live (they are on their way), or it broke or is read-only
-    /// (craft-live handed them over at the break; a viewer has none).
+    /// Local edits the room has not confirmed, kept as the unmerged copy before this session goes,
+    /// whatever the link's state: an edit sent while connected may still wait for the next chunk
+    /// of its ordered run, or for a retry after a refusal, and goes with the session. A copy that
+    /// also landed is harmless; a lost one is not. Only a broken link keeps nothing more
+    /// (craft-live handed its edits over at the break), and a viewer has none.
     fn keep_unconfirmed(&mut self) {
-        let status = self.core.status();
-        let sent = matches!(status, LiveStatus::Live { .. }) && self.core.live().connected();
-        if sent || matches!(status, LiveStatus::Broken(_) | LiveStatus::ReadOnly) || self.core.live().unconfirmed_edits() == 0 {
+        if matches!(self.core.status(), LiveStatus::Broken(_) | LiveStatus::ReadOnly) || self.core.live().unconfirmed_edits() == 0 {
             return;
         }
         if let Some(state) = self.core.live().doc().map(GridDoc::state) {
@@ -408,12 +436,7 @@ impl<H: Hub> GridLive<H> {
         if session.document_index(self.map.doc).is_some() {
             self.flush(session);
         }
-        if !matches!(self.core.status(), LiveStatus::Broken(_) | LiveStatus::ReadOnly)
-            && self.core.live().unconfirmed_edits() > 0
-            && let Some(state) = self.core.live().doc().map(GridDoc::state)
-        {
-            self.map.keep_unmerged(state);
-        }
+        self.keep_unconfirmed();
         self.core.end(reason);
         self.stamp_unmerged();
     }
@@ -545,6 +568,11 @@ impl<H: Hub> GridLive<H> {
         match class(id) {
             Class::Local => {
                 self.activate(session)?;
+                if matches!(id, "file.close" | "window.close") {
+                    // Edits queued in this frame become updates while the workbook is still open:
+                    // after the close nothing can read them.
+                    self.flush(session);
+                }
                 let done = session.execute(id, params).map_err(|e| e.to_string())?;
                 self.flush(session);
                 Ok(Ran::Done(done))
@@ -837,6 +865,13 @@ impl<H: Hub> GridLive<H> {
     }
 
     pub fn take_notices(&mut self) -> Vec<String> {
+        self.gather_notices();
+        std::mem::take(&mut self.told)
+    }
+
+    /// Moves what this crate and the link have to say into `told`, and marks a waiting copy as a
+    /// run taken back when a notice says one was.
+    fn gather_notices(&mut self) {
         for n in std::mem::take(&mut self.map.notices) {
             self.core.push_notice(n);
         }
@@ -855,7 +890,12 @@ impl<H: Hub> GridLive<H> {
                 notices.push(TAKEN_BACK_TEXT.to_owned());
             }
         }
-        notices
+        if let Some(u) = self.map.unmerged.as_mut()
+            && notices.iter().any(|n| crate::unmerged::TAKE_BACK_TEXTS.contains(&n.as_str()))
+        {
+            u.taken_back = true;
+        }
+        self.told.extend(notices);
     }
 
     /// Moves the reset count without the app's reset hook, as a rebuild the hook does not see
@@ -955,16 +995,20 @@ impl<H: Hub> GridLive<H> {
         self.core.live().doc()
     }
 
-    /// Ends the session: the engine's observer, undo hook and random source come off, so the
-    /// workbook is an ordinary one again. Returns the unmerged copy ([`GridLive::take_unmerged`])
-    /// when local edits never reached the room: the host saves it, as for any other copy.
-    #[must_use = "the unmerged copy holds edits the other editors never got"]
-    pub fn stop(mut self, session: &mut Session) -> Option<(String, Vec<u8>)> {
-        // Queued edits go out, and those the room lacks are kept.
+    /// Ends the session: queued edits are shared, every edit the room has not confirmed is kept,
+    /// the window leaves the room by name (so the other editors stop drawing it at once), and the
+    /// engine's observer, undo hook and random source come off, so the workbook is an ordinary
+    /// one again. Returns the unmerged copies ([`GridLive::take_unmerged`]): the host saves them,
+    /// as any other copy.
+    #[must_use = "the unmerged copies hold edits the other editors never got"]
+    pub fn stop(mut self, session: &mut Session) -> Vec<crate::UnmergedCopy> {
+        // Queued edits go out first (a close runs through `run`, which flushes before it), then
+        // what the room lacks is kept, and only then is the room left.
         if session.document_index(self.map.doc).is_some() {
             self.flush(session);
         }
         self.keep_unconfirmed();
+        let _ = self.core.hub_mut().send(ClientMsg::Leave { doc: self.room.clone() });
         session.set_observer(None);
         if session.live_undo_doc() == Some(self.map.doc) {
             // `set_live_undo_hook_for` refuses a closed document; this clears the hook either way.

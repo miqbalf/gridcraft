@@ -45,7 +45,7 @@ pub use op::Op;
 pub use ops::{LINES_MAX, TOO_MANY_TEXT};
 pub use ordered::Tracked;
 pub use session::{BaseFile, GridLive, LiveFail, Peer, Ran, schema, volatile_for, workbook_from_state};
-pub use unmerged::{UNMERGED_TEXT, unmerged_name};
+pub use unmerged::{RECOVERY_TEXT, TAKE_BACK_TEXTS, UNMERGED_TEXT, UnmergedCopy, unmerged_name};
 pub use volatile::LiveVolatile;
 
 /// Rows, for callers that name an axis without importing the formula crate.

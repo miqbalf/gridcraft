@@ -49,6 +49,7 @@ impl SheetApp {
             live_refusal: live_refused,
             pending_unmerged: Vec::new(),
             copies_sent: Vec::new(),
+            copy_clock: 0.0,
             page_refused_copy: false,
             toast: None,
             notice: None,
