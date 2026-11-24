@@ -31,9 +31,9 @@ gridcraft-live = { path = "crates/live" }
 libm = "0.2.16"
 # Live co-editing (collab-craft, miqbalf fork): departs from AGENTS.md rule 10 by owner decision
 # (as for WordCraft). All three come from one collab-craft revision.
-craft-collab = { git = "https://github.com/miqbalf/collab-craft", rev = "e29e9582c1cf3d8e8d72b9e73409312ce4095866", version = "=0.1.0" }
-craft-live = { git = "https://github.com/miqbalf/collab-craft", rev = "e29e9582c1cf3d8e8d72b9e73409312ce4095866", version = "=0.1.0" }
-craft-live-worker = { git = "https://github.com/miqbalf/collab-craft", rev = "e29e9582c1cf3d8e8d72b9e73409312ce4095866", version = "=0.1.0" }
+craft-collab = { git = "https://github.com/miqbalf/collab-craft", rev = "c5fd35adebb53da5803668cc09d7be4f0e02b677", version = "=0.1.0" }
+craft-live = { git = "https://github.com/miqbalf/collab-craft", rev = "c5fd35adebb53da5803668cc09d7be4f0e02b677", version = "=0.1.0" }
+craft-live-worker = { git = "https://github.com/miqbalf/collab-craft", rev = "c5fd35adebb53da5803668cc09d7be4f0e02b677", version = "=0.1.0" }
 # Every craft-libs crate (craft-update, craft-window and the file-format crates here, craft-ui in
 # ui-egui, craft-print in the app, craft-web-api and craft-web-host in the web app) comes from one
 # craft-libs revision.

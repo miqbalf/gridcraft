@@ -281,6 +281,31 @@ fn typing_into_a_deleted_row_tells_the_typist_with_the_value() {
     same_everywhere(&room, "typing into a deleted row");
 }
 
+/// G13 fix-1 review N3: an undo of a delete brings a line back next to deleted lines, as an
+/// insert does, so a range end on a deleted line next to it can read (by id) as the line that
+/// came back.
+#[test]
+fn an_undone_delete_next_to_a_deleted_range_end_agrees_everywhere() {
+    for typed_end in ["=SUM(A2:A5)", "=SUM(A1:A2)"] {
+        let mut room = Room::new(2);
+        // Alice deletes row 2; Bob types a formula naming it before he hears of the delete.
+        room.run(0, "home.deleteRows", json!({"rows": "2:2"})).unwrap();
+        for _ in 0..4 {
+            room.pump(0);
+        }
+        room.run(1, "cell.set", json!({"cell": "E1", "input": typed_end})).unwrap();
+        room.settle();
+        same_everywhere(&room, "the formula on the deleted row");
+        // A separate delete of the row right after it (row 3 of the base, now row 2), then its undo.
+        room.run(0, "home.deleteRows", json!({"rows": "2:2"})).unwrap();
+        room.settle();
+        same_everywhere(&room, "the second delete");
+        room.run(0, "edit.undo", json!({})).unwrap();
+        room.settle();
+        same_everywhere(&room, &format!("the second delete undone ({typed_end})"));
+    }
+}
+
 #[test]
 fn a_formula_typed_into_a_deleted_row_is_told_as_typed() {
     let mut room = Room::new(2);
@@ -529,6 +554,39 @@ fn a_rejoin_after_the_edit_ran_keeps_the_edit_once_and_tells_nothing() {
     room.run(1, "home.deleteRows", json!({"rows": "2:2"})).unwrap();
     room.settle();
     same_everywhere(&room, "after the rejoin");
+}
+
+/// c9-save2: the relay restarted (or dropped the room) and says so on the rejoin
+/// (`history_lost`). An editor that held the settled document goes on, minting in the space the
+/// new join granted, so its new lines and ops cannot meet ids the lost counter hands out again.
+#[test]
+fn a_rejoin_that_lost_the_rooms_history_goes_on_in_a_new_space() {
+    let mut room = Room::new(2);
+    room.run(0, "home.insertRows", json!({"rows": "3:3"})).unwrap();
+    room.run(1, "cell.set", json!({"cell": "B2", "input": "before"})).unwrap();
+    room.settle();
+    let mem = |room: &Room| room.peers[0].live.core().hub().inner().mem().clone();
+    let before = room.relay.granted_space(&mem(&room));
+    *room.peers[0].lose_history.borrow_mut() = true;
+    room.relay.drop_link(&mem(&room));
+    room.relay.restore_link(&mem(&room));
+    room.settle();
+    let after = room.relay.granted_space(&mem(&room));
+    assert_ne!(before, after, "the rejoin was granted another space");
+    assert_eq!(room.peers[0].live.core().live().space(), after, "and the replica took it, as only a lost history allows");
+    assert!(!*room.peers[0].lose_history.borrow(), "the rejoin said the history was lost");
+    room.assert_all_live("after a rejoin that lost the history");
+    // Both go on editing, structure and cells, and agree.
+    room.run(0, "home.insertRows", json!({"rows": "2:3"})).unwrap();
+    room.settle();
+    room.run(1, "home.insertColumns", json!({"cols": "B:B"})).unwrap();
+    room.run(0, "cell.set", json!({"cell": "A2", "input": "after"})).unwrap();
+    room.settle();
+    room.run(0, "home.deleteRows", json!({"rows": "5:5"})).unwrap();
+    room.settle();
+    room.assert_all_live("editing after the lost history");
+    same_everywhere(&room, "after a rejoin that lost the history");
+    assert_eq!(value_at(&room, 1, "A2"), Value::Text("after".into()));
 }
 
 #[test]

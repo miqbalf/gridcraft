@@ -224,6 +224,10 @@ impl<H: Hub> Hub for Tracked<H> {
     fn set_token(&mut self, token: String) {
         self.inner.set_token(token);
     }
+
+    fn set_space(&mut self, space: u32) {
+        self.inner.set_space(space);
+    }
 }
 
 /// Sends what the lock's queue asks for, best effort: a failed send is the same as a lost

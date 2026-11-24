@@ -318,3 +318,55 @@ fn every_update_kind_passes_the_relay_gate() {
     }
     assert_eq!(dump(&joiner), dump(&d));
 }
+
+fn varint(out: &mut Vec<u8>, mut n: u64) {
+    while n >= 0x80 {
+        out.push((n as u8 & 0x7f) | 0x80);
+        n >>= 7;
+    }
+    out.push(n as u8);
+}
+
+/// An update of `blocks` one-clock GC blocks from client 127: past the op item cap when
+/// `blocks` is, and no content anywhere.
+fn gc_flood(blocks: u64) -> Vec<u8> {
+    let mut u = vec![1];
+    varint(&mut u, blocks);
+    u.extend([0x7f, 0]);
+    for _ in 0..blocks {
+        u.extend([0, 1]);
+    }
+    u.push(0);
+    u
+}
+
+/// c9-save2 replays a checkpoint the room ordered with `apply_state`. GridDoc names what it
+/// changed, as for an op, and checks it under the state item cap (2^22), not the op cap (2^20).
+#[test]
+fn a_checkpoint_replays_into_griddoc_as_a_state() {
+    let s = seed(9);
+    let (mut a, mut b) = (peer(&s, 1), peer(&s, 2));
+    let sheet = Id::base(0);
+    let key = cell_key(Id::base(2), Id::base(1));
+    a.write(|t| {
+        t.set_cell(sheet, &key, &content(json!(42), "alice"));
+        t.set_fmt(sheet, &key, "s3");
+    })
+    .unwrap();
+    // The checkpoint: the whole document, as the service writes it.
+    let checkpoint = a.state();
+    let changes = Replica::apply_state(&mut b, &checkpoint).expect("apply_state");
+    assert!(changes.contains(&GridChange::Cells { sheet, keys: vec![key.clone()] }), "{changes:?}");
+    assert!(changes.contains(&GridChange::Formats { sheet, keys: vec![key.clone()] }), "{changes:?}");
+    assert_eq!(dump(&a), dump(&b), "the checkpoint replayed whole");
+    assert_eq!(Replica::apply_state(&mut b, &checkpoint).expect("again"), Vec::<GridChange>::new(), "a replay changes nothing");
+    assert_eq!(dump(&a), dump(&b), "and leaves the document as it was");
+    // Past the op item cap and under the state cap: refused as an op, taken as a checkpoint.
+    let flood = gc_flood(2 << 20);
+    let mut c = peer(&s, 3);
+    let before = dump(&c);
+    assert_eq!(c.apply(&flood), Err(craft_collab::LiveError::TooLarge), "too many items for an op");
+    Replica::apply_state(&mut c, &flood).expect("a checkpoint may hold more");
+    assert!(!c.damaged(), "the replica stays sound");
+    assert_eq!(dump(&c), before, "and the document is unchanged");
+}

@@ -26,10 +26,15 @@ pub struct SpyHub {
     /// While set, the relay's error answers (a refused submit) are held back.
     pub hold_errors: Rc<RefCell<bool>>,
     held: Vec<ServerMsg>,
-    /// While set, the relay's ordered edits (`Op`) reach this peer late: they are held back, in
-    /// order, while lock answers still arrive (network latency, as the relay allows).
+    /// While set, the relay's ordered edits (`Op`) reach this peer late (network latency).
+    /// Messages ahead of the first held `Op` (a lock answer, say) still arrive; from that `Op`
+    /// on, everything is held, in order, as a real link would deliver it late. Nothing is ever
+    /// passed ahead of an `Op` the relay ordered before it.
     pub hold_ops: Rc<RefCell<bool>>,
     held_ops: Vec<ServerMsg>,
+    /// While set, the next join answer says the room lost its history (`history_lost`, a relay
+    /// restart or a room dropped after its grace), as c9-save2's relay does; then it clears.
+    pub lose_history: Rc<RefCell<bool>>,
     /// How many lock requests this hub sent.
     pub locks: Rc<RefCell<usize>>,
 }
@@ -54,10 +59,17 @@ impl Hub for SpyHub {
     }
     fn poll(&mut self) -> Vec<ServerMsg> {
         let mut now = self.inner.poll();
+        for m in &mut now {
+            if let ServerMsg::Joined { history_lost, .. } = m
+                && std::mem::take(&mut *self.lose_history.borrow_mut())
+            {
+                *history_lost = true;
+            }
+        }
         if *self.hold_ops.borrow() {
-            let (ops, rest): (Vec<_>, Vec<_>) = now.into_iter().partition(|m| matches!(m, ServerMsg::Op { .. }));
-            self.held_ops.extend(ops);
-            now = rest;
+            // Hold from the first `Op` on (or everything, when one is already held).
+            let from = if self.held_ops.is_empty() { now.iter().position(|m| matches!(m, ServerMsg::Op { .. })).unwrap_or(now.len()) } else { 0 };
+            self.held_ops.extend(now.drain(from..));
         } else if !self.held_ops.is_empty() {
             let mut late = std::mem::take(&mut self.held_ops);
             late.append(&mut now);
@@ -78,6 +90,9 @@ impl Hub for SpyHub {
     fn set_token(&mut self, token: String) {
         self.inner.set_token(token);
     }
+    fn set_space(&mut self, space: u32) {
+        self.inner.set_space(space);
+    }
 }
 
 pub struct Peer {
@@ -87,6 +102,7 @@ pub struct Peer {
     pub fenced: Rc<RefCell<Vec<bool>>>,
     pub hold_errors: Rc<RefCell<bool>>,
     pub hold_ops: Rc<RefCell<bool>>,
+    pub lose_history: Rc<RefCell<bool>>,
     pub locks: Rc<RefCell<usize>>,
     pub notices: Vec<String>,
 }
@@ -149,6 +165,7 @@ impl Room {
         let hold_errors = Rc::new(RefCell::new(false));
         let hold_ops = Rc::new(RefCell::new(false));
         let locks = Rc::new(RefCell::new(0));
+        let lose_history = Rc::new(RefCell::new(false));
         let hub = SpyHub {
             inner: hub,
             sizes: sizes.clone(),
@@ -157,6 +174,7 @@ impl Room {
             held: Vec::new(),
             hold_ops: hold_ops.clone(),
             held_ops: Vec::new(),
+            lose_history: lose_history.clone(),
             locks: locks.clone(),
         };
         let mut session = Session::new();
@@ -165,7 +183,7 @@ impl Room {
             Some(h) => GridLive::start_with(hub, ROOM, &base, access, &uid, &mut session, h),
             None => GridLive::start(hub, ROOM, &base, access, &uid, &mut session),
         };
-        self.peers.push(Peer { session, live: live.unwrap(), sizes, fenced, hold_errors, hold_ops, locks, notices: Vec::new() });
+        self.peers.push(Peer { session, live: live.unwrap(), sizes, fenced, hold_errors, hold_ops, lose_history, locks, notices: Vec::new() });
         self.peers.len() - 1
     }
 

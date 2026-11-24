@@ -277,26 +277,27 @@ impl Axis {
         areas(&positions)
     }
 
-    /// The deleted ids right next to `ids` (explicit ids that are next to each other), on
-    /// either side, up to the nearest id that is not deleted. A range end on a deleted line
-    /// reads as the nearest surviving line, so it is these ends an insert of `ids` can change.
+    /// The deleted ids right next to `ids` (ids that are next to each other, explicit or in the
+    /// implicit tail), on either side, up to the nearest id that is not deleted. A range end on a
+    /// deleted line reads as the nearest surviving line, so it is these ends an insert of `ids`,
+    /// or their undelete, can change.
     #[must_use]
     pub fn deleted_next_to(&self, ids: &[Id]) -> Vec<Id> {
-        let at: Vec<usize> = ids.iter().filter_map(|id| self.index.get(id).map(|(i, _)| *i)).collect();
+        let len = self.explicit.len() as u64;
+        // An id's place in the whole order: the explicit prefix, then the base ids of the tail.
+        let ordinal = |id: &Id| match self.index.get(id) {
+            Some((i, _)) => Some(*i as u64),
+            None => (id.0 >= self.next_base && id.0 < SPACE_ONE).then(|| len + (id.0 - self.next_base)),
+        };
+        let id_at = |k: u64| match usize::try_from(k).ok().and_then(|k| self.explicit.get(k)) {
+            Some(id) => Some(*id),
+            None => k.checked_sub(len).map(|t| self.next_base + t).filter(|b| *b < SPACE_ONE).map(Id),
+        };
+        let at: Vec<u64> = ids.iter().filter_map(ordinal).collect();
         let (Some(lo), Some(hi)) = (at.iter().min().copied(), at.iter().max().copied()) else { return Vec::new() };
-        let gone = |id: &&Id| self.deleted.contains(*id);
-        let mut out: Vec<Id> = self.explicit.get(..lo).unwrap_or_default().iter().rev().take_while(gone).copied().collect();
-        let after = self.explicit.get(hi + 1..).unwrap_or_default();
-        let run = after.iter().take_while(gone).count();
-        out.extend(after.iter().take(run).copied());
-        if run == after.len() {
-            // The run goes on into the implicit tail of base ids.
-            let mut b = self.next_base;
-            while b < SPACE_ONE && self.deleted.contains(&Id(b)) {
-                out.push(Id(b));
-                b += 1;
-            }
-        }
+        let gone = |id: &Id| self.deleted.contains(id);
+        let mut out: Vec<Id> = (0..lo).rev().map_while(id_at).take_while(gone).collect();
+        out.extend((hi + 1..).map_while(id_at).take_while(gone));
         out
     }
 }

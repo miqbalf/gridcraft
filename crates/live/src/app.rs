@@ -334,7 +334,13 @@ impl GridApp<'_> {
                     steps.push(Step::Undelete { sheet: *sheet, axis: *axis, ids: ids.clone() });
                     steps.push(Step::Op(op));
                     ensure_index(&mut m.index, &m.base, &layout, replica);
-                    let naming = m.index.naming(*sheet, *axis, ids);
+                    let mut naming = m.index.naming(*sheet, *axis, ids);
+                    // As for an insert: a range end on a deleted line right next to the lines that
+                    // came back can now read (by id) as one of them. Undo gives what the
+                    // document says, so those formulas are printed again from it.
+                    if let Some(sl) = layout.sheets.get(i) {
+                        naming.extend(m.index.naming(*sheet, *axis, &sl.axis(*axis).deleted_next_to(ids)));
+                    }
                     let mut t = Targets::default();
                     undeleted_targets(&mut t, &layout, replica, &m.base, i, *axis, ids);
                     m.set_layout(layout.clone());
@@ -523,7 +529,14 @@ impl GridApp<'_> {
             naming.extend(m.index.naming(sheet, axis, ids));
             if let Some(i) = final_layout.sheet_index(sheet) {
                 match op {
-                    Op::Undelete { .. } => undeleted_targets(&mut t, &final_layout, replica, &m.base, i, axis, ids),
+                    Op::Undelete { .. } => {
+                        undeleted_targets(&mut t, &final_layout, replica, &m.base, i, axis, ids);
+                        // As for an insert (below): the lines that came back sit next to deleted
+                        // lines a range end can be on (G13 fix-1 review N3).
+                        if let Some(s) = final_layout.sheets.get(i) {
+                            naming.extend(m.index.naming(sheet, axis, &s.axis(axis).deleted_next_to(ids)));
+                        }
+                    }
                     // The engine gives inserted lines the format of the line before them here,
                     // which need not be the line its author had before them: the document holds
                     // what the author's new lines took, so they are read from it.

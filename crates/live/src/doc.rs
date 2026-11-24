@@ -551,6 +551,16 @@ impl Replica for GridDoc {
         Ok(self.changes(ops_before, seen))
     }
 
+    /// A checkpoint the room ordered (the whole document): as [`apply`](Self::apply), checked
+    /// under the state item cap, not the op cap (c9-save2 replays checkpoints with it).
+    fn apply_state(&mut self, update: &[u8]) -> Result<Vec<GridChange>, LiveError> {
+        let ops_before = self.ops_len();
+        self.drain_seen();
+        self.y.apply_state(update)?;
+        let seen = self.drain_seen();
+        Ok(self.changes(ops_before, seen))
+    }
+
     fn state(&self) -> Vec<u8> {
         self.y.state()
     }

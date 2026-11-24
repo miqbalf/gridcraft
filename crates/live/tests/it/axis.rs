@@ -45,6 +45,12 @@ fn the_deleted_lines_next_to_an_insert_are_its_unbroken_deleted_neighbours() {
     tail.insert_after(Some(Id::base(4)), &[late]);
     let near: BTreeSet<Id> = tail.deleted_next_to(&[late]).into_iter().collect();
     assert_eq!(near, BTreeSet::from([Id::base(5), Id::base(6)]), "the gone lines just after it, in the implicit tail");
+    // A base line of the implicit tail brought back (an undo of its delete) next to gone lines.
+    let mut back = Axis::base(1000);
+    back.delete(&[Id::base(1), Id::base(2), Id::base(3)]);
+    back.undelete(&[Id::base(2)]);
+    let near: BTreeSet<Id> = back.deleted_next_to(&[Id::base(2)]).into_iter().collect();
+    assert_eq!(near, BTreeSet::from([Id::base(1), Id::base(3)]), "the gone lines on both sides of a line that came back");
 }
 
 /// A naive axis: every line in one list, long enough that the tail never runs out.
