@@ -10,9 +10,9 @@ use gridcraft_engine::{EngineError, Session};
 use gridcraft_model::Workbook;
 use serde_json::Value;
 
+use crate::axis::AxisKind;
 use crate::doc::{CellContent, Entry, GridChange, GridDoc};
 use crate::ids::{Id, parse_cell_key};
-use crate::axis::AxisKind;
 use crate::kind::{Grid, GridCaret, GridEdit};
 use crate::layout::Layout;
 use crate::local::Planner;
@@ -293,7 +293,8 @@ impl GridApp<'_> {
                         inserted = new_lines(&layout, steps.get(from..).unwrap_or_default());
                         for (i, axis, p) in &inserted {
                             if let Some(sh) = wb.sheet_mut(*i) {
-                                if *axis == AxisKind::Rows { sh.rows.remove(p) } else { sh.cols.remove(p) };
+                                let lines = if *axis == AxisKind::Rows { &mut sh.rows } else { &mut sh.cols };
+                                lines.remove(p);
                             }
                         }
                         Some(wb)

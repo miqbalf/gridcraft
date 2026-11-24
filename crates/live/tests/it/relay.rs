@@ -33,8 +33,20 @@ fn env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} is not set"))
 }
 
+/// The wall clock. These tests run natively only (the native hub), where reading it is safe.
+#[allow(clippy::disallowed_methods)] // off wasm only, as clippy.toml asks
+fn wall() -> Duration {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default()
+}
+
+/// A monotonic instant, as [`wall`].
+#[allow(clippy::disallowed_methods)] // off wasm only, as clippy.toml asks
+fn mono() -> Instant {
+    Instant::now()
+}
+
 fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+    wall().as_secs()
 }
 
 /// A join ticket as the relay's signer makes it: `base64url(claims).base64url(HMAC-SHA256)`.
@@ -48,7 +60,7 @@ fn ticket(secret: &str, room: &str, uid: &str, pid: &str) -> String {
 
 /// A room no earlier run has used, so the relay starts the document from the file.
 fn fresh_room() -> String {
-    format!("it-grid-{}", SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos()))
+    format!("it-grid-{}", wall().as_nanos())
 }
 
 /// The base file: a column of numbers and a sum over it.
@@ -132,13 +144,13 @@ fn state(cs: &[Client]) -> String {
 
 /// Pump every client until `done` holds, or fail after `secs` with where each one stands.
 async fn until(cs: &mut [Client], secs: u64, what: &str, done: impl Fn(&[Client]) -> bool) {
-    let end = Instant::now() + Duration::from_secs(secs);
+    let end = mono() + Duration::from_secs(secs);
     loop {
         pump_all(cs);
         if done(cs) {
             return;
         }
-        assert!(Instant::now() < end, "timed out waiting for {what}:\n{}", state(cs));
+        assert!(mono() < end, "timed out waiting for {what}:\n{}", state(cs));
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
@@ -157,18 +169,18 @@ fn equal(cs: &[Client]) -> bool {
 async fn converge(cs: &mut [Client], base: &Workbook, what: &str) {
     let quiet = Duration::from_millis(800);
     let mut since: Option<Instant> = None;
-    let end = Instant::now() + Duration::from_secs(60);
+    let end = mono() + Duration::from_secs(60);
     loop {
         pump_all(cs);
         if all_live(cs) && equal(cs) {
-            let t = *since.get_or_insert_with(Instant::now);
+            let t = *since.get_or_insert_with(mono);
             if t.elapsed() >= quiet {
                 break;
             }
         } else {
             since = None;
         }
-        if Instant::now() >= end {
+        if mono() >= end {
             let first = cs[0].finger();
             let first_diff = cs.iter().skip(1).map(|c| diff(&first, &c.finger())).find(|d| !d.is_empty()).unwrap_or_default();
             panic!("{what}: no convergence:\n{}\n{first_diff}", state(cs));
@@ -344,18 +356,18 @@ async fn load_five_clients() {
     let mut ms = Vec::with_capacity(N * (N - 1) * writes);
     let (mut refused, mut inserted, mut insert_refused) = (0usize, 0usize, 0usize);
     let mut slowest_lap = Duration::ZERO;
-    let start = Instant::now() + Duration::from_millis(200);
+    let start = mono() + Duration::from_millis(200);
     let give_up = start + Duration::from_secs(secs + 60);
     loop {
-        let lap = Instant::now();
+        let lap = mono();
         for k in 0..N {
             // Writers spread over the period, so not all five write in the same instant.
             let due = start + WRITE_EVERY * u32::try_from(sent[k].len()).unwrap_or(u32::MAX) + Duration::from_millis(50 * k as u64);
-            if sent[k].len() < writes && Instant::now() >= due {
+            if sent[k].len() < writes && mono() >= due {
                 let i = sent[k].len();
                 let row = next_row(&cs[k], k);
                 let at = CellRef::new(row, u32::try_from(k + 1).unwrap_or(1)).a1();
-                let t = Instant::now();
+                let t = mono();
                 if cs[k].run("cell.set", json!({"cell": at, "input": token(k, i)})) {
                     sent[k].push(t);
                 } else {
@@ -363,15 +375,13 @@ async fn load_five_clients() {
                 }
             }
         }
-        if inserted + insert_refused < inserts
-            && Instant::now() >= start + INSERT_EVERY * u32::try_from(inserted + insert_refused + 1).unwrap_or(u32::MAX)
-        {
+        if inserted + insert_refused < inserts && mono() >= start + INSERT_EVERY * u32::try_from(inserted + insert_refused + 1).unwrap_or(u32::MAX) {
             let k = (inserted + insert_refused) % N;
             let row = 1 + (inserted % 10);
             if cs[k].run("home.insertRows", json!({"rows": format!("{row}:{row}")})) { inserted += 1 } else { insert_refused += 1 }
         }
         pump_all(&mut cs);
-        let now = Instant::now();
+        let now = mono();
         for j in 0..N {
             for tok in tokens_in(&cs[j]) {
                 if seen[j].contains(&tok) {
@@ -384,10 +394,11 @@ async fn load_five_clients() {
                 else {
                     continue;
                 };
-                if k != j && k < N {
-                    if let Some(t) = sent[k].get(i) {
-                        ms.push((now - *t).as_secs_f64() * 1000.0);
-                    }
+                if k != j
+                    && k < N
+                    && let Some(t) = sent[k].get(i)
+                {
+                    ms.push((now - *t).as_secs_f64() * 1000.0);
                 }
                 seen[j].insert(tok);
             }
@@ -398,7 +409,7 @@ async fn load_five_clients() {
         if done_writing && seen.iter().all(|s| s.len() == total) {
             break;
         }
-        assert!(Instant::now() < give_up, "not every write arrived:\n{}", state(&cs));
+        assert!(mono() < give_up, "not every write arrived:\n{}", state(&cs));
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
     converge(&mut cs, &base, "after the load").await;

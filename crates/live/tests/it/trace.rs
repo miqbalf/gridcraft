@@ -137,14 +137,14 @@ fn trace(seed: u64) -> Tally {
     let mut down = vec![false; peers];
     let mut t = Tally::default();
     for (step, slot) in schedule.into_iter().enumerate() {
-        if step == join_at {
-            if let Some(state) = checkpoint(&mut room, &down) {
-                let j = room.join("Ivan", Access::Edit, None);
-                let p = &mut room.peers[j];
-                p.live.apply_checkpoint(&mut p.session, &state).unwrap_or_else(|e| panic!("seed {seed}: the checkpoint did not apply: {e}"));
-                down.push(false);
-                t.joined = true;
-            }
+        if step == join_at
+            && let Some(state) = checkpoint(&mut room, &down)
+        {
+            let j = room.join("Ivan", Access::Edit, None);
+            let p = &mut room.peers[j];
+            p.live.apply_checkpoint(&mut p.session, &state).unwrap_or_else(|e| panic!("seed {seed}: the checkpoint did not apply: {e}"));
+            down.push(false);
+            t.joined = true;
         }
         // Before the joiner is in, its slots go to a drawn peer.
         let who = if slot < room.peers.len() { slot } else { rng.below(peers) };
@@ -184,10 +184,8 @@ fn trace(seed: u64) -> Tally {
             room.pump(i);
         }
     }
-    for i in 0..down.len() {
-        if down[i] {
-            hub_restore(&room, i);
-        }
+    for (i, _) in down.iter().enumerate().filter(|(_, d)| **d) {
+        hub_restore(&room, i);
     }
     // Queued ordered edits and undos need the lock in turn: settle until nothing moves.
     for _ in 0..8 {
