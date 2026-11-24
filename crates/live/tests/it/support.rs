@@ -189,7 +189,18 @@ impl Room {
             Some(h) => GridLive::start_with(hub, ROOM, &base, access, &uid, &mut session, h),
             None => GridLive::start(hub, ROOM, &base, access, &uid, &mut session),
         };
-        self.peers.push(Peer { session, live: live.unwrap(), sizes, fenced, locals, hold_errors, hold_ops, lose_history, locks, notices: Vec::new() });
+        self.peers.push(Peer {
+            session,
+            live: live.unwrap(),
+            sizes,
+            fenced,
+            locals,
+            hold_errors,
+            hold_ops,
+            lose_history,
+            locks,
+            notices: Vec::new(),
+        });
         self.peers.len() - 1
     }
 

@@ -995,12 +995,14 @@ version = "0.1.0"
 source = "git+https://github.com/miqbalf/collab-craft?rev=c5fd35adebb53da5803668cc09d7be4f0e02b677#c5fd35adebb53da5803668cc09d7be4f0e02b677"
 dependencies = [
  "base64 0.23.1",
+ "js-sys",
  "log",
  "rust_socketio",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "wasm-bindgen",
  "yrs",
 ]
 
@@ -2514,6 +2516,7 @@ name = "gridcraft-live"
 version = "0.19.1"
 dependencies = [
  "base64 0.23.1",
+ "chrono",
  "craft-collab",
  "craft-live",
  "gridcraft-calc",
@@ -2628,20 +2631,27 @@ dependencies = [
 name = "gridcraft-web"
 version = "0.19.1"
 dependencies = [
+ "base64 0.23.1",
+ "chrono",
+ "craft-collab",
+ "craft-live",
  "craft-web-api",
  "craft-web-host",
  "eframe",
  "egui",
  "gridcraft-engine",
+ "gridcraft-live",
  "gridcraft-model",
  "gridcraft-ui-egui",
  "js-sys",
  "log",
  "rfd",
  "serde_json",
+ "sha2 0.11.1",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "web-time",
 ]
 
 [[package]]

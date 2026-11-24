@@ -129,7 +129,14 @@ fn a_replica_that_needs_a_resync_offers_the_unconfirmed_edits() {
         let u = raw.write(|t| t.set_cell(sheet, &key, &content(n))).unwrap();
         let params = serde_json::to_value(TextPayload::new(&u)).unwrap();
         mallory
-            .send(ClientMsg::Submit { doc: ROOM.into(), local: n as u64 + 1, command: craft_collab::CRDT_TEXT.into(), params, scope: None, fence: None })
+            .send(ClientMsg::Submit {
+                doc: ROOM.into(),
+                local: n as u64 + 1,
+                command: craft_collab::CRDT_TEXT.into(),
+                params,
+                scope: None,
+                fence: None,
+            })
             .unwrap();
     }
     type_unconfirmed(&mut room, "mine");

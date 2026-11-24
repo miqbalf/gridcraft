@@ -647,9 +647,8 @@ async fn fetch_bytes(window: &web_sys::Window, href: &str, signal: &web_sys::Abo
         init.set_method("GET");
         init.set_mode(web_sys::RequestMode::SameOrigin);
         init.set_credentials(web_sys::RequestCredentials::SameOrigin);
-        let response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str_and_init(href, &init))
-            .await
-            .map_err(|_| "the file could not be fetched")?;
+        let response =
+            wasm_bindgen_futures::JsFuture::from(window.fetch_with_str_and_init(href, &init)).await.map_err(|_| "the file could not be fetched")?;
         let response: web_sys::Response = response.dyn_into().map_err(|_| "the fetch gave no response")?;
         if response.status() == 404 && tries < BASE_RETRIES {
             tries += 1;

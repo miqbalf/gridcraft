@@ -28,8 +28,8 @@ pub mod schema;
 pub mod session;
 pub mod split;
 pub mod styles;
-pub mod unmerged;
 pub(crate) mod undo;
+pub mod unmerged;
 pub mod volatile;
 
 pub use app::SentCommand;

@@ -439,6 +439,7 @@ fn a_session_attached_after_construction_edits_live() {
     let (session, live) = join(&relay, &bytes, "bob", "Bob", Access::Edit);
     let bob = Bob { session, live };
     let hub = relay.connect("alice", "Alice", true);
+    let alice = hub.clone();
     let mut session = Session::new();
     let base = BaseFile { bytes: &bytes, name: FILE, expected_sha256: None };
     let live = GridLive::start(DynHub(Box::new(hub)), ROOM, &base, Access::Edit, "alice", &mut session).expect("starts");
@@ -453,7 +454,7 @@ fn a_session_attached_after_construction_edits_live() {
     };
     assert!(app.attach_live(second).is_err(), "a second session is refused");
     let mut h = harness(app);
-    let mut rig = Rig { left: Arc::default(), relay, bytes, bob };
+    let mut rig = Rig { left: Arc::default(), alice, relay, bytes, bob };
     settle(&mut rig, &mut h);
     h.state_mut().run("cell.set", json!({"cell": "B2", "input": "5"})).expect("runs through the session");
     settle(&mut rig, &mut h);
