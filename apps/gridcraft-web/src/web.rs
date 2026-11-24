@@ -233,9 +233,11 @@ fn services(inbox: Inbox, ctx: egui::Context) -> Services {
                 log::error!("download of {name} failed: {e}");
             }
         })),
-        // A copy of unmerged live edits the page could not store is downloaded.
+        // A copy of unmerged live edits the page could not store is downloaded, on the plain
+        // download: a save dialog the person cancels would report nothing back, and the window
+        // would count the copy as kept.
         download_copy: Some(Box::new(|name: &str, bytes: &[u8]| {
-            if let Err(e) = download(name, bytes) {
+            if let Err(e) = download_plain(name, bytes) {
                 log::error!("download of {name} failed: {e}");
             }
         })),
@@ -379,7 +381,7 @@ fn mime_for(name: &str) -> &'static str {
 }
 
 /// Trigger a browser save dialog or download of `bytes` named after `name`.
-pub(crate) fn download(name: &str, bytes: &[u8]) -> Result<(), String> {
+fn download(name: &str, bytes: &[u8]) -> Result<(), String> {
     let js = |e: wasm_bindgen::JsValue| format!("{e:?}");
     let window = web_sys::window().ok_or("no window")?;
 
@@ -485,6 +487,13 @@ async fn write_file_handle(handle: &JsValue, bytes: &[u8]) -> Result<(), String>
     let close_prom: js_sys::Promise = close_fn.call0(&stream).map_err(js)?.dyn_into().map_err(|_| "not a promise".to_string())?;
     wasm_bindgen_futures::JsFuture::from(close_prom).await.map_err(js)?;
     Ok(())
+}
+
+/// The browser's plain download of `bytes` as `name` (no save dialog that could be cancelled
+/// unseen), for the copies of unmerged live edits.
+pub(crate) fn download_plain(name: &str, bytes: &[u8]) -> Result<(), String> {
+    let window = web_sys::window().ok_or("no window")?;
+    trigger_anchor_download(&window, name, bytes)
 }
 
 fn trigger_anchor_download(window: &web_sys::Window, name: &str, bytes: &[u8]) -> Result<(), String> {

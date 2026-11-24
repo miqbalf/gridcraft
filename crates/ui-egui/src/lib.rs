@@ -265,7 +265,7 @@ pub struct SheetApp {
     /// it stored them.
     pub(crate) copies_sent: Vec<live::SentCopy>,
     /// The host's clock at the last hand-over, in seconds, for [`live::COPY_ANSWER_SECS`].
-    pub(crate) copy_clock: f64,
+    pub(crate) copy_clock: Option<f64>,
     /// The page could not store a copy: from then on copies are downloaded when offered.
     pub(crate) page_refused_copy: bool,
     pub printing: printing::State,

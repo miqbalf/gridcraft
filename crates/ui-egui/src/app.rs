@@ -49,7 +49,7 @@ impl SheetApp {
             live_refusal: live_refused,
             pending_unmerged: Vec::new(),
             copies_sent: Vec::new(),
-            copy_clock: 0.0,
+            copy_clock: None,
             page_refused_copy: false,
             toast: None,
             notice: None,
@@ -125,6 +125,8 @@ impl SheetApp {
         self.ensure_text_width(ctx);
         // Live co-editing: take in the other editors' changes first, so the frame draws them.
         self.live_frame(ctx);
+        // A copy of unmerged live edits stays reachable from the info bar while it waits.
+        self.keep_copies_offered();
         // A keytip control request lives one frame: the ribbon consumes it during `ui`, and
         // anything that never reached a control (collapsed ribbon, tab switch) is dropped. One
         // made with a switch to the control's tab waits, with its window, for the next `ui` of

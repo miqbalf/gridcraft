@@ -89,8 +89,9 @@ pub const COPY_ANSWER_SECS: f64 = 30.0;
 pub(crate) struct SentCopy {
     pub id: String,
     pub copy: UnmergedCopy,
-    /// When it was handed over (the host's clock, in seconds).
-    pub at: f64,
+    /// When it was handed over (the host's clock, in seconds; set at the next hand-over call
+    /// when the clock was not known yet).
+    pub at: Option<f64>,
 }
 
 /// Whether the room's notice `text` says a copy of unmerged edits waits (so it offers it).
@@ -98,8 +99,8 @@ fn offers_copy(text: &str) -> bool {
     text == UNMERGED_TEXT || text == RECOVERY_TEXT || TAKE_BACK_TEXTS.contains(&text)
 }
 
-/// Told while another copy waits after one was saved; `{name}` is its name.
-pub const COPY_WAITING_TEXT: &str = "Another copy with unmerged changes is ready to save: {name}.";
+/// Told while a copy waits to be saved; `{name}` is its name.
+pub const COPY_WAITING_TEXT: &str = "A copy with your unmerged changes is ready to save: {name}.";
 /// Longest draft the info bar shows; a longer one is also shown whole in a message box.
 const DRAFT_SHOWN: usize = 160;
 
@@ -588,29 +589,43 @@ impl SheetApp {
         !self.pending_unmerged.is_empty() || !self.copies_sent.is_empty()
     }
 
-    /// A web host that stores files calls this every frame: each waiting copy goes to the page as
-    /// soon as it is made, until the page could not take one; from then on the info bar's
-    /// Save a copy downloads them. A run taken back is only offered (its notice has the action),
-    /// never saved unasked. A copy the page has not answered within [`COPY_ANSWER_SECS`] waits
-    /// again, to be downloaded. `now` is the host's clock, in seconds.
+    /// A web host that stores files calls this every frame with its clock (seconds). Copies are
+    /// never saved here: each is only offered (Save a copy), and goes to the page or the
+    /// downloads when the person asks. A copy the page has not answered within
+    /// [`COPY_ANSWER_SECS`] waits again, to be downloaded.
     pub fn hand_over_copies(&mut self, now: f64) {
-        self.copy_clock = now;
-        if self.copies_sent.iter().any(|s| now - s.at >= COPY_ANSWER_SECS) {
-            let (late, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.copies_sent).into_iter().partition(|s| now - s.at >= COPY_ANSWER_SECS);
+        self.copy_clock = Some(now);
+        for s in &mut self.copies_sent {
+            // Sent before the host's clock was known: it starts waiting now.
+            s.at.get_or_insert(now);
+        }
+        let late = |s: &SentCopy| s.at.is_some_and(|at| now - at >= COPY_ANSWER_SECS);
+        if self.copies_sent.iter().any(late) {
+            let (late, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.copies_sent).into_iter().partition(late);
             self.copies_sent = waiting;
             self.page_refused_copy = true;
             self.pending_unmerged.extend(late.into_iter().map(|s| s.copy));
             let text = self.ui.language.tr(COPY_UNANSWERED_TEXT).to_owned();
             self.notice = Some(Notice { text, kind: NoticeKind::Warning, action: Some(self.save_copy_action()) });
         }
-        if self.page_refused_copy || self.services.save_copy.is_none() {
+    }
+
+    /// Every frame: while a copy waits, the info bar offers it. A notice that went (dismissed,
+    /// replaced, or dropped from the queue, or the session ended) leaves the copy reachable: an
+    /// empty bar shows that a copy waits, and a notice with no button of its own gets Save a copy.
+    pub(crate) fn keep_copies_offered(&mut self) {
+        if self.pending_unmerged.is_empty() {
             return;
         }
-        let waiting = std::mem::take(&mut self.pending_unmerged);
-        for copy in waiting {
-            if copy.taken_back || !self.save_unmerged(&copy) {
-                self.pending_unmerged.push(copy);
+        match self.notice.as_mut() {
+            None => {
+                let lang = self.ui.language;
+                let name = self.pending_unmerged.first().map(|c| c.name.clone()).unwrap_or_default();
+                let text = lang.tr_fill(COPY_WAITING_TEXT, &[("name", &name)]);
+                self.notice = Some(Notice { text, kind: NoticeKind::Warning, action: Some(self.save_copy_action()) });
             }
+            Some(n) if n.action.is_none() => n.action = Some((self.ui.language.tr(SAVE_COPY_LABEL).to_owned(), SAVE_COPY_ACTION.to_owned())),
+            Some(_) => {}
         }
     }
 

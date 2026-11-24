@@ -743,6 +743,12 @@ fn copy_value(copy: &(String, Vec<u8>), cell: &str) -> Value {
     wb.sheet(0).and_then(|s| s.cell(a1(cell))).map(|c| c.value.clone()).unwrap_or(Value::Empty)
 }
 
+/// The person clicks the info bar's Save a copy.
+fn save_a_copy(h: &mut Harness) {
+    let action = h.state().notice.as_ref().and_then(|n| n.action.clone()).expect("the info bar offers the copy");
+    h.state_mut().open_dialog(&action.1, json!({}));
+}
+
 /// Alice types while her link is down: the edit waits for the room.
 fn type_offline(rig: &mut Rig, h: &mut Harness, text: &str) {
     rig.relay.drop_link(&rig.alice);
@@ -762,6 +768,7 @@ fn closing_the_live_workbook_with_offline_edits_hands_the_page_a_copy_kept_until
     h.state_mut().run("file.close", json!({"force": true})).expect("closes");
     h.step();
     h.state_mut().hand_over_copies(0.0);
+    save_a_copy(&mut h);
     let copy = posted.borrow().first().cloned().expect("the page got the copy");
     assert!(copy.0.starts_with("book (unmerged "), "{}", copy.0);
     assert_eq!(copy_value(&copy, "E5"), Value::Text("offline".into()));
@@ -780,13 +787,13 @@ fn a_copy_the_page_could_not_store_waits_and_save_a_copy_downloads_it() {
     type_offline(&mut rig, &mut h, "offline");
     h.state_mut().run("file.close", json!({"force": true})).expect("closes");
     h.step();
-    h.state_mut().hand_over_copies(0.0);
+    save_a_copy(&mut h);
     assert_eq!(posted.borrow().len(), 1);
     assert!(h.state_mut().copy_answered("copy-1", Err("quota".into())));
     assert!(h.state().copies_waiting(), "it waits again");
     let action = h.state().notice.as_ref().and_then(|n| n.action.clone()).expect("the info bar offers it");
     h.state_mut().hand_over_copies(0.0);
-    assert_eq!(posted.borrow().len(), 1, "no second automatic hand-over to a page that refused");
+    assert_eq!(posted.borrow().len(), 1, "nothing goes to the page unasked");
     h.state_mut().open_dialog(&action.1, json!({}));
     let copy = downloaded.borrow().first().cloned().expect("downloaded");
     assert_eq!(copy_value(&copy, "E5"), Value::Text("offline".into()));
@@ -804,7 +811,7 @@ fn a_session_the_host_ends_keeps_the_edits_the_room_never_confirmed() {
     h.step();
     assert!(!h.state().live_unconfirmed(), "a broken link's edits are the copy now");
     assert!(h.state().copies_unsaved(), "and the copy counts");
-    h.state_mut().hand_over_copies(0.0);
+    save_a_copy(&mut h);
     let copy = posted.borrow().first().cloned().expect("the page got the copy");
     assert_eq!(copy_value(&copy, "E5"), Value::Text("unsent".into()));
 }
@@ -819,6 +826,7 @@ fn a_copy_the_page_never_answers_goes_back_to_the_download_list() {
     h.state_mut().run("file.close", json!({"force": true})).expect("closes");
     h.step();
     h.state_mut().hand_over_copies(100.0);
+    save_a_copy(&mut h);
     assert_eq!(posted.borrow().len(), 1);
     assert!(!h.state().copies_waiting(), "handed over, waiting for the answer");
     h.state_mut().hand_over_copies(100.0 + gridcraft_ui_egui::live::COPY_ANSWER_SECS / 2.0);
@@ -866,4 +874,66 @@ fn a_run_taken_back_is_offered_on_its_own_notice_and_never_saved_unasked() {
     h.state_mut().open_dialog(&action.1, json!({}));
     let copy = posted.borrow().first().cloned().expect("saved when asked");
     assert_eq!(copy_value(&copy, "A4"), Value::Number(3.0), "the copy holds the inserted row");
+}
+
+/// Fix round 2, N3 (ruling: offer every copy, never save it automatically): nothing reaches the
+/// page or the downloads until the person clicks Save a copy.
+#[test]
+fn copies_are_saved_only_when_the_person_asks() {
+    let (services, posted, downloaded) = copy_services();
+    let (mut rig, app) = rig_with(Access::Edit, services);
+    let mut h = harness(app);
+    settle(&mut rig, &mut h);
+    type_offline(&mut rig, &mut h, "offline");
+    h.state_mut().run("file.close", json!({"force": true})).expect("closes");
+    for t in 0..5 {
+        h.state_mut().hand_over_copies(f64::from(t));
+        h.step();
+    }
+    assert!(posted.borrow().is_empty() && downloaded.borrow().is_empty(), "nothing saved unasked");
+    assert!(h.state().copies_waiting() && h.state().copies_unsaved(), "it waits, and the page stays dirty");
+    save_a_copy(&mut h);
+    assert_eq!(posted.borrow().len(), 1, "saved when asked");
+}
+
+/// N1: a waiting copy stays reachable when its notice is dismissed or replaced.
+#[test]
+fn a_waiting_copy_is_offered_again_when_its_notice_goes() {
+    let (services, posted, _) = copy_services();
+    let (mut rig, app) = rig_with(Access::Edit, services);
+    let mut h = harness(app);
+    settle(&mut rig, &mut h);
+    type_offline(&mut rig, &mut h, "offline");
+    h.state_mut().run("file.close", json!({"force": true})).expect("closes");
+    h.step();
+    // Dismissed (the info bar's close button).
+    h.state_mut().notice = None;
+    h.step();
+    assert!(h.state().notice.as_ref().is_some_and(|n| n.action.is_some()), "offered again: {:?}", h.state().notice);
+    // Replaced by a notice that has no action of its own.
+    h.state_mut().notice = Some(gridcraft_ui_egui::Notice { text: "Something else".into(), kind: gridcraft_ui_egui::NoticeKind::Info, action: None });
+    h.step();
+    let notice = h.state().notice.clone().expect("a notice");
+    assert!(notice.text.contains("Something else"), "the other notice is kept: {:?}", notice.text);
+    assert!(notice.action.is_some(), "and the copy is still offered on it");
+    save_a_copy(&mut h);
+    assert_eq!(posted.borrow().len(), 1);
+}
+
+/// N2 (desktop layer): a cancelled Save dialog keeps the copy, and nothing says it was saved.
+#[test]
+fn a_cancelled_save_dialog_keeps_the_copy() {
+    let services = Services { pick_save: Some(Box::new(|_: &str| None)), ..Default::default() };
+    let (mut rig, app) = rig_with(Access::Edit, services);
+    let mut h = harness(app);
+    settle(&mut rig, &mut h);
+    type_offline(&mut rig, &mut h, "offline");
+    h.state_mut().run("file.close", json!({"force": true})).expect("closes");
+    h.step();
+    save_a_copy(&mut h);
+    h.step();
+    assert!(h.state().copies_waiting(), "the copy waits after the cancel");
+    let text = notice_text(h.state());
+    assert!(!text.contains("Saved a copy") && !text.contains("Downloaded"), "{text:?}");
+    assert!(h.state().notice.as_ref().is_some_and(|n| n.action.is_some()), "still offered");
 }

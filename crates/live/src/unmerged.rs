@@ -5,7 +5,8 @@
 //!
 //! A kept state that cannot be built into a workbook does not sink the others: the states are then
 //! built one by one, and one that still fails is handed over as it is, a recovery file
-//! (`.yrs`, the replica's own bytes) that support can restore. Nothing kept is ever dropped.
+//! (`.yrs`, the replica's own bytes; no restore tool exists yet). Nothing kept is ever dropped,
+//! not even when building a workbook panics.
 
 use std::collections::HashSet;
 
@@ -19,7 +20,7 @@ pub const UNMERGED_TEXT: &str = "Some of your changes could not be merged with t
 
 /// Told when some kept edits could not be built into a workbook: their recovery file is offered.
 pub const RECOVERY_TEXT: &str =
-    "Some of your changes could not be turned into a workbook. A recovery file with them is ready to save; support can restore it.";
+    "Some of your changes could not be turned into a workbook. A file with their raw data is ready to save; keep it if you may need those changes.";
 
 /// The notices that say a run was taken back: the copy of it is offered on that notice, and
 /// [`UNMERGED_TEXT`] is not told as well.
@@ -143,15 +144,22 @@ fn merged_bytes(base: &Workbook, states: &[Vec<u8>]) -> Result<Vec<u8>, String> 
         [one] => copy_bytes(base, one),
         _ => {
             let parts: Vec<&[u8]> = states.iter().map(Vec::as_slice).collect();
-            let merged = craft_collab::yrs::merge_updates_v1(&parts).map_err(|e| e.to_string())?;
+            let merged = std::panic::catch_unwind(|| craft_collab::yrs::merge_updates_v1(&parts))
+                .map_err(|_| "merging the states panicked".to_owned())?
+                .map_err(|e| e.to_string())?;
             copy_bytes(base, &merged)
         }
     }
 }
 
+/// The `.xlsx` bytes of `base` with `state` applied. A panic while building (a state no editor
+/// would write) is an error here, so the states already taken are still handed over.
 fn copy_bytes(base: &Workbook, state: &[u8]) -> Result<Vec<u8>, String> {
-    let wb = workbook_from_state(base, state, None).map_err(|e| e.to_string())?;
-    gridcraft_xlsx::write_xlsx(&wb).map_err(|e| e.to_string())
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let wb = workbook_from_state(base, state, None).map_err(|e| e.to_string())?;
+        gridcraft_xlsx::write_xlsx(&wb).map_err(|e| e.to_string())
+    }))
+    .unwrap_or_else(|_| Err("building the workbook panicked".to_owned()))
 }
 
 /// The wall clock on this target, when it has one.
