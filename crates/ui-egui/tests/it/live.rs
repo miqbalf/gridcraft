@@ -82,6 +82,10 @@ impl Hub for Spy {
     fn connected(&self) -> bool {
         self.inner.connected()
     }
+
+    fn set_space(&mut self, space: u32) {
+        self.inner.set_space(space);
+    }
 }
 
 struct Rig {

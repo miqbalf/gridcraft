@@ -49,6 +49,11 @@ impl Hub for DynHub {
     fn set_token(&mut self, token: String) {
         self.0.set_token(token);
     }
+
+    // c9-save2: the replica's id space, named on every rejoin; forwarded so it is never dropped.
+    fn set_space(&mut self, space: u32) {
+        self.0.set_space(space);
+    }
 }
 
 /// The session this window runs, over a boxed hub.
