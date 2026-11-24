@@ -75,9 +75,14 @@ pub(super) fn invoke(app: &mut SheetApp, id: &str) -> bool {
     }
 }
 
-/// Force-open command for a popup: either a keytip invoke (open it) or a click (toggle).
-pub(super) fn popup_command(forced: bool, clicked: bool) -> Option<egui::SetOpenCommand> {
-    if forced { Some(egui::SetOpenCommand::Bool(true)) } else { clicked.then_some(egui::SetOpenCommand::Toggle) }
+/// Force-open command for a popup: either a keytip invoke (open it) or a click (toggle). A key tip
+/// or the command palette does not open the popup of a greyed control: it shows the reason instead.
+pub(super) fn popup_command(app: &mut SheetApp, forced: bool, anchor: &egui::Response) -> Option<egui::SetOpenCommand> {
+    if forced && !anchor.enabled() {
+        app.tell_control_refused(&anchor.ctx);
+        return None;
+    }
+    if forced { Some(egui::SetOpenCommand::Bool(true)) } else { anchor.clicked().then_some(egui::SetOpenCommand::Toggle) }
 }
 
 /// Per-control state of an [`editable_combo`]: the filter text and highlighted row.

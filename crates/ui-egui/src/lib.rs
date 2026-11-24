@@ -256,6 +256,8 @@ pub struct SheetApp {
     pub services: Services,
     /// The live co-editing session this window is in, if any ([`live`]).
     pub(crate) live: Option<live::LiveUi>,
+    /// Why a live session given at construction was refused: shown once the language is known.
+    pub(crate) live_refusal: Option<&'static str>,
     pub printing: printing::State,
     print_feedback_seen: Option<printing::Feedback>,
     /// Synthetic input from agents, one batch per step (drags need several steps).

@@ -170,7 +170,7 @@ fn switch_windows(app: &mut SheetApp, ui: &mut Ui) {
     anchor.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), "Switch Windows"));
     control_keytip(app, ui, &anchor, "view.switchWindows");
     let forced = std::mem::take(&mut app.open_switch_windows) | invoke(app, "view.switchWindows");
-    egui::Popup::menu(&anchor).open_memory(popup_command(forced, anchor.clicked())).show(|ui| {
+    egui::Popup::menu(&anchor).open_memory(popup_command(app, forced, &anchor)).show(|ui| {
         for w in app.open_windows() {
             let label = theme::available_text(ui, &format!("{}{}", if w.active { "✓ " } else { "    " }, w.label()));
             if ui.add(egui::Button::selectable(w.active, label).min_size(vec2(220.0, 22.0))).clicked() {

@@ -70,6 +70,138 @@ pub const LIVE_ENDED_TEXT: &str = "Live editing ended because the workbook was c
 const DRAFT_SHOWN: usize = 160;
 
 const BLOCKED_ID: &str = "gridcraft.live.blocked";
+/// Most notices kept for the info bar; past it the oldest is dropped.
+const QUEUE_MAX: usize = 20;
+
+/// Told when a session is attached to a window that already has one.
+pub const ALREADY_LIVE_TEXT: &str = "This window is already editing live";
+/// Told when the session's workbook is not open in this window.
+pub const ATTACH_NO_DOC_TEXT: &str = "The live session was started on a workbook this window does not have open";
+/// Told when the session was started on another engine session.
+pub const ATTACH_OTHER_SESSION_TEXT: &str = "The live session was started on another engine session";
+/// Shown when the host's session was refused at start; `{why}` is one of the reasons above.
+pub const NOT_STARTED_TEXT: &str = "Live editing was not started. {why}";
+
+/// The ribbon controls the gate refuses, as the ribbon names them.
+#[derive(Clone, Default)]
+struct Blocked {
+    /// Plain buttons, by the English name of their command (the catalog label).
+    labels: Arc<BTreeSet<String>>,
+    /// Split buttons and menus, by the command their main part or gallery runs: a label shared
+    /// with another command (a "Clear" menu of allowed items) must not grey them.
+    menus: Arc<BTreeSet<String>>,
+    /// Split buttons whose main part runs a refused command but whose menu holds other things.
+    mains: Arc<BTreeSet<String>>,
+}
+
+/// The split buttons and menus whose command is not shared, by control name and the command id
+/// the control runs (its main part, or every item of its gallery).
+const MENU_COMMANDS: &[(&str, &str)] = &[
+    ("Add Chart Element", "chart.addElement"),
+    ("Column or Bar", "insert.chart"),
+    ("Date & Time", "formulas.insertFunction"),
+    ("Financial", "formulas.insertFunction"),
+    ("Insert a picture", "insert.picture"),
+    ("Logical", "formulas.insertFunction"),
+    ("Lookup & Reference", "formulas.insertFunction"),
+    ("Math & Trig", "formulas.insertFunction"),
+    ("More Functions", "formulas.insertFunction"),
+    ("Paper Size", "pageLayout.size"),
+    ("Recently Used", "formulas.insertFunction"),
+    ("Text", "formulas.insertFunction"),
+    ("Hierarchy & more", "insert.chart"),
+    ("Insert an equation, or pick one from the gallery", "insert.equation"),
+    ("Insert an icon", "insert.icons"),
+    ("Line or Area", "insert.chart"),
+    ("Pie or Doughnut", "insert.chart"),
+    ("Scatter or Bubble", "insert.chart"),
+    ("Statistic", "insert.chart"),
+    ("Calculation Options", "formulas.calculationOptions"),
+    ("Change Chart Type", "chart.changeType"),
+    ("Conditional Formatting", "home.conditionalFormat"),
+    ("Decorative Text", "insert.wordArt"),
+    ("Format as Table", "home.formatAsTable"),
+    ("Freeze Panes", "view.freezePanes"),
+    ("Margins", "pageLayout.margins"),
+    ("Merge & Center", "home.mergeCenter"),
+    ("Page Layout|Orientation", "pageLayout.orientation"),
+    ("Print Area", "pageLayout.printArea"),
+    ("Shapes", "insert.shape"),
+    ("Sparklines", "insert.sparkline"),
+    ("Symbol", "insert.symbol"),
+    ("Themes", "pageLayout.theme"),
+    ("Use in Formula", "formulas.useInFormula"),
+];
+
+/// Split buttons whose main part runs a refused command while the menu under the arrow holds other
+/// things (the Macros dialog): only the main part is greyed.
+const MAIN_COMMANDS: &[(&str, &str)] = &[("Run a macro on the selection", "macro.run")];
+
+/// Dropdowns whose popup is `menu_items` (it greys each item by its own command) or lists
+/// commands one by one, so the control itself stays enabled.
+const PER_ITEM_TIPS: &[&str] = &[
+    "Accounting Number Format",
+    "Clear",
+    "Data Validation",
+    "Delete",
+    "Fill",
+    "Find & Select",
+    "Format",
+    "Insert",
+    "Notes",
+    "Orientation",
+    "Page Breaks",
+    "Paste",
+    "Sort & Filter",
+    "Underline",
+    "What-If Analysis",
+];
+
+/// Dropdowns and galleries that run no command the gate refuses (dialogs, pickers).
+const OPEN_TIPS: &[&str] =
+    &["AutoSum", "Borders", "Cell Styles", "Error Checking", "Fill Color", "Font Color", "Share: export or save a copy", "Switch Windows"];
+
+const SEEN_MENUS_ID: &str = "gridcraft.live.menus-seen";
+
+/// Notes that a dropdown, gallery or split button called `tip` was drawn.
+pub(crate) fn note_menu_tip(ctx: &egui::Context, tip: &str) {
+    ctx.data_mut(|d| {
+        let seen = d.get_temp_mut_or_default::<Arc<std::sync::Mutex<BTreeSet<String>>>>(egui::Id::NULL.with(SEEN_MENUS_ID));
+        if let Ok(mut set) = seen.lock() {
+            set.insert(tip.to_owned());
+        }
+    });
+}
+
+/// The dropdowns, galleries and split buttons drawn so far in this context, by tooltip (for the
+/// test that every one of them is classified for the live gate).
+#[doc(hidden)]
+#[must_use]
+pub fn menu_tips_seen(ctx: &egui::Context) -> Vec<String> {
+    let seen = ctx.data_mut(|d| d.get_temp::<Arc<std::sync::Mutex<BTreeSet<String>>>>(egui::Id::NULL.with(SEEN_MENUS_ID)));
+    seen.and_then(|s| s.lock().ok().map(|set| set.iter().cloned().collect())).unwrap_or_default()
+}
+
+/// How the live gate treats the dropdown, gallery or split button `tip`: `Some(Some(id))` greys it
+/// whole by that command, `Some(None)` leaves it to its items or to nothing refused, `None` when
+/// the gate does not know the control (a new one must be added to a table in this file).
+#[doc(hidden)]
+#[must_use]
+pub fn menu_tip_class(tip: &str) -> Option<Option<&'static str>> {
+    if let Some((_, id)) = MENU_COMMANDS.iter().chain(MAIN_COMMANDS).find(|(t, _)| *t == tip) {
+        return Some(Some(id));
+    }
+    (PER_ITEM_TIPS.contains(&tip) || OPEN_TIPS.contains(&tip)).then_some(None)
+}
+
+/// Every control the tables of this file name, for the test that none is stale.
+#[doc(hidden)]
+#[must_use]
+pub fn menu_tables() -> Vec<(&'static str, Option<&'static str>)> {
+    let mut all: Vec<_> = MENU_COMMANDS.iter().chain(MAIN_COMMANDS).map(|(t, id)| (*t, Some(*id))).collect();
+    all.extend(PER_ITEM_TIPS.iter().chain(OPEN_TIPS).map(|t| (*t, None)));
+    all
+}
 
 /// A live window's state: the session, who else is here, and what the presence drawing needs.
 pub struct LiveUi {
@@ -83,7 +215,9 @@ pub struct LiveUi {
     /// Peers known to be read-only (the roster does not say).
     viewers: HashSet<String>,
     /// Ribbon names of the commands the gate refuses.
-    blocked: Arc<BTreeSet<String>>,
+    blocked: Blocked,
+    /// The notice the info bar shows now: its text without the count, and as shown.
+    shown: Option<(String, String)>,
     /// Notices not shown yet, oldest first: the info bar shows one at a time.
     queue: VecDeque<(String, NoticeKind)>,
 }
@@ -93,7 +227,11 @@ impl LiveUi {
     #[must_use]
     pub fn new(live: Live) -> LiveUi {
         let doc = live.doc();
-        let blocked = Arc::new(blocked_names(&live));
+        let blocked = Blocked {
+            labels: Arc::new(blocked_names(&live)),
+            menus: Arc::new(MENU_COMMANDS.iter().filter(|(_, id)| !live.allows(id)).map(|(tip, _)| (*tip).to_owned()).collect()),
+            mains: Arc::new(MAIN_COMMANDS.iter().filter(|(_, id)| !live.allows(id)).map(|(tip, _)| (*tip).to_owned()).collect()),
+        };
         LiveUi {
             live,
             doc,
@@ -102,6 +240,7 @@ impl LiveUi {
             moved: HashMap::new(),
             viewers: HashSet::new(),
             blocked,
+            shown: None,
             queue: VecDeque::new(),
         }
     }
@@ -194,6 +333,14 @@ impl LiveUi {
         self.live.status_line().map(|line| lang.tr(&line).to_owned())
     }
 
+    /// Queues a notice for the info bar; past [`QUEUE_MAX`] the oldest goes.
+    fn push_notice(&mut self, text: String, kind: NoticeKind) {
+        if self.queue.len() >= QUEUE_MAX {
+            self.queue.pop_front();
+        }
+        self.queue.push_back((text, kind));
+    }
+
     /// Takes in the roster after a pump: tracks who moved, and refreshes the presence bar.
     fn refresh(&mut self, mut peers: Vec<Peer>, now: f64, lang: Language, names: &dyn Fn(usize) -> String) {
         // A caret on an id this window does not know yet is not drawn until it is known.
@@ -229,20 +376,28 @@ impl LiveUi {
     }
 }
 
+/// What is wrong with attaching `live` to `session`, as the English text that `tr` translates.
+fn attach_problem(session: &gridcraft_engine::Session, live: &Live) -> Option<&'static str> {
+    let doc = live.doc();
+    if session.document_index(doc).is_none() {
+        return Some(ATTACH_NO_DOC_TEXT);
+    }
+    (session.live_undo_doc() != Some(doc)).then_some(ATTACH_OTHER_SESSION_TEXT)
+}
+
 /// Whether `live` was started on `session`: its workbook is open there and carries the session's
 /// edit hook. A session started elsewhere would let this window edit with nothing shared.
 ///
 /// # Errors
 /// What is wrong, as text for the user.
-pub fn check_attached(session: &gridcraft_engine::Session, live: &Live) -> Result<(), String> {
-    let doc = live.doc();
-    if session.document_index(doc).is_none() {
-        return Err("The live session was started on a workbook this window does not have open".into());
-    }
-    if session.live_undo_doc() != Some(doc) {
-        return Err("The live session was started on another engine session".into());
-    }
-    Ok(())
+pub fn check_attached(session: &gridcraft_engine::Session, live: &Live, lang: Language) -> Result<(), String> {
+    attach_problem(session, live).map_or(Ok(()), |why| Err(lang.tr(why).to_owned()))
+}
+
+/// The window's start-up refusal of a live session, as the key to translate once the user's language
+/// is known: `SheetApp::new` runs before the preferences load.
+pub(crate) fn startup_refusal(session: &gridcraft_engine::Session, live: &Live) -> Option<&'static str> {
+    attach_problem(session, live)
 }
 
 /// The ribbon names (catalog labels) of the commands the gate refuses. A label shared with a
@@ -257,10 +412,16 @@ fn blocked_names(live: &Live) -> BTreeSet<String> {
 }
 
 /// Whether the ribbon control named `tip` (the English name, as its tooltip is keyed) runs a
-/// command the live session refuses. False when the window is not live.
-pub(crate) fn tip_blocked(ctx: &egui::Context, tip: &str) -> bool {
-    let Some(set) = ctx.data(|d| d.get_temp::<Arc<BTreeSet<String>>>(egui::Id::NULL.with(BLOCKED_ID))) else { return false };
-    set.contains(&tip.replace('\n', " "))
+/// command the live session refuses; `menu` for a split button or menu, which is looked up by the
+/// command it runs. False when the window is not live.
+pub(crate) fn tip_blocked(ctx: &egui::Context, tip: &str, menu: bool) -> bool {
+    let Some(b) = ctx.data(|d| d.get_temp::<Blocked>(egui::Id::NULL.with(BLOCKED_ID))) else { return false };
+    if menu { b.menus.contains(tip) } else { b.labels.contains(&tip.replace('\n', " ")) }
+}
+
+/// Whether only the main part of the split button `tip` is refused.
+pub(crate) fn tip_main_blocked(ctx: &egui::Context, tip: &str) -> bool {
+    ctx.data(|d| d.get_temp::<Blocked>(egui::Id::NULL.with(BLOCKED_ID))).is_some_and(|b| b.mains.contains(tip))
 }
 
 /// The tooltip of a greyed control.
@@ -269,6 +430,11 @@ pub(crate) fn blocked_tip(ctx: &egui::Context) -> String {
 }
 
 impl SheetApp {
+    /// Tells why a greyed control did not open: the live session refuses what it runs.
+    pub(crate) fn tell_control_refused(&mut self, ctx: &egui::Context) {
+        self.notice = Some(Notice { text: blocked_tip(ctx), kind: NoticeKind::Info, action: None });
+    }
+
     /// The live session, if the window is in one.
     #[must_use]
     pub fn live(&self) -> Option<&LiveUi> {
@@ -287,9 +453,9 @@ impl SheetApp {
     /// The window is already live, or the session was not started on this window's engine session.
     pub fn attach_live(&mut self, live: Live) -> Result<(), String> {
         if self.live.is_some() {
-            return Err("This window is already editing live".into());
+            return Err(self.ui.language.tr(ALREADY_LIVE_TEXT).to_owned());
         }
-        check_attached(&self.session, &live)?;
+        check_attached(&self.session, &live, self.ui.language)?;
         self.live = Some(LiveUi::new(live));
         Ok(())
     }
@@ -327,16 +493,33 @@ impl SheetApp {
 
     /// Ends the live session (its workbook was closed): the engine's hooks come off, and the
     /// window goes on with its other workbooks.
-    fn end_live(&mut self, ctx: &egui::Context, lu: LiveUi) {
-        ctx.data_mut(|d| d.remove_temp::<Arc<BTreeSet<String>>>(egui::Id::NULL.with(BLOCKED_ID)));
+    fn end_live(&mut self, ctx: &egui::Context, mut lu: LiveUi) {
+        // Leave the room by name, so the other editors stop drawing this window at once instead of
+        // waiting for the transport to notice.
+        let room = lu.live.room().to_owned();
+        let _ = lu.live.core_mut().hub_mut().send(ClientMsg::Leave { doc: room });
+        let mut told = lu.live.take_notices();
+        told.extend(lu.queue.drain(..).map(|(text, _)| text));
+        ctx.data_mut(|d| d.remove_temp::<Blocked>(egui::Id::NULL.with(BLOCKED_ID)));
         lu.live.stop(&mut self.session);
         let lang = self.ui.language;
-        self.notice = Some(Notice { text: lang.tr(LIVE_ENDED_TEXT).to_owned(), kind: NoticeKind::Info, action: None });
+        // What the room told that was not shown yet comes along with the reason it ended.
+        let mut text = lang.tr(LIVE_ENDED_TEXT).to_owned();
+        for t in told {
+            text.push(' ');
+            text.push_str(&t);
+        }
+        self.notice = Some(Notice { text, kind: NoticeKind::Info, action: None });
     }
 
     /// One frame of a live window: anchors the open editor, takes in the room, moves the editor
     /// with its row, and shows what the room told.
     pub(crate) fn live_frame(&mut self, ctx: &egui::Context) {
+        // A live session refused when the window was built is told in the user's language now.
+        if let Some(why) = self.live_refusal.take() {
+            let lang = self.ui.language;
+            self.message = Some(("GridCraft".into(), lang.tr_fill(NOT_STARTED_TEXT, &[("why", lang.tr(why))])));
+        }
         let Some(mut lu) = self.live.take() else { return };
         if self.session.document_index(lu.doc).is_none() {
             self.end_live(ctx, lu);
@@ -374,21 +557,37 @@ impl SheetApp {
             .fold(None, |a: Option<f64>, left| Some(a.map_or(left, |a| a.min(left))));
         ctx.request_repaint_after(due.map_or(POLL, |left| POLL.min(Duration::from_secs_f64(left.max(0.01)))));
         for text in notes {
-            lu.queue.push_back((lang.tr(&text).to_owned(), NoticeKind::Info));
+            lu.push_notice(lang.tr(&text).to_owned(), NoticeKind::Info);
         }
         if let Some(draft) = gone {
             self.tell_editor_gone(&mut lu, draft);
         }
-        // One notice at a time in the info bar, the next when it is dismissed; none is dropped.
-        if self.notice.is_none()
-            && let Some((text, kind)) = lu.queue.pop_front()
-        {
-            let text = if lu.queue.is_empty() {
-                text
-            } else {
-                lang.tr_fill("{text} (+{count} more)", &[("text", &text), ("count", &lu.queue.len().to_string())])
-            };
-            self.notice = Some(Notice { text, kind, action: None });
+        // One notice at a time in the info bar, the next when it is dismissed; the count of those
+        // waiting is kept true as more arrive.
+        let with_count = |waiting: usize, text: &str| {
+            if waiting == 0 { text.to_owned() } else { lang.tr_fill("{text} (+{count} more)", &[("text", text), ("count", &waiting.to_string())]) }
+        };
+        let still_ours = lu.shown.as_ref().is_some_and(|(_, full)| self.notice.as_ref().is_some_and(|n| &n.text == full));
+        if still_ours {
+            let waiting = lu.queue.len();
+            if let Some((base, full)) = lu.shown.as_mut() {
+                let text = with_count(waiting, base);
+                if *full != text
+                    && let Some(n) = self.notice.as_mut()
+                {
+                    n.text.clone_from(&text);
+                    *full = text;
+                }
+            }
+        } else {
+            lu.shown = None;
+            if self.notice.is_none()
+                && let Some((text, kind)) = lu.queue.pop_front()
+            {
+                let full = with_count(lu.queue.len(), &text);
+                lu.shown = Some((text, full.clone()));
+                self.notice = Some(Notice { text: full, kind, action: None });
+            }
         }
         self.live = Some(lu);
     }
@@ -430,12 +629,12 @@ impl SheetApp {
     fn tell_editor_gone(&mut self, lu: &mut LiveUi, draft: Option<String>) {
         let lang = self.ui.language;
         let Some(d) = draft else {
-            lu.queue.push_back((lang.tr(EDITOR_GONE_TEXT).to_owned(), NoticeKind::Warning));
+            lu.push_notice(lang.tr(EDITOR_GONE_TEXT).to_owned(), NoticeKind::Warning);
             return;
         };
         let shown: String =
             if d.chars().count() > DRAFT_SHOWN { d.chars().take(DRAFT_SHOWN).chain(std::iter::once('…')).collect() } else { d.clone() };
-        lu.queue.push_back((lang.tr_fill(EDITOR_GONE_DRAFT_TEXT, &[("draft", &shown)]), NoticeKind::Warning));
+        lu.push_notice(lang.tr_fill(EDITOR_GONE_DRAFT_TEXT, &[("draft", &shown)]), NoticeKind::Warning);
         let whole = lang.tr_fill(EDITOR_GONE_DRAFT_TEXT, &[("draft", &d)]);
         self.message = Some(match self.message.take() {
             Some((title, earlier)) => (title, format!("{earlier}\n\n{whole}")),

@@ -61,7 +61,31 @@ impl Bob {
     }
 }
 
+/// Alice's hub, noting the rooms she told the relay she left.
+struct Spy {
+    inner: craft_live::testing::MemHub,
+    left: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl Hub for Spy {
+    fn send(&mut self, msg: ClientMsg) -> craft_collab::Result<()> {
+        if let ClientMsg::Leave { doc } = &msg {
+            self.left.lock().expect("lock").push(doc.clone());
+        }
+        self.inner.send(msg)
+    }
+
+    fn poll(&mut self) -> Vec<craft_collab::ServerMsg> {
+        self.inner.poll()
+    }
+
+    fn connected(&self) -> bool {
+        self.inner.connected()
+    }
+}
+
 struct Rig {
+    left: Arc<std::sync::Mutex<Vec<String>>>,
     relay: MemRelay,
     bytes: Vec<u8>,
     bob: Bob,
@@ -90,9 +114,11 @@ fn rig(alice_access: Access) -> (Rig, SheetApp) {
     let hub = relay.connect("alice", "Alice", alice_access == Access::Edit);
     let mut session = Session::new();
     let base = BaseFile { bytes: &bytes, name: FILE, expected_sha256: None };
+    let left = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let hub = Spy { inner: hub, left: Arc::clone(&left) };
     let live = GridLive::start(DynHub(Box::new(hub)), ROOM, &base, alice_access, "alice", &mut session).expect("starts");
     let app = crate::common::prepare(SheetApp::new(session, Services { live: Some(live), ..Default::default() }));
-    (Rig { relay, bytes, bob }, app)
+    (Rig { left, relay, bytes, bob }, app)
 }
 
 type Harness = crate::common::Harness;
@@ -415,7 +441,7 @@ fn a_session_attached_after_construction_edits_live() {
     };
     assert!(app.attach_live(second).is_err(), "a second session is refused");
     let mut h = harness(app);
-    let mut rig = Rig { relay, bytes, bob };
+    let mut rig = Rig { left: Arc::default(), relay, bytes, bob };
     settle(&mut rig, &mut h);
     h.state_mut().run("cell.set", json!({"cell": "B2", "input": "5"})).expect("runs through the session");
     settle(&mut rig, &mut h);
@@ -522,5 +548,160 @@ fn a_session_started_on_another_engine_session_is_refused() {
     own.new_workbook();
     let app = crate::common::prepare(SheetApp::new(own, Services { live: Some(live), ..Default::default() }));
     assert!(app.live().is_none());
-    assert!(app.message.as_ref().is_some_and(|(_, m)| m.contains("not started")), "{:?}", app.message);
+    // Told on the first frame, in the language the window has by then (the preferences load after
+    // construction).
+    assert!(app.message.is_none(), "not before the language is known");
+    let mut h = harness(app);
+    h.step();
+    assert!(h.state().message.as_ref().is_some_and(|(_, m)| m.contains("not started")), "{:?}", h.state().message);
+}
+
+/// Hovers the control and returns whether the refusal reason shows as its tooltip.
+fn hover_shows_reason(h: &mut Harness, label: &str) -> bool {
+    h.get_by_label(label).hover();
+    for _ in 0..6 {
+        h.step();
+    }
+    h.query_by_label_contains(gridcraft_live::NOT_YET_TEXT).is_some()
+}
+
+#[test]
+fn a_refused_split_button_and_gallery_are_greyed_with_the_reason() {
+    let (mut rig, app) = rig(Access::Edit);
+    let mut h = harness(app);
+    settle(&mut rig, &mut h);
+    // The main part of the Merge & Center split button, gated by its command id.
+    assert!(h.state().live_gates("home.mergeCenter"), "the gate refuses it");
+    let merge = h.get_all_by_label("Merge & Center").next().expect("the control exists");
+    assert!(merge.accesskit_node().is_disabled(), "the split button is greyed");
+    assert!(hover_shows_reason(&mut h, "Merge & Center"), "its reason shows on hover");
+    // A gallery whose items carry no command of their own.
+    h.state_mut().ui.ribbon_tab = "Insert".into();
+    settle(&mut rig, &mut h);
+    assert!(h.state().live_gates("insert.shape"));
+    assert!(h.get_by_label("Shapes").accesskit_node().is_disabled(), "the Shapes gallery is greyed");
+    assert!(hover_shows_reason(&mut h, "Shapes"), "its reason shows on hover");
+    // A control the session shares stays enabled.
+    h.state_mut().ui.ribbon_tab = "Home".into();
+    settle(&mut rig, &mut h);
+    assert!(!h.get_by_label("Paste").accesskit_node().is_disabled());
+}
+
+#[test]
+fn the_notice_queue_is_capped_and_its_count_stays_true() {
+    let (mut rig, app) = rig(Access::Edit);
+    let mut h = harness(app);
+    settle(&mut rig, &mut h);
+    let live = h.state_mut().live_mut().expect("live").live_mut();
+    for i in 1..=30 {
+        live.core_mut().push_notice(format!("Note number {i}."));
+    }
+    settle(&mut rig, &mut h);
+    // 20 are kept, the oldest 10 went; one is on show and 19 wait.
+    let shown = notice_text(h.state());
+    assert!(shown.contains("Note number 11."), "{shown:?}");
+    assert!(shown.contains("+19 more"), "{shown:?}");
+    // Dismissing shows the next, and the count goes down with it.
+    h.state_mut().notice = None;
+    settle(&mut rig, &mut h);
+    let shown = notice_text(h.state());
+    assert!(shown.contains("Note number 12.") && shown.contains("+18 more"), "{shown:?}");
+}
+
+#[test]
+fn ending_live_editing_leaves_the_room_by_name() {
+    let (mut rig, app) = rig(Access::Edit);
+    let mut h = harness(app);
+    settle(&mut rig, &mut h);
+    assert!(rig.left.lock().expect("lock").is_empty(), "still in the room");
+    h.state_mut().run("file.close", json!({"force": true})).expect("closes");
+    settle(&mut rig, &mut h);
+    assert_eq!(*rig.left.lock().expect("lock"), vec![ROOM.to_owned()], "Alice told the relay she left, once");
+}
+
+/// Every dropdown, gallery and split button the ribbon draws, by tooltip.
+fn ribbon_menu_tips() -> Vec<String> {
+    let app = crate::common::prepare(SheetApp::new(Session::new(), Services::default()));
+    let mut h = crate::common::harness_with(crate::common::builder().with_size(vec2(2600.0, 900.0)), app, 3);
+    for tab in gridcraft_ui_egui::ribbon::TABS {
+        h.state_mut().ui.ribbon_tab = (*tab).into();
+        for _ in 0..4 {
+            h.step();
+        }
+    }
+    gridcraft_ui_egui::live::menu_tips_seen(&h.ctx)
+}
+
+#[test]
+fn every_ribbon_dropdown_and_gallery_is_classified_for_the_live_gate() {
+    let tips = ribbon_menu_tips();
+    assert!(tips.len() > 30, "the walk found the ribbon's menus: {tips:?}");
+    let unknown: Vec<&String> = tips.iter().filter(|t| gridcraft_ui_egui::live::menu_tip_class(t).is_none()).collect();
+    assert!(
+        unknown.is_empty(),
+        "these controls open a popup the live gate does not know: add each to MENU_COMMANDS (its command is refused), \
+         PER_ITEM_TIPS (menu_items greys its items) or OPEN_TIPS (it runs nothing refused): {unknown:#?}"
+    );
+}
+
+#[test]
+fn every_gate_table_entry_names_a_real_refused_command() {
+    let (_rig, app) = rig(Access::Edit);
+    let drawn = ribbon_menu_tips();
+    for (tip, id) in gridcraft_ui_egui::live::menu_tables() {
+        if let Some(id) = id {
+            assert!(app.live_gates(id), "{tip}: {id} is not refused, so the entry greys a working control");
+        }
+        // Controls on contextual tabs (a chart or table selected) are not drawn in this walk.
+        let contextual = ["Add Chart Element", "Change Chart Type"].contains(&tip);
+        assert!(contextual || drawn.iter().any(|t| t == tip), "{tip}: no such control is drawn, the entry is stale");
+    }
+}
+
+#[test]
+fn the_remaining_galleries_and_one_sided_menus_are_greyed_or_left_usable_as_they_should() {
+    let (mut rig, app) = rig(Access::Edit);
+    let mut h = harness(app);
+    h.state_mut().ui.ribbon_tab = "Insert".into();
+    settle(&mut rig, &mut h);
+    // Icons, an Equation and a chart gallery run refused commands.
+    for label in ["Icons", "Pie or Doughnut", "Column or Bar"] {
+        let found = h.query_all_by_label(label).next().map(|n| n.accesskit_node().is_disabled());
+        assert!(found != Some(false), "{label} is greyed (or has no label of its own)");
+    }
+    assert!(h.get_by_label("Icons").accesskit_node().is_disabled());
+    assert!(hover_shows_reason(&mut h, "Icons"));
+    // Data Validation holds "Circle Invalid Data", which the session shares: the menu stays open.
+    h.state_mut().ui.ribbon_tab = "Data".into();
+    settle(&mut rig, &mut h);
+    assert!(!h.get_by_label("Data Validation").accesskit_node().is_disabled());
+    // Run Macro: the main part is refused, the arrow (the Macros dialog) is not.
+    h.state_mut().ui.ribbon_tab = "Automate".into();
+    settle(&mut rig, &mut h);
+    assert!(h.get_by_label("Run Macro").accesskit_node().is_disabled(), "the main part is greyed");
+    assert!(!h.get_by_label("Run Macro options").accesskit_node().is_disabled(), "the menu stays usable");
+}
+
+#[test]
+fn a_key_tip_does_not_open_the_gallery_of_a_greyed_control() {
+    // Without live editing the key tip opens the Symbol gallery ...
+    let mut h = harness(crate::common::prepare(SheetApp::new(Session::new(), Services::default())));
+    h.state_mut().ui.ribbon_tab = "Insert".into();
+    h.step();
+    h.state_mut().ui.keytip_invoke_next = Some("insert.symbol");
+    for _ in 0..4 {
+        h.step();
+    }
+    assert!(h.query_by_label("\u{20ac}").is_some(), "the gallery opened");
+    // ... and while editing live (where Symbol is refused) it shows the reason instead.
+    let (mut rig, app) = rig(Access::Edit);
+    let mut h = harness(app);
+    h.state_mut().ui.ribbon_tab = "Insert".into();
+    settle(&mut rig, &mut h);
+    h.state_mut().ui.keytip_invoke_next = Some("insert.symbol");
+    for _ in 0..4 {
+        h.step();
+    }
+    assert!(h.query_by_label("\u{20ac}").is_none(), "the gallery stayed shut");
+    assert!(notice_text(h.state()).contains(gridcraft_live::NOT_YET_TEXT), "{:?}", notice_text(h.state()));
 }

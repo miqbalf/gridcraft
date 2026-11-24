@@ -65,7 +65,7 @@ fn library_button(app: &mut SheetApp, ui: &mut Ui, item: &LibraryItem) {
     let anchor = small_button_accent(ui, Icon::FnBook(glyph), accent, item.label, item.label, true);
     control_keytip(app, ui, &anchor, item.keytip);
     let forced = invoke(app, item.keytip);
-    egui::Popup::menu(&anchor).open_memory(popup_command(forced, anchor.clicked())).show(|ui| match item.menu {
+    egui::Popup::menu(&anchor).open_memory(popup_command(app, forced, &anchor)).show(|ui| match item.menu {
         LibraryMenu::Recent => function_library::recent_menu(app, ui),
         LibraryMenu::Category(id) => function_library::category_menu(app, ui, id),
         LibraryMenu::More => function_library::more_menu(app, ui),
@@ -89,7 +89,7 @@ pub(super) fn formulas(app: &mut SheetApp, ui: &mut Ui) {
         act(app, "formulas.autoSum", json!({}));
     }
     let forced = invoke(app, "formulas.autoSum");
-    egui::Popup::menu(&sum_arrow).open_memory(popup_command(forced, sum_arrow.clicked())).show(|ui| function_library::auto_sum_menu(app, ui));
+    egui::Popup::menu(&sum_arrow).open_memory(popup_command(app, forced, &sum_arrow)).show(|ui| function_library::auto_sum_menu(app, ui));
     for column in LIBRARY.chunks(3) {
         ui.vertical(|ui| {
             for item in column {
