@@ -128,8 +128,7 @@ fn an_insert_next_to_a_deleted_range_end_agrees_with_the_document() {
     // Bob types a sum over rows 2-6 before he hears that Alice deleted row 2, so the document's
     // formula names a deleted row: it reads as A2:A5. Then a row is inserted at row 2, right
     // where the deleted row was, by Bob or by Alice (who gets Bob's formula with her lock).
-    // The receiver side (a formula that reached the room before an insert whose author had not
-    // seen it) is covered by the convergence traces.
+    // The receiver side, where the author had not seen the formula, is the next test.
     for bob_inserts in [true, false] {
         let mut room = Room::new(2);
         room.run(0, "home.deleteRows", json!({"rows": "2:2"})).unwrap();
@@ -167,6 +166,34 @@ fn an_inserted_line_takes_the_whole_line_format_before_it_on_every_peer() {
         room.settle();
         same_everywhere(&room, &format!("{insert} after a formatted line"));
     }
+}
+
+#[test]
+fn a_formula_ordered_between_a_grant_and_the_insert_agrees_on_the_receiver() {
+    // The relay fences an ordered edit on holding the lock, not on having seen every earlier
+    // op. Alice deletes row 2; Bob, before he hears of it, types a sum over rows 2-6, so the
+    // formula names the deleted row. Bob's write is ordered after Alice's grant but reaches her
+    // only after she ran her insert at row 2, so she cannot rewrite it. By id the range now
+    // starts at the new row; Bob's engine, which holds the formula, must show the same.
+    let mut room = Room::new(2);
+    room.run(0, "home.deleteRows", json!({"rows": "2:2"})).unwrap();
+    for _ in 0..4 {
+        room.pump(0);
+    }
+    // Alice asks for the lock (the relay grants it at once); then Bob's formula is ordered, after
+    // the grant, so Alice's insert does not wait for it.
+    *room.peers[0].hold_ops.borrow_mut() = true;
+    room.run(0, "home.insertRows", json!({"rows": "2:2"})).unwrap();
+    room.run(1, "cell.set", json!({"cell": "E1", "input": "=SUM(A2:A6)"})).unwrap();
+    // Bob hears of the delete before the insert is out.
+    room.pump(1);
+    for _ in 0..4 {
+        room.pump(0);
+    }
+    assert_eq!(formula_at(&room, 0, "E1"), None, "Alice ran her insert before Bob's formula reached her");
+    *room.peers[0].hold_ops.borrow_mut() = false;
+    room.settle();
+    same_everywhere(&room, "a formula ordered between a grant and the insert");
 }
 
 #[test]
@@ -252,6 +279,17 @@ fn typing_into_a_deleted_row_tells_the_typist_with_the_value() {
     let told = room.notices_of(0).iter().any(|n| n.contains("777") && n.contains("Bob"));
     assert!(told, "{:?}", room.notices_of(0));
     same_everywhere(&room, "typing into a deleted row");
+}
+
+#[test]
+fn a_formula_typed_into_a_deleted_row_is_told_as_typed() {
+    let mut room = Room::new(2);
+    room.run(1, "home.deleteRows", json!({"rows": "5:5"})).unwrap();
+    room.pump(1);
+    room.run(0, "cell.set", json!({"cell": "B5", "input": "=A1+C7"})).unwrap();
+    room.settle();
+    let told = room.notices_of(0).iter().any(|n| n.contains("=A1+C7") && n.contains("B5"));
+    assert!(told, "the notice shows the formula as typed: {:?}", room.notices_of(0));
 }
 
 #[test]

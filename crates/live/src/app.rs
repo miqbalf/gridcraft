@@ -531,6 +531,14 @@ impl GridApp<'_> {
                         for id in ids {
                             t.add_line(i, axis, *id);
                         }
+                        // A formula with a range end on a deleted line next to the new lines now
+                        // reads (by id) as ending on a new line, which the engine's shift does not
+                        // know. Its author may not have seen the formula (the relay orders an
+                        // edit made under the lock without asking what the holder has seen), so
+                        // it is printed again here from the document.
+                        if let Some(s) = final_layout.sheets.get(i) {
+                            naming.extend(m.index.naming(sheet, axis, &s.axis(axis).deleted_next_to(ids)));
+                        }
                     }
                     Op::Delete { .. } => {}
                 }
@@ -1014,8 +1022,11 @@ fn removed_notices(m: &mut Mapping, sheet: Id, axis: crate::axis::AxisKind, ids:
         let at = parse_cell_key(&key)
             .and_then(|(r, col)| m.layout.sheet_index(s).and_then(|i| m.layout.cell_at(i, r, col)))
             .map_or_else(|| key.clone(), |cell| cell.a1());
+        // The document holds a formula by ids: print it in A1 form with the layout it was
+        // written for (the deleted line is still in it here).
+        let print = |f: &str| gridcraft_formula::ids::parse_ids(f, s.0, &m.layout).map_or_else(|_| f.to_owned(), |e| gridcraft_formula::print(&e));
         let value = match (&c.f, &c.v) {
-            (Some(f), _) => format!("={f}"),
+            (Some(f), _) => format!("={}", print(f)),
             (None, Some(Value::String(t))) => t.clone(),
             (None, Some(v)) => v.to_string(),
             _ => String::new(),

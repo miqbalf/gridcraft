@@ -26,6 +26,10 @@ pub struct SpyHub {
     /// While set, the relay's error answers (a refused submit) are held back.
     pub hold_errors: Rc<RefCell<bool>>,
     held: Vec<ServerMsg>,
+    /// While set, the relay's ordered edits (`Op`) reach this peer late: they are held back, in
+    /// order, while lock answers still arrive (network latency, as the relay allows).
+    pub hold_ops: Rc<RefCell<bool>>,
+    held_ops: Vec<ServerMsg>,
     /// How many lock requests this hub sent.
     pub locks: Rc<RefCell<usize>>,
 }
@@ -50,6 +54,15 @@ impl Hub for SpyHub {
     }
     fn poll(&mut self) -> Vec<ServerMsg> {
         let mut now = self.inner.poll();
+        if *self.hold_ops.borrow() {
+            let (ops, rest): (Vec<_>, Vec<_>) = now.into_iter().partition(|m| matches!(m, ServerMsg::Op { .. }));
+            self.held_ops.extend(ops);
+            now = rest;
+        } else if !self.held_ops.is_empty() {
+            let mut late = std::mem::take(&mut self.held_ops);
+            late.append(&mut now);
+            now = late;
+        }
         if *self.hold_errors.borrow() {
             let (errors, rest): (Vec<_>, Vec<_>) = now.into_iter().partition(|m| matches!(m, ServerMsg::Error { .. }));
             self.held.extend(errors);
@@ -73,6 +86,7 @@ pub struct Peer {
     pub sizes: Rc<RefCell<Vec<usize>>>,
     pub fenced: Rc<RefCell<Vec<bool>>>,
     pub hold_errors: Rc<RefCell<bool>>,
+    pub hold_ops: Rc<RefCell<bool>>,
     pub locks: Rc<RefCell<usize>>,
     pub notices: Vec<String>,
 }
@@ -133,6 +147,7 @@ impl Room {
         let sizes = Rc::new(RefCell::new(Vec::new()));
         let fenced = Rc::new(RefCell::new(Vec::new()));
         let hold_errors = Rc::new(RefCell::new(false));
+        let hold_ops = Rc::new(RefCell::new(false));
         let locks = Rc::new(RefCell::new(0));
         let hub = SpyHub {
             inner: hub,
@@ -140,6 +155,8 @@ impl Room {
             fenced: fenced.clone(),
             hold_errors: hold_errors.clone(),
             held: Vec::new(),
+            hold_ops: hold_ops.clone(),
+            held_ops: Vec::new(),
             locks: locks.clone(),
         };
         let mut session = Session::new();
@@ -148,7 +165,7 @@ impl Room {
             Some(h) => GridLive::start_with(hub, ROOM, &base, access, &uid, &mut session, h),
             None => GridLive::start(hub, ROOM, &base, access, &uid, &mut session),
         };
-        self.peers.push(Peer { session, live: live.unwrap(), sizes, fenced, hold_errors, locks, notices: Vec::new() });
+        self.peers.push(Peer { session, live: live.unwrap(), sizes, fenced, hold_errors, hold_ops, locks, notices: Vec::new() });
         self.peers.len() - 1
     }
 

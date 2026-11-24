@@ -31,7 +31,7 @@ fn range(rng: &mut Rng) -> String {
 fn free(rng: &mut Rng, other: &str) -> (&'static str, Json) {
     let row = 1 + rng.below(12);
     let c = col(rng.below(6));
-    match rng.below(18) {
+    match rng.below(20) {
         0..=2 => ("cell.set", json!({"cell": cell(rng), "input": format!("{}", rng.below(1000))})),
         3 => ("cell.set", json!({"cell": cell(rng), "input": format!("=A{}+B{}", 1 + rng.below(12), 1 + rng.below(12))})),
         4 => ("cell.set", json!({"cell": cell(rng), "input": format!("=SUM(A{row}:C{})", row + rng.below(4))})),
@@ -47,6 +47,15 @@ fn free(rng: &mut Rng, other: &str) -> (&'static str, Json) {
         14 => ("home.unhideRows", json!({"rows": format!("1:{}", row + 2)})),
         15 => ("home.hideColumns", json!({"cols": format!("{c}:{c}")})),
         16 => ("edit.fillDown", json!({"range": format!("{c}{row}:{c}{}", row + 1 + rng.below(3))})),
+        // A whole row or column formatted: a line format, which an inserted line next to it takes.
+        17 => {
+            let line = if rng.chance(50) { format!("{row}:{row}") } else { format!("{c}:{c}") };
+            if rng.chance(50) {
+                ("home.fillColor", json!({"range": line, "color": format!("#{:06X}", rng.below(0xFF_FFFF))}))
+            } else {
+                ("home.bold", json!({"range": line}))
+            }
+        }
         _ => {
             let text = (0..2).map(|r| format!("p{r}\t{}", rng.below(9))).collect::<Vec<_>>().join("\n");
             ("edit.paste", json!({"at": cell(rng), "text": text}))

@@ -302,8 +302,9 @@ fn push_once(v: &mut Vec<Unshared>, u: Unshared) {
     }
 }
 
-/// `fit`: a row height the engine measured by itself (the row is not set by hand) is not an edit:
-/// every peer fits its own rows, with its own fonts. Such rows go to `fitted` instead.
+/// `fit`: a row height the engine measured by itself (the row is not set by hand) is not a line
+/// edit (no "set by hand" height): such rows go to `fitted` instead, so an observer can still
+/// share the height its author measured (peers that apply a remote change do not fit rows).
 fn lines_diff(i: usize, axis: Axis, fit: bool, b: &BTreeMap<u32, LineInfo>, a: &BTreeMap<u32, LineInfo>, r: &mut EditReport) {
     let mut keys: Vec<u32> = b.keys().chain(a.keys()).copied().collect();
     keys.sort_unstable();

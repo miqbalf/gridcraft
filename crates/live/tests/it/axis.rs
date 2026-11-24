@@ -29,6 +29,24 @@ fn insert_in_the_implicit_tail_materialises_up_to_it() {
     assert!(again.materialise.is_empty(), "an insert inside the written prefix writes out nothing more");
 }
 
+#[test]
+fn the_deleted_lines_next_to_an_insert_are_its_unbroken_deleted_neighbours() {
+    let mut axis = Axis::base(1000);
+    // Lines 3, 4 and 8 go; a line is inserted where line 4 was (after the gone 3 and 4), and
+    // another one between the gone 8 and the end of the written prefix.
+    axis.delete(&[Id::base(3), Id::base(4), Id::base(8)]);
+    let new = Id::minted(3, 1);
+    axis.insert(3, &[new]);
+    let near: BTreeSet<Id> = axis.deleted_next_to(&[new]).into_iter().collect();
+    assert_eq!(near, BTreeSet::from([Id::base(3), Id::base(4)]), "the gone lines just before it, not line 8");
+    let mut tail = Axis::base(1000);
+    tail.delete(&[Id::base(5), Id::base(6)]);
+    let late = Id::minted(3, 2);
+    tail.insert_after(Some(Id::base(4)), &[late]);
+    let near: BTreeSet<Id> = tail.deleted_next_to(&[late]).into_iter().collect();
+    assert_eq!(near, BTreeSet::from([Id::base(5), Id::base(6)]), "the gone lines just after it, in the implicit tail");
+}
+
 /// A naive axis: every line in one list, long enough that the tail never runs out.
 struct Model {
     lines: Vec<(Id, bool)>,

@@ -282,10 +282,20 @@ impl Author<'_> {
                     // A formula with a range end on a deleted line (typed before its author heard
                     // of the delete) reads as the nearest surviving line. The new lines could
                     // become that line by id, while the engine shifted the range as Excel does:
-                    // write the ends the formula shows now, before the insert.
+                    // write the ends the formula shows now, before the insert. Only the deleted
+                    // lines right next to where the new lines go can change.
                     ensure_index(self.index, self.base, self.layout, self.replica);
-                    let gone: Vec<Id> = self.layout.sheets.get(i).map(|s| s.axis(*axis).deleted().iter().copied().collect()).unwrap_or_default();
-                    self.shrink(i, sheet, *axis, &gone);
+                    let near: Vec<Id> = self
+                        .layout
+                        .sheets
+                        .get(i)
+                        .map(|s| {
+                            let mut ax = s.axis(*axis).clone();
+                            ax.insert(*at, &ids);
+                            ax.deleted_next_to(&ids)
+                        })
+                        .unwrap_or_default();
+                    self.shrink(i, sheet, *axis, &near);
                     let Some(s) = self.layout.sheets.get_mut(i) else { return Err(refuse()) };
                     let ins = s.axis_mut(*axis).insert(*at, &ids);
                     let prev = ins.prev;

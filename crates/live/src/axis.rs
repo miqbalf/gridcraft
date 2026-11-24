@@ -276,6 +276,29 @@ impl Axis {
             .collect();
         areas(&positions)
     }
+
+    /// The deleted ids right next to `ids` (explicit ids that are next to each other), on
+    /// either side, up to the nearest id that is not deleted. A range end on a deleted line
+    /// reads as the nearest surviving line, so it is these ends an insert of `ids` can change.
+    #[must_use]
+    pub fn deleted_next_to(&self, ids: &[Id]) -> Vec<Id> {
+        let at: Vec<usize> = ids.iter().filter_map(|id| self.index.get(id).map(|(i, _)| *i)).collect();
+        let (Some(lo), Some(hi)) = (at.iter().min().copied(), at.iter().max().copied()) else { return Vec::new() };
+        let gone = |id: &&Id| self.deleted.contains(*id);
+        let mut out: Vec<Id> = self.explicit.get(..lo).unwrap_or_default().iter().rev().take_while(gone).copied().collect();
+        let after = self.explicit.get(hi + 1..).unwrap_or_default();
+        let run = after.iter().take_while(gone).count();
+        out.extend(after.iter().take(run).copied());
+        if run == after.len() {
+            // The run goes on into the implicit tail of base ids.
+            let mut b = self.next_base;
+            while b < SPACE_ONE && self.deleted.contains(&Id(b)) {
+                out.push(Id(b));
+                b += 1;
+            }
+        }
+        out
+    }
 }
 
 /// Ascending positions as `(first, count)` runs.

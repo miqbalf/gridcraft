@@ -365,3 +365,25 @@ fn whole_column_and_row_formats_converge() {
     room.settle();
     assert_eq!(room.finger(0), room.finger(late));
 }
+
+#[test]
+fn a_whole_line_format_turned_off_again_keeps_the_line_style() {
+    // Bold on, then off, on column A leaves a column style that looks like the default, and a
+    // row's style that looks like the default still hides a bold column under it. Every peer and
+    // the saved state keep the line style, not "no style".
+    let mut room = Room::new(2);
+    room.run(0, "home.bold", json!({"range": "A:A"})).unwrap();
+    room.run(0, "home.bold", json!({"range": "A:A"})).unwrap();
+    room.run(1, "home.bold", json!({"range": "C:C"})).unwrap();
+    room.run(1, "home.bold", json!({"range": "4:4"})).unwrap();
+    room.run(1, "home.bold", json!({"range": "4:4"})).unwrap();
+    room.settle();
+    room.assert_all_live("a whole line format turned off");
+    let (f0, f1) = (room.finger(0), room.finger(1));
+    assert!(f0 == f1, "{}", diff(&f0, &f1));
+    let base = room.base();
+    for i in 0..2 {
+        let oracle = workbook_from_state(&base, &room.replica_state(i), None).unwrap();
+        assert!(room.finger(i) == finger(&oracle), "peer {i} differs from the state:\n{}", diff(&room.finger(i), &finger(&oracle)));
+    }
+}

@@ -206,9 +206,11 @@ impl Planner<'_> {
         let json = |wb: &Workbook, s: Option<StyleId>| styles::canonical(&styles::to_json(wb.styles.get(s.unwrap_or(StyleId::DEFAULT))));
         let sa = json(&r.after, after);
         let key = line_key(id, "st");
-        let put = if sa == json(self.base, base) {
+        // A line with a style that looks like the default is still not a line with no style: a
+        // row's style wins over a column's. So the document keeps which of the two it is.
+        let put = if after.is_some() == base.is_some() && sa == json(self.base, base) {
             Put::Reset
-        } else if sa == json(&r.after, None) {
+        } else if after.is_none() {
             Put::Clear
         } else {
             let k = self.style_key(&sa);
