@@ -59,8 +59,12 @@ pub fn start() {
                         let _ = session.execute("file.new", serde_json::json!({"sample": "sales"}));
                     }
                     let mut services = services(inbox.clone(), cc.egui_ctx.clone());
+                    // Live editing: the parent's `live` messages and the session's tickets (`host`).
+                    let live_events = crate::host::LiveEvents::default();
+                    let live = crate::host::Live::default();
                     if let Some(bridge) = &app_bridge {
                         bridge.connect(&mut services, inbox.clone(), cc.egui_ctx.clone());
+                        bridge.listen_live(live_events.clone(), live.joining(), cc.egui_ctx.clone());
                     }
                     let mut app = SheetApp::new(session, services);
                     app.ui.system_theme = true;
@@ -100,7 +104,7 @@ pub fn start() {
                         bridge.post_ready();
                     }
                     crate::api::install(&mut app, cc.egui_ctx.clone());
-                    Ok(Box::new(WebShell { app, inbox, bridge: app_bridge, prefs }))
+                    Ok(Box::new(WebShell { app, inbox, bridge: app_bridge, prefs, live, live_events }))
                 }),
             )
             .await;
@@ -129,6 +133,8 @@ struct WebShell {
     inbox: Inbox,
     bridge: Option<crate::host::Bridge>,
     prefs: crate::prefs::PrefsSync,
+    live: crate::host::Live,
+    live_events: crate::host::LiveEvents,
 }
 
 fn local_storage() -> Option<web_sys::Storage> {
@@ -156,6 +162,9 @@ impl eframe::App for WebShell {
                     Err(e) => log::error!("couldn't read dropped file {name}: {e}"),
                 }
             });
+        }
+        if let Some(bridge) = &self.bridge {
+            self.live.frame(&mut self.app, &self.live_events, bridge);
         }
         self.app.logic(ctx);
         // Store changed preferences straight away: a reload or closed tab runs no exit code (#1562).

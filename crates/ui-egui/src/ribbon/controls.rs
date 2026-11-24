@@ -280,7 +280,9 @@ pub(super) fn menu_items(app: &mut SheetApp, ui: &mut Ui, items: &[(&str, &str, 
             continue;
         }
         let lang = app.ui.language;
-        let response = ui.add(egui::Button::new(lang.tr(label)).frame_when_inactive(false).min_size(vec2(220.0, 22.0)));
+        let gated = app.live_gates(id);
+        let response = ui.add_enabled(!gated, egui::Button::new(lang.tr(label)).frame_when_inactive(false).min_size(vec2(220.0, 22.0)));
+        let response = if gated { response.on_disabled_hover_text(crate::live::blocked_tip(ui.ctx())) } else { response };
         if let Some(sequence) = keytip_table::item_letter(app.keytips.prefix().unwrap_or_default(), id) {
             keytip(app, ui, sequence, pos2(response.rect.right() - 10.0, response.rect.center().y));
         }

@@ -809,7 +809,8 @@ pub(crate) fn paint_overlays(input: OverlayInput<'_>) {
             p.add(egui::Shape::convex_polygon(vec![to, to - d * 9.0 + n * 4.0, to - d * 9.0 - n * 4.0], colour, Stroke::NONE));
         }
     }
-    let _ = (wb, si);
+    super::presence::paint(app, ui, p, geo, sh, si);
+    let _ = wb;
 }
 
 fn paint_pages(app: &mut SheetApp, p: &Painter, geo: &Geo, sh: &Sheet) {

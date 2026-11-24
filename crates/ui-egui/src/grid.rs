@@ -31,6 +31,7 @@ mod geo;
 mod interact;
 mod keyboard;
 mod menus;
+pub(crate) mod presence;
 mod quadrant;
 mod selection;
 mod show;

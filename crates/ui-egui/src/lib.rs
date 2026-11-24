@@ -43,6 +43,7 @@ pub mod i18n;
 pub mod icons;
 pub mod keymap;
 pub mod keytips;
+pub mod live;
 pub mod macro_editor;
 pub mod macro_ui;
 pub mod objects;
@@ -253,6 +254,8 @@ pub struct SheetApp {
     /// Dismissible info bar under the ribbon (open-time notices).
     pub notice: Option<Notice>,
     pub services: Services,
+    /// The live co-editing session this window is in, if any ([`live`]).
+    pub(crate) live: Option<live::LiveUi>,
     pub printing: printing::State,
     print_feedback_seen: Option<printing::Feedback>,
     /// Synthetic input from agents, one batch per step (drags need several steps).

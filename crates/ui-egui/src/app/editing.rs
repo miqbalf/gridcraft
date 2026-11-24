@@ -18,6 +18,11 @@ impl SheetApp {
             self.message = Some(("Text Box".into(), clean_error(&e)));
             return;
         }
+        // A read-only live file takes no typing: say so now, not after the entry is made.
+        if let Some(why) = self.live_read_only() {
+            self.message = Some(("GridCraft".into(), why));
+            return;
+        }
         let Some(d) = self.session.active() else { return };
         let Some(sh) = d.wb.active() else { return };
         let at = sh.merge_at(d.selection.active).map(|m| m.start).unwrap_or(d.selection.active);
@@ -199,9 +204,9 @@ impl SheetApp {
         let r = if unchanged {
             Ok(json!({}))
         } else if fill_selection {
-            self.session.run("range.fill", json!({"input": text}))
+            self.engine_run("range.fill", json!({"input": text}))
         } else {
-            self.session.run("cell.set", json!({"cell": ed.cell.a1(), "input": text, "array": array}))
+            self.engine_run("cell.set", json!({"cell": ed.cell.a1(), "input": text, "array": array}))
         };
         match r {
             Ok(_) => {

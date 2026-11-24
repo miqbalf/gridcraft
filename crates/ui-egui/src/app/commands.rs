@@ -59,7 +59,7 @@ impl SheetApp {
         }
         let before = self.session.active_window();
         let zoom_from = matches!(id, "view.zoom" | "view.zoom100" | "view.zoomToSelection").then(|| crate::grid::Trace::key(self));
-        let r = self.session.run(id, params);
+        let r = self.engine_run(id, params);
         if let Some(from) = zoom_from {
             crate::grid::Trace::keep_through_zoom(self, from);
         }

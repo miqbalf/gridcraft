@@ -33,7 +33,7 @@ impl<'a> SaveMessage<'a> {
     }
 }
 
-fn is_workbook(name: &str) -> bool {
+pub fn is_workbook(name: &str) -> bool {
     name.rsplit_once('.').is_some_and(|(_, ext)| WORKBOOK_EXTS.iter().any(|e| ext.eq_ignore_ascii_case(e)))
 }
 

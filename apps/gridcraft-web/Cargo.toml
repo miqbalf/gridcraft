@@ -17,6 +17,11 @@ path = "src/main.rs"
 gridcraft-engine = { workspace = true }
 gridcraft-model = { workspace = true }
 gridcraft-ui-egui = { workspace = true }
+gridcraft-live = { workspace = true }
+craft-live = { workspace = true }
+# Reads a live ticket's claims and checks the base file's hash (`live_ticket`).
+base64 = { workspace = true }
+sha2 = { workspace = true }
 # The host messages (storytold/craft-libs): one contract and one bridge for the web builds.
 # The page command API (storytold/craft-libs#413): window.gridcraft over the control channel.
 craft-web-api = { git = "https://github.com/storytold/craft-libs", rev = "aa84415bae3b765fef6b7ef42404f66ad1cff9d9", version = "0.1.0" }
@@ -27,9 +32,12 @@ log = { workspace = true }
 serde_json = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# The browser hub over the page's socket.io-client (`/craft/vendor/socket.io.min.js`).
+craft-collab = { workspace = true, features = ["web-hub"] }
+web-time = { workspace = true }
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit"] }
 rfd = { workspace = true }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Window", "Document", "Element", "Event", "EventTarget", "HtmlElement", "HtmlCanvasElement", "HtmlAnchorElement", "HtmlIFrameElement", "Blob", "BlobPropertyBag", "Url", "Location", "CssStyleDeclaration", "Clipboard", "ClipboardItem", "Navigator", "MessageEvent", "UrlSearchParams", "AddEventListenerOptions", "Storage", "CustomEvent", "CustomEventInit"] }
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "Event", "EventTarget", "HtmlElement", "HtmlCanvasElement", "HtmlAnchorElement", "HtmlIFrameElement", "Blob", "BlobPropertyBag", "Url", "Location", "CssStyleDeclaration", "Clipboard", "ClipboardItem", "Navigator", "MessageEvent", "UrlSearchParams", "AddEventListenerOptions", "Storage", "CustomEvent", "CustomEventInit", "Request", "RequestInit", "RequestMode", "RequestCredentials", "Response", "Headers", "AbortController", "AbortSignal"] }

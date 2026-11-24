@@ -8,7 +8,7 @@ use super::updates_ui;
 use super::{
     CellRef, HashMap, INTERFACE_SCALE_MAX, INTERFACE_SCALE_MIN, Json, Notice, Perf, RangeRef, Session, SheetApp, UiRequest, UiState, backstage,
     clamp_interface_scale, clean_error, control, desktop_theme, dialogs, editor, floating_pictures, formula_bar, formula_locale, grid, i18n, json,
-    keytips, macro_ui, panes, pivot_pane, printing, ribbon, tabs, text_box, theme, widgets,
+    keytips, live, macro_ui, panes, pivot_pane, printing, ribbon, tabs, text_box, theme, widgets,
 };
 
 mod clipboard;
@@ -27,7 +27,15 @@ mod view;
 
 impl SheetApp {
     /// Constructs a `SheetApp` with default UI, grid, printing, control and screenshot state and the caller's session and services.
-    pub fn new(session: Session, services: Services) -> SheetApp {
+    pub fn new(session: Session, mut services: Services) -> SheetApp {
+        let mut live_refused = None;
+        let live = services.live.take().and_then(|live| match live::check_attached(&session, &live) {
+            Ok(()) => Some(live::LiveUi::new(live)),
+            Err(why) => {
+                live_refused = Some(why);
+                None
+            }
+        });
         SheetApp {
             session,
             ui: UiState::default(),
@@ -37,10 +45,11 @@ impl SheetApp {
             text_box_editor: None,
             dialog: None,
             backstage: None,
-            message: None,
+            message: live_refused.map(|why| ("GridCraft".into(), format!("Live editing was not started. {why}"))),
             toast: None,
             notice: None,
             services,
+            live,
             printing: Default::default(),
             print_feedback_seen: None,
             synthetic: Default::default(),
@@ -109,6 +118,8 @@ impl SheetApp {
     /// Per-frame logic (control channel, screenshots). Call before `ui`.
     pub fn logic(&mut self, ctx: &egui::Context) {
         self.ensure_text_width(ctx);
+        // Live co-editing: take in the other editors' changes first, so the frame draws them.
+        self.live_frame(ctx);
         // A keytip control request lives one frame: the ribbon consumes it during `ui`, and
         // anything that never reached a control (collapsed ribbon, tab switch) is dropped. One
         // made with a switch to the control's tab waits, with its window, for the next `ui` of
