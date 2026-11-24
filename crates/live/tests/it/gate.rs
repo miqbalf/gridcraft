@@ -124,7 +124,7 @@ fn undo_goes_through_the_room_and_stop_unhooks_the_engine() {
     assert!(room.wb(1).sheet(0).unwrap().cell(a1("D5")).is_none(), "and reached the other peer");
     assert_eq!(room.finger(0), room.finger(1));
     let mut p = room.peers.remove(0);
-    p.live.stop(&mut p.session);
+    assert!(p.live.stop(&mut p.session).is_none(), "everything was confirmed: no copy");
     p.session.execute("cell.set", json!({"cell": "D6", "input": "after the end"})).unwrap();
     assert!(p.session.active().unwrap().wb.sheet(0).unwrap().cell(a1("D6")).is_some(), "an ordinary workbook again: edits stay");
 }

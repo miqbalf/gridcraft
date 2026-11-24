@@ -169,6 +169,22 @@ pub fn save_refusal(joined: bool, asked: bool, name: &str) -> Option<&'static st
     Some(if joined { SAVE_BY_SERVICE } else { SAVE_OFF_AFTER_FAILED_JOIN })
 }
 
+/// The `save` message that hands the copy of unmerged live edits to the page: its bare file name,
+/// and always `saveAs: true` (a new file beside the room's, never over it).
+#[must_use]
+pub fn copy_save(path: &str) -> (String, bool) {
+    let name = path.rsplit(['/', '\\']).next().filter(|n| !n.is_empty()).unwrap_or(path);
+    (name.to_owned(), true)
+}
+
+/// Whether the page should warn before the tab closes. While live the document service saves the
+/// workbook, so only edits the relay has not confirmed (reconnecting, or refused for now) and a
+/// copy of unmerged edits not stored yet count; otherwise any unsaved workbook does.
+#[must_use]
+pub fn page_dirty(live: bool, docs_dirty: bool, unconfirmed: bool, copies_unsaved: bool) -> bool {
+    copies_unsaved || if live { unconfirmed } else { docs_dirty }
+}
+
 /// What a `live` message the host crate refused means for the window.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Refusal {
@@ -209,6 +225,22 @@ mod tests {
 
     fn hex(hash: [u8; 32]) -> String {
         hash.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn the_unmerged_copy_is_saved_as_a_new_file_by_its_bare_name() {
+        assert_eq!(copy_save("dir/book (unmerged 2026-11-24 1404).xlsx"), ("book (unmerged 2026-11-24 1404).xlsx".to_owned(), true));
+        assert_eq!(copy_save("book.xlsx"), ("book.xlsx".to_owned(), true));
+    }
+
+    #[test]
+    fn unconfirmed_edits_and_unsaved_copies_keep_the_page_dirty() {
+        assert!(!page_dirty(true, true, false, false), "the service saves a live room");
+        assert!(page_dirty(true, false, true, false), "edits the relay has not confirmed");
+        assert!(page_dirty(true, false, false, true), "a copy of unmerged edits waits");
+        assert!(page_dirty(false, false, false, true), "a copy waits after the link ended");
+        assert!(page_dirty(false, true, false, false));
+        assert!(!page_dirty(false, false, true, false), "not live: the workbooks decide");
     }
 
     #[test]

@@ -277,10 +277,10 @@ impl Axis {
         areas(&positions)
     }
 
-    /// The deleted ids right next to `ids` (ids that are next to each other, explicit or in the
-    /// implicit tail), on either side, up to the nearest id that is not deleted. A range end on a
-    /// deleted line reads as the nearest surviving line, so it is these ends an insert of `ids`,
-    /// or their undelete, can change.
+    /// The deleted ids right next to `ids` (explicit or in the implicit tail), on either side of
+    /// each contiguous run of them, up to the nearest id that is not deleted (or the next run). A
+    /// range end on a deleted line reads as the nearest surviving line, so it is these ends an
+    /// insert of `ids`, or their undelete, can change.
     #[must_use]
     pub fn deleted_next_to(&self, ids: &[Id]) -> Vec<Id> {
         let len = self.explicit.len() as u64;
@@ -293,13 +293,28 @@ impl Axis {
             Some(id) => Some(*id),
             None => k.checked_sub(len).map(|t| self.next_base + t).filter(|b| *b < SPACE_ONE).map(Id),
         };
-        let at: Vec<u64> = ids.iter().filter_map(ordinal).collect();
-        let (Some(lo), Some(hi)) = (at.iter().min().copied(), at.iter().max().copied()) else { return Vec::new() };
-        let gone = |id: &Id| self.deleted.contains(id);
-        let mut out: Vec<Id> = (0..lo).rev().map_while(id_at).take_while(gone).collect();
-        out.extend((hi + 1..).map_while(id_at).take_while(gone));
-        out
+        let at: BTreeSet<u64> = ids.iter().filter_map(ordinal).collect();
+        // Next to a run, not inside another one of `ids`.
+        let gone = |k: &u64| !at.contains(k) && id_at(*k).is_some_and(|id| self.deleted.contains(&id));
+        let mut seen = BTreeSet::new();
+        for (lo, hi) in runs(&at) {
+            seen.extend((0..lo).rev().take_while(gone));
+            seen.extend((hi + 1..).take_while(|k| id_at(*k).is_some() && gone(k)));
+        }
+        seen.into_iter().filter_map(id_at).collect()
     }
+}
+
+/// Ascending ordinals as `(first, last)` runs of consecutive ones.
+fn runs(at: &BTreeSet<u64>) -> Vec<(u64, u64)> {
+    let mut out: Vec<(u64, u64)> = Vec::new();
+    for k in at {
+        match out.last_mut() {
+            Some((_, last)) if last.checked_add(1) == Some(*k) => *last = *k,
+            _ => out.push((*k, *k)),
+        }
+    }
+    out
 }
 
 /// Ascending positions as `(first, count)` runs.

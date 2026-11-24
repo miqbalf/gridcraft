@@ -90,6 +90,8 @@ impl Hub for Spy {
 
 struct Rig {
     left: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Alice's link, for the relay's link controls.
+    alice: craft_live::testing::MemHub,
     relay: MemRelay,
     bytes: Vec<u8>,
     bob: Bob,
@@ -105,6 +107,11 @@ fn join(relay: &MemRelay, bytes: &[u8], uid: &str, name: &str, access: Access) -
 
 /// Alice's window, joined to the room; Bob is already in it.
 fn rig(alice_access: Access) -> (Rig, SheetApp) {
+    rig_with(alice_access, Services::default())
+}
+
+/// The same, with the host's services.
+fn rig_with(alice_access: Access, services: Services) -> (Rig, SheetApp) {
     let relay = MemRelay::new();
     let bytes = base_bytes();
     let (session, live) = join(&relay, &bytes, "bob", "Bob", Access::Edit);
@@ -116,13 +123,14 @@ fn rig(alice_access: Access) -> (Rig, SheetApp) {
     }));
     // Alice joins through a boxed hub, as a host picking its transport at run time does.
     let hub = relay.connect("alice", "Alice", alice_access == Access::Edit);
+    let alice = hub.clone();
     let mut session = Session::new();
     let base = BaseFile { bytes: &bytes, name: FILE, expected_sha256: None };
     let left = Arc::new(std::sync::Mutex::new(Vec::new()));
     let hub = Spy { inner: hub, left: Arc::clone(&left) };
     let live = GridLive::start(DynHub(Box::new(hub)), ROOM, &base, alice_access, "alice", &mut session).expect("starts");
-    let app = crate::common::prepare(SheetApp::new(session, Services { live: Some(live), ..Default::default() }));
-    (Rig { left, relay, bytes, bob }, app)
+    let app = crate::common::prepare(SheetApp::new(session, Services { live: Some(live), ..services }));
+    (Rig { left, alice, relay, bytes, bob }, app)
 }
 
 type Harness = crate::common::Harness;
@@ -708,4 +716,94 @@ fn a_key_tip_does_not_open_the_gallery_of_a_greyed_control() {
     }
     assert!(h.query_by_label("\u{20ac}").is_none(), "the gallery stayed shut");
     assert!(notice_text(h.state()).contains(gridcraft_live::NOT_YET_TEXT), "{:?}", notice_text(h.state()));
+}
+
+// --- unmerged copies --------------------------------------------------------------------------
+
+type Copies = std::rc::Rc<std::cell::RefCell<Vec<(String, Vec<u8>)>>>;
+
+/// A host page that stores copies and answers each (`copy-N`), and a browser download.
+fn copy_services() -> (Services, Copies, Copies) {
+    let (posted, downloaded): (Copies, Copies) = Default::default();
+    let (p, d) = (posted.clone(), downloaded.clone());
+    let services = Services {
+        save_copy: Some(Box::new(move |name: &str, bytes: &[u8]| {
+            p.borrow_mut().push((name.to_owned(), bytes.to_vec()));
+            Ok(Some(format!("copy-{}", p.borrow().len())))
+        })),
+        download_copy: Some(Box::new(move |name: &str, bytes: &[u8]| d.borrow_mut().push((name.to_owned(), bytes.to_vec())))),
+        ..Default::default()
+    };
+    (services, posted, downloaded)
+}
+
+fn copy_value(copy: &(String, Vec<u8>), cell: &str) -> Value {
+    let (wb, _) = io::open_bytes(&copy.0, &copy.1).expect("the copy opens");
+    wb.sheet(0).and_then(|s| s.cell(a1(cell))).map(|c| c.value.clone()).unwrap_or(Value::Empty)
+}
+
+/// Alice types while her link is down: the edit waits for the room.
+fn type_offline(rig: &mut Rig, h: &mut Harness, text: &str) {
+    rig.relay.drop_link(&rig.alice);
+    h.step();
+    h.state_mut().run("cell.set", json!({"cell": "E5", "input": text})).expect("typed");
+    h.step();
+}
+
+#[test]
+fn closing_the_live_workbook_with_offline_edits_hands_the_page_a_copy_kept_until_it_is_stored() {
+    let (services, posted, _) = copy_services();
+    let (mut rig, app) = rig_with(Access::Edit, services);
+    let mut h = harness(app);
+    settle(&mut rig, &mut h);
+    type_offline(&mut rig, &mut h, "offline");
+    assert!(h.state().live_unconfirmed(), "the edit is not in the room yet");
+    h.state_mut().run("file.close", json!({"force": true})).expect("closes");
+    h.step();
+    h.state_mut().hand_over_copies();
+    let copy = posted.borrow().first().cloned().expect("the page got the copy");
+    assert!(copy.0.starts_with("book (unmerged "), "{}", copy.0);
+    assert_eq!(copy_value(&copy, "E5"), Value::Text("offline".into()));
+    assert!(h.state().copies_unsaved(), "kept until the page says it stored it");
+    assert!(h.state_mut().copy_answered("copy-1", Ok(None)));
+    assert!(!h.state().copies_unsaved(), "stored");
+    assert!(notice_text(h.state()).contains("Saved a copy"), "{:?}", notice_text(h.state()));
+}
+
+#[test]
+fn a_copy_the_page_could_not_store_waits_and_save_a_copy_downloads_it() {
+    let (services, posted, downloaded) = copy_services();
+    let (mut rig, app) = rig_with(Access::Edit, services);
+    let mut h = harness(app);
+    settle(&mut rig, &mut h);
+    type_offline(&mut rig, &mut h, "offline");
+    h.state_mut().run("file.close", json!({"force": true})).expect("closes");
+    h.step();
+    h.state_mut().hand_over_copies();
+    assert_eq!(posted.borrow().len(), 1);
+    assert!(h.state_mut().copy_answered("copy-1", Err("quota".into())));
+    assert!(h.state().copies_waiting(), "it waits again");
+    let action = h.state().notice.as_ref().and_then(|n| n.action.clone()).expect("the info bar offers it");
+    h.state_mut().hand_over_copies();
+    assert_eq!(posted.borrow().len(), 1, "no second automatic hand-over to a page that refused");
+    h.state_mut().open_dialog(&action.1, json!({}));
+    let copy = downloaded.borrow().first().cloned().expect("downloaded");
+    assert_eq!(copy_value(&copy, "E5"), Value::Text("offline".into()));
+    assert!(!h.state().copies_unsaved());
+}
+
+#[test]
+fn a_session_the_host_ends_keeps_the_edits_the_room_never_confirmed() {
+    let (services, posted, _) = copy_services();
+    let (mut rig, app) = rig_with(Access::Edit, services);
+    let mut h = harness(app);
+    settle(&mut rig, &mut h);
+    type_offline(&mut rig, &mut h, "unsent");
+    h.state_mut().end_live_for("Your access changed. Reopen the file.");
+    h.step();
+    assert!(!h.state().live_unconfirmed(), "a broken link's edits are the copy now");
+    assert!(h.state().copies_unsaved(), "and the copy counts");
+    h.state_mut().hand_over_copies();
+    let copy = posted.borrow().first().cloned().expect("the page got the copy");
+    assert_eq!(copy_value(&copy, "E5"), Value::Text("unsent".into()));
 }

@@ -23,6 +23,8 @@ mod trace;
 #[cfg(feature = "test-util")]
 mod undo;
 #[cfg(feature = "test-util")]
+mod unmerged;
+#[cfg(feature = "test-util")]
 mod volatile;
 
 /// SplitMix64, the house generator for seeded random tests (as in the engine's

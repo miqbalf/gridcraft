@@ -53,6 +53,30 @@ fn the_deleted_lines_next_to_an_insert_are_its_unbroken_deleted_neighbours() {
     assert_eq!(near, BTreeSet::from([Id::base(1), Id::base(3)]), "the gone lines on both sides of a line that came back");
 }
 
+/// R1: ids that are not next to each other are scanned around each run, so a gone line next to
+/// an inner one is found, and gone lines far from every run are not.
+#[test]
+fn the_deleted_lines_next_to_ids_apart_are_found_around_each_run() {
+    let mut axis = Axis::base(1000);
+    // Gone: 1, 3 and 4 (next to 2 and to 5), 9 (next to 10), 7 and 12 (next to none of them).
+    let gone = [1, 3, 4, 7, 9, 12].map(Id::base);
+    axis.delete(&gone);
+    let ids = [Id::base(2), Id::base(5), Id::base(10)];
+    let near: BTreeSet<Id> = axis.deleted_next_to(&ids).into_iter().collect();
+    assert_eq!(
+        near,
+        BTreeSet::from([Id::base(1), Id::base(3), Id::base(4), Id::base(9)]),
+        "the gone lines beside 2, between 2 and 5, and before 10; not 7 or 12, which a live line keeps apart"
+    );
+    // Ids given in any order and with a run of two read the same.
+    let near: BTreeSet<Id> = axis.deleted_next_to(&[Id::base(10), Id::base(6), Id::base(5)]).into_iter().collect();
+    assert_eq!(
+        near,
+        BTreeSet::from([Id::base(3), Id::base(4), Id::base(7), Id::base(9)]),
+        "around the run 5-6 (7 sits between it and the live line 8), and before 10"
+    );
+}
+
 /// A naive axis: every line in one list, long enough that the tail never runs out.
 struct Model {
     lines: Vec<(Id, bool)>,

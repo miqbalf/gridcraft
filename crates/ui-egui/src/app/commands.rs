@@ -376,6 +376,11 @@ impl SheetApp {
     }
 
     pub fn open_dialog(&mut self, name: &str, params: Json) {
+        // The info bar's Save a copy for unmerged live edits.
+        if name == crate::live::SAVE_COPY_ACTION {
+            self.offer_unmerged();
+            return;
+        }
         if let Err(e) = self.commit_text_box_edit() {
             self.message = Some(("Text Box".into(), clean_error(&e)));
             return;

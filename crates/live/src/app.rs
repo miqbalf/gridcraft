@@ -105,9 +105,25 @@ pub(crate) struct Mapping {
     pub resets: u32,
     /// The `resets` count the undo state was last cleared for: it clears once per count.
     pub undo_resets: u32,
+    /// The base file's name, for the unmerged copy's.
+    pub name: String,
+    /// Local edits craft-live was about to drop, for [`crate::GridLive::take_unmerged`].
+    pub unmerged: Option<crate::unmerged::Unmerged>,
 }
 
 impl Mapping {
+    /// Keeps `state` (the replica with local edits the room lacks) for the unmerged copy, and
+    /// tells the person once while a copy waits.
+    pub(crate) fn keep_unmerged(&mut self, state: Vec<u8>) {
+        match self.unmerged.as_mut() {
+            Some(u) => u.states.push(state),
+            None => {
+                self.unmerged = Some(crate::unmerged::Unmerged { states: vec![state], at: None });
+                self.notices.push(crate::unmerged::UNMERGED_TEXT.to_owned());
+            }
+        }
+    }
+
     /// Clears the undo state (steps, queued and running ordered undos, held undos, skipped-key
     /// notes, landed changes) once per `resets` count, and tells the user once if anything was
     /// cleared. The reset hook and the session's frame both call it: the second finds the count
@@ -987,6 +1003,14 @@ impl LiveApp<Grid> for GridApp<'_> {
     fn set_space(&mut self, space: u32) {
         self.map.space = space;
         self.map.lines_minted = 0;
+    }
+
+    /// craft-live is about to drop local edits the room does not have (a run taken back, a
+    /// replica that needs a resync, is damaged, was replaced or was refused): keep them as the
+    /// unmerged copy, so the host can save them.
+    fn unmerged(&mut self, state: &[u8], edits: usize) {
+        log::warn!("gridcraft-live: {edits} local edits the room does not have are kept as an unmerged copy");
+        self.map.keep_unmerged(state.to_vec());
     }
 
     fn caret(&self, payload: &Value) -> Option<GridCaret> {

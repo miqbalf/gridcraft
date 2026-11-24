@@ -544,6 +544,12 @@ impl Replica for GridDoc {
     }
 
     fn apply(&mut self, update: &[u8]) -> Result<Vec<GridChange>, LiveError> {
+        #[cfg(feature = "test-util")]
+        if test_damage::DAMAGE_NEXT.with(|d| d.replace(false)) {
+            // As yrs panicking inside the apply does: the replica is marked damaged.
+            self.y.set_damaged(true);
+            return Err(LiveError::Decode);
+        }
         let ops_before = self.ops_len();
         self.drain_seen();
         self.y.apply(update)?;
@@ -817,4 +823,20 @@ fn epoch_of(v: &Value) -> (u64, String) {
     let n = v.get(0).and_then(Value::as_str).and_then(Id::parse).map_or(0, |id| id.0);
     let by = v.get(1).and_then(Value::as_str).unwrap_or_default().to_owned();
     (n, by)
+}
+
+/// A test seam for a replica that yrs damaged (a caught panic): no input is known to do it now.
+#[cfg(feature = "test-util")]
+mod test_damage {
+    thread_local! {
+        pub(super) static DAMAGE_NEXT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+}
+
+/// The next remote update a [`GridDoc`] on this thread applies damages it instead, as a yrs
+/// panic caught inside the apply does. For tests.
+#[cfg(feature = "test-util")]
+#[doc(hidden)]
+pub fn damage_next_apply() {
+    test_damage::DAMAGE_NEXT.with(|d| d.set(true));
 }

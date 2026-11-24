@@ -28,11 +28,14 @@ pub mod schema;
 pub mod session;
 pub mod split;
 pub mod styles;
+pub mod unmerged;
 pub(crate) mod undo;
 pub mod volatile;
 
 pub use app::SentCommand;
 pub use axis::{Axis, AxisKind, Insertion};
+#[cfg(feature = "test-util")]
+pub use doc::damage_next_apply;
 pub use doc::{CellContent, Entry, GridChange, GridDoc, GridSeed, GridTxn, Meta};
 pub use gate::NOT_YET_TEXT;
 pub use ids::{Id, cell_key, parse_cell_key};
@@ -42,6 +45,7 @@ pub use op::Op;
 pub use ops::{LINES_MAX, TOO_MANY_TEXT};
 pub use ordered::Tracked;
 pub use session::{BaseFile, GridLive, LiveFail, Peer, Ran, schema, volatile_for, workbook_from_state};
+pub use unmerged::{UNMERGED_TEXT, unmerged_name};
 pub use volatile::LiveVolatile;
 
 /// Rows, for callers that name an axis without importing the formula crate.

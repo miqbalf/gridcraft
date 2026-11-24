@@ -126,7 +126,11 @@ pub struct GridLive<H: Hub> {
     broken_sent: bool,
     /// The room this session joined, to leave it by name.
     room: String,
+    /// The person's local date and time, for the unmerged copy's name (the web host gives one).
+    wall: Option<WallClock>,
 }
+
+type WallClock = Box<dyn FnMut() -> chrono::NaiveDateTime + Send>;
 
 const NOT_ACTIVE: &str = "The live workbook is not open any more";
 /// Told when the replica cannot catch up and the file has to be reopened.
@@ -225,6 +229,8 @@ impl<H: Hub> GridLive<H> {
             landing: Vec::new(),
             replay_busy: false,
             held: Vec::new(),
+            name: base.name.to_owned(),
+            unmerged: None,
         };
         let observed = Arc::new(std::sync::atomic::AtomicU64::new(doc));
         let mut live = GridLive {
@@ -247,6 +253,7 @@ impl<H: Hub> GridLive<H> {
             frames: 0,
             broken_sent: false,
             room: room.to_owned(),
+            wall: None,
         };
         if let Err(e) = live.bind(session) {
             // Do not leave the document open in the host's session.
@@ -330,7 +337,85 @@ impl<H: Hub> GridLive<H> {
         }
         self.drive_ordered(session);
         self.after_pump(session);
+        self.stamp_unmerged();
         peers
+    }
+
+    /// A copy handed over in this pump gets the time it was made, for its name.
+    fn stamp_unmerged(&mut self) {
+        if let Some(u) = self.map.unmerged.as_mut()
+            && u.at.is_none()
+        {
+            u.at = self.wall.as_mut().map(|f| f()).or_else(crate::unmerged::local_now);
+        }
+    }
+
+    /// The `.xlsx` bytes of the base with this replica's local edits that craft-live was about
+    /// to drop (a run taken back, a resync, damage, a replaced or a refused replica, or a
+    /// session ended with edits the room never confirmed), and the copy's name
+    /// ([`crate::unmerged_name`]); `None` otherwise. Taken once; every hand-over since the last
+    /// take is in it. A notice ([`crate::UNMERGED_TEXT`]) says when one starts waiting: hosts
+    /// call this after every pump.
+    pub fn take_unmerged(&mut self) -> Option<(String, Vec<u8>)> {
+        self.stamp_unmerged();
+        let u = self.map.unmerged.take()?;
+        let at = u.at.unwrap_or_default();
+        match crate::unmerged::copy_bytes(&self.map.base, &u.states) {
+            Ok(bytes) => Some((crate::unmerged::unmerged_name(&self.map.name, at), bytes)),
+            Err(e) => {
+                log::warn!("gridcraft-live: the unmerged copy could not be built: {e}");
+                None
+            }
+        }
+    }
+
+    /// Whether a copy of unmerged edits waits for [`GridLive::take_unmerged`].
+    #[must_use]
+    pub fn has_unmerged(&self) -> bool {
+        self.map.unmerged.is_some()
+    }
+
+    /// The person's local date and time, for the unmerged copy's name (a browser host passes
+    /// the page's; native hosts have the system's by default).
+    pub fn set_wall_clock(&mut self, clock: WallClock) {
+        self.wall = Some(clock);
+    }
+
+    /// Local edits the room does not have yet, kept as the unmerged copy before this session
+    /// goes: unless the link is up and live (they are on their way), or it broke or is read-only
+    /// (craft-live handed them over at the break; a viewer has none).
+    fn keep_unconfirmed(&mut self) {
+        let status = self.core.status();
+        let sent = matches!(status, LiveStatus::Live { .. }) && self.core.live().connected();
+        if sent || matches!(status, LiveStatus::Broken(_) | LiveStatus::ReadOnly) || self.core.live().unconfirmed_edits() == 0 {
+            return;
+        }
+        if let Some(state) = self.core.live().doc().map(GridDoc::state) {
+            self.map.keep_unmerged(state);
+        }
+    }
+
+    /// Ends the link for `reason` when the host says the session is over (the page reopened the
+    /// file in another room, or the ticket lost edit access). Queued edits are flushed first, and
+    /// every edit the room has not confirmed is kept as the unmerged copy, whatever the status
+    /// says: the room is being left, so what was sent to it may never be ordered. Only a link
+    /// that is already Broken keeps nothing more: craft-live handed its edits over at that break.
+    /// Hosts take the copy with [`GridLive::take_unmerged`].
+    pub fn end(&mut self, session: &mut Session, reason: &str) {
+        if matches!(self.core.status(), LiveStatus::Broken(_)) {
+            return;
+        }
+        if session.document_index(self.map.doc).is_some() {
+            self.flush(session);
+        }
+        if !matches!(self.core.status(), LiveStatus::Broken(_) | LiveStatus::ReadOnly)
+            && self.core.live().unconfirmed_edits() > 0
+            && let Some(state) = self.core.live().doc().map(GridDoc::state)
+        {
+            self.map.keep_unmerged(state);
+        }
+        self.core.end(reason);
+        self.stamp_unmerged();
     }
 
     fn after_pump(&mut self, session: &Session) {
@@ -871,8 +956,15 @@ impl<H: Hub> GridLive<H> {
     }
 
     /// Ends the session: the engine's observer, undo hook and random source come off, so the
-    /// workbook is an ordinary one again.
-    pub fn stop(self, session: &mut Session) {
+    /// workbook is an ordinary one again. Returns the unmerged copy ([`GridLive::take_unmerged`])
+    /// when local edits never reached the room: the host saves it, as for any other copy.
+    #[must_use = "the unmerged copy holds edits the other editors never got"]
+    pub fn stop(mut self, session: &mut Session) -> Option<(String, Vec<u8>)> {
+        // Queued edits go out, and those the room lacks are kept.
+        if session.document_index(self.map.doc).is_some() {
+            self.flush(session);
+        }
+        self.keep_unconfirmed();
         session.set_observer(None);
         if session.live_undo_doc() == Some(self.map.doc) {
             // `set_live_undo_hook_for` refuses a closed document; this clears the hook either way.
@@ -882,6 +974,7 @@ impl<H: Hub> GridLive<H> {
             // Clearing a source cannot fail for a document that is open.
             let _ = session.set_volatile_source(self.map.doc, None);
         }
+        self.take_unmerged()
     }
 }
 

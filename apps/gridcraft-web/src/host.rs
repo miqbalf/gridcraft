@@ -51,7 +51,15 @@
 //! - `live-state` `{state, reason, savedAt, peers}` goes to the parent on every change of state
 //!   and at most once a second otherwise.
 //! - While live, the workbook is not saved from this window (the document service saves the
-//!   room), so workbook saves are refused and `gridcraft:dirty` stays false. Exports still go out.
+//!   room), so workbook saves are refused. Exports still go out. `gridcraft:dirty` is true only
+//!   while edits wait for the relay's confirmation (unless the link broke: those became the copy
+//!   below) or a copy waits to be stored.
+//! - Local edits craft-live had to drop (taken back, a resync, damage, a replaced or refused
+//!   replica) and edits the room never confirmed when the session ended come back as a copy of the
+//!   workbook, `"{stem} (unmerged YYYY-MM-DD HHMM).xlsx"`. It goes to the page at once as a
+//!   `gridcraft:save` with `saveAs: true` (with an id `copy-N` for a host that answers saves) and
+//!   stays in the window until the page says `saved`; on `save-failed`, the info bar's Save a copy
+//!   downloads it.
 //!
 //! Tickets are never logged.
 //!
@@ -95,6 +103,10 @@ pub struct Bridge {
     receipts: Rc<RefCell<Receipts>>,
     /// What the host answered, for the next frame.
     answers: Rc<RefCell<Vec<Answer>>>,
+    /// What the host answered to copies of unmerged live edits (ids `copy-N`), for the next frame.
+    copy_answers: Rc<RefCell<Vec<Answer>>>,
+    /// The last copy id handed out.
+    copies: Rc<Cell<u64>>,
     /// The name of the file the host sent: a save under another name is a new file.
     opened: Rc<RefCell<Option<String>>>,
     /// The window edits a room: its document service saves the workbook, this window does not.
@@ -127,6 +139,8 @@ impl Bridge {
             saved: Rc::default(),
             receipts: Rc::default(),
             answers: Rc::default(),
+            copy_answers: Rc::default(),
+            copies: Rc::default(),
             opened: Rc::default(),
             live_on: Rc::default(),
             live_asked: Rc::default(),
@@ -143,6 +157,9 @@ impl Bridge {
                 log::error!("couldn't hand {name} to the page: {e}");
             }
         }));
+        // The copy of unmerged live edits is a new file beside the room's, also while live.
+        let bridge = self.clone();
+        services.save_copy = Some(Box::new(move |name: &str, bytes: &[u8]| bridge.post_copy(name, bytes)));
     }
 
     /// `?author=`: the host's name for the user signs new notes and comments.
@@ -181,8 +198,35 @@ impl Bridge {
                 }
             }
         }
-        // A live room is saved by its document service, so nothing here is unsaved.
-        self.host.post_dirty(!self.live_on.get() && app.session.documents().iter().any(|d| d.is_dirty()));
+        // A copy of unmerged live edits goes to the page as soon as there is one, and stays in
+        // the window until the page says it stored it.
+        app.hand_over_copies();
+        for answer in std::mem::take(&mut *self.copy_answers.borrow_mut()) {
+            let (id, answer) = match answer {
+                Answer::Saved { id, name } => (id, Ok(name)),
+                Answer::Failed { id, error } => (id, Err(error)),
+            };
+            app.copy_answered(&id, answer);
+        }
+        // A live room is saved by its document service: only edits the room has not confirmed
+        // and copies of unmerged edits not stored yet are unsaved.
+        let docs_dirty = app.session.documents().iter().any(|d| d.is_dirty());
+        self.host.post_dirty(crate::live_ticket::page_dirty(self.live_on.get(), docs_dirty, app.live_unconfirmed(), app.copies_unsaved()));
+    }
+
+    /// The copy of unmerged live edits, as a new file (`saveAs: true`). A host that answers saves
+    /// gets an id for it, so the window keeps the copy until the page says it stored it (or not).
+    fn post_copy(&self, path: &str, bytes: &[u8]) -> Result<Option<String>, String> {
+        let (name, save_as) = crate::live_ticket::copy_save(path);
+        let id = self.receipts.borrow().confirms().then(|| {
+            self.copies.set(self.copies.get() + 1);
+            format!("copy-{}", self.copies.get())
+        });
+        let mut message = SaveMessage::new(&name, bytes);
+        message.save_as = save_as;
+        message.id = id.as_deref();
+        self.save_target.post(message).map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")))?;
+        Ok(id)
     }
 
     fn post_save(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
@@ -211,6 +255,11 @@ impl Bridge {
         Ok(())
     }
 
+    /// Where the answer to the save `id` goes: a copy of unmerged edits, or a workbook or export.
+    fn answers_for(&self, id: &str) -> &Rc<RefCell<Vec<Answer>>> {
+        if id.starts_with("copy-") { &self.copy_answers } else { &self.answers }
+    }
+
     fn listen(&self, inbox: Inbox, ctx: egui::Context) {
         let bridge = self.clone();
         self.host.listen(move |message| match message {
@@ -221,11 +270,11 @@ impl Bridge {
             }
             Message::Host { saves: true, .. } => bridge.receipts.borrow_mut().set_confirms(),
             Message::Saved { id, name } => {
-                bridge.answers.borrow_mut().push(Answer::Saved { id, name });
+                bridge.answers_for(&id).borrow_mut().push(Answer::Saved { id, name });
                 ctx.request_repaint();
             }
             Message::SaveFailed { id, error } => {
-                bridge.answers.borrow_mut().push(Answer::Failed { id, error });
+                bridge.answers_for(&id).borrow_mut().push(Answer::Failed { id, error });
                 ctx.request_repaint();
             }
             _ => {}
@@ -409,11 +458,8 @@ impl Live {
             match event {
                 LiveEvent::Newer => tell(app, NEWER_TEXT),
                 LiveEvent::Unusable => tell(app, UNUSABLE_TEXT),
-                LiveEvent::End(reason) => {
-                    if let Some(live) = app.live_mut() {
-                        live.live_mut().core_mut().end(reason);
-                    }
-                }
+                // Edits the room never confirmed come back as the copy (G16 review C1).
+                LiveEvent::End(reason) => app.end_live_for(reason),
                 LiveEvent::Failed(e) => {
                     log::error!("live file not fetched: {e}");
                     // A ticket that came during the fetch is older than the next join's.
@@ -449,6 +495,8 @@ impl Live {
                 // The page's clock, for the caret limit and the lock's wait.
                 let start = web_time::Instant::now();
                 live.set_clock(Box::new(move || start.elapsed().as_secs_f64() * 1000.0));
+                // The page's local date and time, for the name of a copy of unmerged edits.
+                live.set_wall_clock(Box::new(local_now));
                 app.attach_live(live)
             });
         match started {
@@ -499,6 +547,16 @@ impl Live {
             self.reported = Some(Reported { state: report, at: now });
         }
     }
+}
+
+/// The page's local date and time (the wasm build has no system clock).
+fn local_now() -> chrono::NaiveDateTime {
+    let d = js_sys::Date::new_0();
+    i32::try_from(d.get_full_year())
+        .ok()
+        .and_then(|year| chrono::NaiveDate::from_ymd_opt(year, d.get_month() + 1, d.get_date()))
+        .and_then(|day| day.and_hms_opt(d.get_hours(), d.get_minutes(), d.get_seconds()))
+        .unwrap_or_default()
 }
 
 /// A fresh ticket for the hub; false when the window is not live yet.

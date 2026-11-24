@@ -5,6 +5,10 @@ type OpenUrl = Box<dyn Fn(&str)>;
 type CopyHtml = Box<dyn FnMut(&str, &str) -> Result<(), String>>;
 type Download = Box<dyn Fn(&str, &[u8])>;
 type PrintPdf = Box<dyn Fn(&[u8])>;
+/// Hands the copy of unmerged live edits (name, bytes) to the host page as a new file. `Ok(Some(id))`
+/// when the page will answer it ([`crate::SheetApp::copy_answered`]), `Ok(None)` when it was
+/// taken with no answer to come, `Err` when it could not be handed over.
+pub type SaveCopy = Box<dyn FnMut(&str, &[u8]) -> Result<Option<String>, String>>;
 
 /// Host services the platform shell provides (file pickers, opening URLs).
 #[derive(Default)]
@@ -48,6 +52,11 @@ pub struct Services {
     /// workbook as the session's active document). [`crate::live`] pumps it every frame and
     /// routes the window's commands through it.
     pub live: Option<crate::live::Live>,
+    /// Web host: hand the copy of unmerged live edits to the page as a new file beside the
+    /// original, also while live (the workbook itself is the room's).
+    pub save_copy: Option<SaveCopy>,
+    /// Web: the browser download for a copy of unmerged edits the page could not store.
+    pub download_copy: Option<Download>,
 }
 
 /// Shared queue of files read asynchronously (browser file picker, drag and drop).

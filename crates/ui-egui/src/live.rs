@@ -22,7 +22,7 @@ use craft_collab::{ClientMsg, Hub, ServerMsg};
 use craft_live::LiveStatus;
 use craft_ui::presence::{Peer as Badge, PresenceBar, PresenceLabels, colours_for};
 use egui::Color32;
-use gridcraft_live::{GridLive, GridPos, NOT_YET_TEXT, Peer, Ran};
+use gridcraft_live::{GridLive, GridPos, NOT_YET_TEXT, Peer, Ran, UNMERGED_TEXT};
 use serde_json::{Value as Json, json};
 
 use crate::i18n::Language;
@@ -71,6 +71,15 @@ pub const EDITOR_GONE_TEXT: &str = "The row or column of the cell you were editi
 pub const EDITOR_GONE_DRAFT_TEXT: &str = "The row or column of the cell you were editing was deleted by another editor. Your entry was: {draft}";
 /// Told when the live workbook is closed.
 pub const LIVE_ENDED_TEXT: &str = "Live editing ended because the workbook was closed.";
+/// The info bar's button for a waiting copy of unmerged edits, and the action it runs.
+pub const SAVE_COPY_LABEL: &str = "Save a copy";
+pub(crate) const SAVE_COPY_ACTION: &str = "live.saveUnmergedCopy";
+/// Told when the host stored a copy of unmerged edits; `{name}` is its name.
+pub const COPY_SAVED_TEXT: &str = "Saved a copy with your unmerged changes as {name}.";
+/// Told when the host could not store the copy; `{error}` says why.
+pub const COPY_FAILED_TEXT: &str = "Couldn't save the copy with your unmerged changes: {error}. Use Save a copy to download it.";
+/// Told while another copy waits after one was saved; `{name}` is its name.
+pub const COPY_WAITING_TEXT: &str = "Another copy with unmerged changes is ready to save: {name}.";
 /// Longest draft the info bar shows; a longer one is also shown whole in a message box.
 const DRAFT_SHOWN: usize = 160;
 
@@ -506,15 +515,154 @@ impl SheetApp {
         let mut told = lu.live.take_notices();
         told.extend(lu.queue.drain(..).map(|(text, _)| text));
         ctx.data_mut(|d| d.remove_temp::<Blocked>(egui::Id::NULL.with(BLOCKED_ID)));
-        lu.live.stop(&mut self.session);
+        // Edits the room never got come back as the copy, to be saved beside the file.
+        if let Some(copy) = lu.live.stop(&mut self.session) {
+            self.pending_unmerged.push(copy);
+        }
         let lang = self.ui.language;
         // What the room told that was not shown yet comes along with the reason it ended.
         let mut text = lang.tr(LIVE_ENDED_TEXT).to_owned();
-        for t in told {
+        for t in told.iter().filter(|t| t.as_str() != UNMERGED_TEXT) {
             text.push(' ');
-            text.push_str(&t);
+            text.push_str(t);
         }
-        self.notice = Some(Notice { text, kind: NoticeKind::Info, action: None });
+        let action = (!self.pending_unmerged.is_empty()).then(|| {
+            text.push(' ');
+            text.push_str(lang.tr(UNMERGED_TEXT));
+            self.save_copy_action()
+        });
+        self.notice = Some(Notice { text, kind: NoticeKind::Info, action });
+    }
+
+    /// The info bar's button that offers the oldest waiting copy of unmerged edits.
+    fn save_copy_action(&self) -> (String, String) {
+        (self.ui.language.tr(SAVE_COPY_LABEL).to_owned(), SAVE_COPY_ACTION.to_owned())
+    }
+
+    /// The host ended the live session for `reason` (the page reopened the file in another room,
+    /// or the ticket lost edit access). Edits the room never confirmed come back as the copy at
+    /// the next frame ([`GridLive::end`]).
+    pub fn end_live_for(&mut self, reason: &str) {
+        if let Some(lu) = self.live.as_mut() {
+            lu.live.end(&mut self.session, reason);
+        }
+    }
+
+    /// Whether the live session has edits the room has not confirmed (sent while reconnecting, or
+    /// within one round trip). A broken link handed them over as the copy, which counts on its
+    /// own ([`SheetApp::copies_unsaved`]); a refused one can recover and makes no copy, so its
+    /// edits still count.
+    #[must_use]
+    pub fn live_unconfirmed(&self) -> bool {
+        self.live.as_ref().is_some_and(|lu| !matches!(lu.live.status(), LiveStatus::Broken(_)) && lu.live.core().live().unconfirmed_edits() > 0)
+    }
+
+    /// Whether a copy of unmerged edits waits to be saved.
+    #[must_use]
+    pub fn copies_waiting(&self) -> bool {
+        !self.pending_unmerged.is_empty()
+    }
+
+    /// Whether some unmerged edits are not stored anywhere yet: a copy waits, or the page has not
+    /// confirmed one it was handed.
+    #[must_use]
+    pub fn copies_unsaved(&self) -> bool {
+        !self.pending_unmerged.is_empty() || !self.copies_sent.is_empty()
+    }
+
+    /// A web host that stores files calls this every frame: each waiting copy goes to the page as
+    /// soon as it is made, until the page could not take one; from then on the info bar's
+    /// Save a copy downloads them.
+    pub fn hand_over_copies(&mut self) {
+        if self.page_refused_copy || self.services.save_copy.is_none() {
+            return;
+        }
+        let waiting = std::mem::take(&mut self.pending_unmerged);
+        for (name, bytes) in waiting {
+            if !self.save_unmerged(&name, &bytes) {
+                self.pending_unmerged.push((name, bytes));
+            }
+        }
+    }
+
+    /// The page answered the copy it was handed as `id`: stored (under `Ok(name)`, when it chose
+    /// another), or not (`Err(error)`: it waits again, to be downloaded). An id that names no copy
+    /// changes nothing; returns whether it named one.
+    pub fn copy_answered(&mut self, id: &str, answer: Result<Option<String>, String>) -> bool {
+        let Some(at) = self.copies_sent.iter().position(|(sent, _)| sent == id) else { return false };
+        let (_, copy) = self.copies_sent.remove(at);
+        let lang = self.ui.language;
+        match answer {
+            Ok(name) => {
+                let name = name.unwrap_or_else(|| copy.0.clone());
+                self.notice = Some(Notice { text: lang.tr_fill(COPY_SAVED_TEXT, &[("name", &name)]), kind: NoticeKind::Info, action: None });
+            }
+            Err(error) => {
+                self.page_refused_copy = true;
+                self.pending_unmerged.push(copy);
+                let text = lang.tr_fill(COPY_FAILED_TEXT, &[("error", &error)]);
+                self.notice = Some(Notice { text, kind: NoticeKind::Warning, action: Some(self.save_copy_action()) });
+            }
+        }
+        true
+    }
+
+    /// Offers the oldest waiting copy (the info bar's Save a copy); it leaves the list only once
+    /// the host took it.
+    pub(crate) fn offer_unmerged(&mut self) {
+        let Some((name, bytes)) = self.pending_unmerged.first().cloned() else { return };
+        if self.save_unmerged(&name, &bytes) {
+            self.pending_unmerged.remove(0);
+        }
+        if let Some(next) = self.pending_unmerged.first().map(|(n, _)| n.clone()) {
+            let lang = self.ui.language;
+            let text = lang.tr_fill(COPY_WAITING_TEXT, &[("name", &next)]);
+            self.notice = Some(Notice { text, kind: NoticeKind::Warning, action: Some(self.save_copy_action()) });
+        }
+    }
+
+    /// Hands a copy of unmerged edits to the person: to the host page, a download when the page
+    /// could not store one (or on a plain web page), or a Save dialog on the desktop. True when it
+    /// was taken.
+    fn save_unmerged(&mut self, name: &str, bytes: &[u8]) -> bool {
+        let lang = self.ui.language;
+        if !self.page_refused_copy
+            && let Some(save_copy) = self.services.save_copy.as_mut()
+        {
+            return match save_copy(name, bytes) {
+                Ok(Some(id)) => {
+                    // Kept until the page says it stored it.
+                    self.copies_sent.push((id, (name.to_owned(), bytes.to_vec())));
+                    true
+                }
+                Ok(None) => {
+                    self.notice = Some(Notice { text: lang.tr_fill(COPY_SAVED_TEXT, &[("name", name)]), kind: NoticeKind::Info, action: None });
+                    true
+                }
+                Err(error) => {
+                    // Not handed over: no more automatic hand-overs; the info bar offers it.
+                    self.page_refused_copy = true;
+                    let text = lang.tr_fill(COPY_FAILED_TEXT, &[("error", &error)]);
+                    self.notice = Some(Notice { text, kind: NoticeKind::Warning, action: Some(self.save_copy_action()) });
+                    false
+                }
+            };
+        }
+        if let Some(download) = self.services.download_copy.as_ref().or(self.services.download.as_ref()) {
+            download(name, bytes);
+            return true;
+        }
+        let Some(path) = self.services.pick_save.as_ref().and_then(|pick| pick(name)) else { return false };
+        match std::fs::write(&path, bytes) {
+            Ok(()) => {
+                self.notice = Some(Notice { text: lang.tr_fill(COPY_SAVED_TEXT, &[("name", &path)]), kind: NoticeKind::Info, action: None });
+                true
+            }
+            Err(e) => {
+                self.message = Some(("GridCraft".into(), e.to_string()));
+                false
+            }
+        }
     }
 
     /// One frame of a live window: anchors the open editor, takes in the room, moves the editor
@@ -551,6 +699,10 @@ impl SheetApp {
         };
         lu.refresh(peers, now, lang, &names);
         let notes = lu.live.take_notices();
+        // Edits craft-live could not keep in the room come back as a copy to save beside the file.
+        if let Some(copy) = lu.live.take_unmerged() {
+            self.pending_unmerged.push(copy);
+        }
         lu.live.send_selection(&self.session);
         ctx.data_mut(|d| d.insert_temp(egui::Id::NULL.with(BLOCKED_ID), lu.blocked.clone()));
         // A name tag that is showing is due to go: wake up for it.
@@ -562,7 +714,8 @@ impl SheetApp {
             .fold(None, |a: Option<f64>, left| Some(a.map_or(left, |a| a.min(left))));
         ctx.request_repaint_after(due.map_or(POLL, |left| POLL.min(Duration::from_secs_f64(left.max(0.01)))));
         for text in notes {
-            lu.push_notice(lang.tr(&text).to_owned(), NoticeKind::Info);
+            let kind = if text == UNMERGED_TEXT { NoticeKind::Warning } else { NoticeKind::Info };
+            lu.push_notice(lang.tr(&text).to_owned(), kind);
         }
         if let Some(draft) = gone {
             self.tell_editor_gone(&mut lu, draft);
@@ -590,8 +743,10 @@ impl SheetApp {
                 && let Some((text, kind)) = lu.queue.pop_front()
             {
                 let full = with_count(lu.queue.len(), &text);
+                // The copy's notice offers it, while one waits (a host page may have taken it).
+                let action = (text == lang.tr(UNMERGED_TEXT) && !self.pending_unmerged.is_empty()).then(|| self.save_copy_action());
                 lu.shown = Some((text, full.clone()));
-                self.notice = Some(Notice { text: full, kind, action: None });
+                self.notice = Some(Notice { text: full, kind, action });
             }
         }
         self.live = Some(lu);

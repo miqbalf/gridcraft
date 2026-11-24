@@ -81,7 +81,7 @@ mod services;
 mod state;
 
 pub use clock::{monotonic_ms, now_ms};
-pub use services::{Chrome, Inbox, Services};
+pub use services::{Chrome, Inbox, SaveCopy, Services};
 pub use state::{NoticeKind, OpenWindow, SaveAnswer, SheetView};
 pub mod desktop_theme;
 
@@ -258,6 +258,14 @@ pub struct SheetApp {
     pub(crate) live: Option<live::LiveUi>,
     /// Why a live session given at construction was refused: shown once the language is known.
     pub(crate) live_refusal: Option<&'static str>,
+    /// Copies of live edits the room could not take (`gridcraft_live::UNMERGED_TEXT`), waiting to
+    /// be saved: (name, `.xlsx` bytes), oldest first.
+    pub(crate) pending_unmerged: Vec<(String, Vec<u8>)>,
+    /// Copies handed to a page that answers each, by the id it will answer: kept until it says
+    /// it stored them.
+    pub(crate) copies_sent: Vec<(String, (String, Vec<u8>))>,
+    /// The page could not store a copy: from then on copies are downloaded when offered.
+    pub(crate) page_refused_copy: bool,
     pub printing: printing::State,
     print_feedback_seen: Option<printing::Feedback>,
     /// Synthetic input from agents, one batch per step (drags need several steps).

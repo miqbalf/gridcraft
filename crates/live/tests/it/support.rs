@@ -23,6 +23,8 @@ pub struct SpyHub {
     pub sizes: Rc<RefCell<Vec<usize>>>,
     /// For every submit, whether it carried a fence.
     pub fenced: Rc<RefCell<Vec<bool>>>,
+    /// For every submit, its `local` counter (what a refusal names).
+    pub locals: Rc<RefCell<Vec<u64>>>,
     /// While set, the relay's error answers (a refused submit) are held back.
     pub hold_errors: Rc<RefCell<bool>>,
     held: Vec<ServerMsg>,
@@ -48,9 +50,10 @@ impl SpyHub {
 
 impl Hub for SpyHub {
     fn send(&mut self, msg: ClientMsg) -> craft_collab::Result<()> {
-        if let ClientMsg::Submit { params, fence, .. } = &msg {
+        if let ClientMsg::Submit { params, fence, local, .. } = &msg {
             self.sizes.borrow_mut().push(serde_json::to_string(params).map_or(0, |s| s.len()));
             self.fenced.borrow_mut().push(fence.is_some());
+            self.locals.borrow_mut().push(*local);
         }
         if matches!(msg, ClientMsg::Lock { .. }) {
             *self.locks.borrow_mut() += 1;
@@ -100,6 +103,7 @@ pub struct Peer {
     pub live: GridLive<SpyHub>,
     pub sizes: Rc<RefCell<Vec<usize>>>,
     pub fenced: Rc<RefCell<Vec<bool>>>,
+    pub locals: Rc<RefCell<Vec<u64>>>,
     pub hold_errors: Rc<RefCell<bool>>,
     pub hold_ops: Rc<RefCell<bool>>,
     pub lose_history: Rc<RefCell<bool>>,
@@ -162,6 +166,7 @@ impl Room {
         let hub = self.relay.connect(&uid, name, access == Access::Edit);
         let sizes = Rc::new(RefCell::new(Vec::new()));
         let fenced = Rc::new(RefCell::new(Vec::new()));
+        let locals = Rc::new(RefCell::new(Vec::new()));
         let hold_errors = Rc::new(RefCell::new(false));
         let hold_ops = Rc::new(RefCell::new(false));
         let locks = Rc::new(RefCell::new(0));
@@ -170,6 +175,7 @@ impl Room {
             inner: hub,
             sizes: sizes.clone(),
             fenced: fenced.clone(),
+            locals: locals.clone(),
             hold_errors: hold_errors.clone(),
             held: Vec::new(),
             hold_ops: hold_ops.clone(),
@@ -183,7 +189,7 @@ impl Room {
             Some(h) => GridLive::start_with(hub, ROOM, &base, access, &uid, &mut session, h),
             None => GridLive::start(hub, ROOM, &base, access, &uid, &mut session),
         };
-        self.peers.push(Peer { session, live: live.unwrap(), sizes, fenced, hold_errors, hold_ops, lose_history, locks, notices: Vec::new() });
+        self.peers.push(Peer { session, live: live.unwrap(), sizes, fenced, locals, hold_errors, hold_ops, lose_history, locks, notices: Vec::new() });
         self.peers.len() - 1
     }
 

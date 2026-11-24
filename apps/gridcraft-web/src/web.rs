@@ -233,6 +233,12 @@ fn services(inbox: Inbox, ctx: egui::Context) -> Services {
                 log::error!("download of {name} failed: {e}");
             }
         })),
+        // A copy of unmerged live edits the page could not store is downloaded.
+        download_copy: Some(Box::new(|name: &str, bytes: &[u8]| {
+            if let Err(e) = download(name, bytes) {
+                log::error!("download of {name} failed: {e}");
+            }
+        })),
         print: Some(Box::new(|bytes: &[u8]| {
             if let Err(e) = print_pdf(bytes) {
                 log::error!("print failed: {e}");
