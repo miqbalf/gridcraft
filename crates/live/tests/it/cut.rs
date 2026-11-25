@@ -190,14 +190,14 @@ fn a_cut_held_across_a_peers_column_delete_is_cancelled() {
 }
 
 #[test]
-fn a_cut_held_across_a_rejoin_that_replaces_the_workbook_is_cancelled() {
-    // The room lost its history: the workbook is rebuilt from the room's state, so the cut's
-    // source cells are no longer the ones it took.
+fn a_cut_held_across_a_checkpoint_that_replaces_the_workbook_is_cancelled() {
+    // The room's checkpoint replaces alice's replica: the workbook is rebuilt from the room's
+    // state, so the cut's stored range may name other cells now.
     cut_cancelled_by("A5:B6", "D10", |room| {
-        *room.peers[0].lose_history.borrow_mut() = true;
-        let hub = room.peers[0].live.core().hub().inner().mem().clone();
-        room.relay.drop_link(&hub);
-        room.relay.restore_link(&hub);
+        room.settle();
+        let state = room.replica_state(1);
+        let p = &mut room.peers[0];
+        p.live.apply_checkpoint(&mut p.session, &state).unwrap();
     });
 }
 
@@ -257,7 +257,8 @@ fn a_book_with_a_print_area_a_name_and_a_chart_still_cuts_and_pastes_live() {
     let names_before = room.wb(0).names.clone();
     let area_before = room.wb(0).sheet(0).and_then(|s| s.print.print_area);
     assert!(area_before.is_some(), "the file keeps its print area");
-    let steps: Vec<(&str, Json)> = vec![("edit.cut", json!({"range": "A7:A8"})), ("selection.set", json!({"range": "E10"})), ("edit.paste", json!({}))];
+    let steps: Vec<(&str, Json)> =
+        vec![("edit.cut", json!({"range": "A7:A8"})), ("selection.set", json!({"range": "E10"})), ("edit.paste", json!({}))];
     run_all(&mut room, 0, &steps);
     room.settle();
     assert!(room.notices_of(0).is_empty(), "the move was not refused: {:?}", room.notices_of(0));

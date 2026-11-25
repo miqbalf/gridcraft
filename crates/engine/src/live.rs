@@ -696,9 +696,10 @@ impl Session {
     /// a local insert or delete. A write into the cut block means the move would wipe what the
     /// other editor wrote there, so cut mode ends. Copy mode keeps its snapshot and stays.
     fn cancel_stale_clipboard(&mut self, doc: u64, lines: bool, changed: &[Key]) {
-        let stale = self.clipboard.as_ref().is_some_and(|c| {
-            c.doc_uid == doc && (lines || (c.cut && changed.iter().any(|(sheet, at)| *sheet == c.sheet && c.range.contains(*at))))
-        });
+        let stale = self
+            .clipboard
+            .as_ref()
+            .is_some_and(|c| c.doc_uid == doc && (lines || (c.cut && changed.iter().any(|(sheet, at)| *sheet == c.sheet && c.range.contains(*at)))));
         if stale {
             self.clipboard = None;
         }

@@ -147,10 +147,17 @@ const NOT_ACTIVE: &str = "The live workbook is not open any more";
 /// Told when the replica cannot catch up and the file has to be reopened.
 pub const RESYNC_TEXT: &str = "This window fell out of step with the other editors. Reopen the file to keep editing.";
 /// Told when the engine's undo hook failed.
-/// A cut was cancelled because another editor changed what it took: a row or column was
-/// inserted or deleted, the window was rebuilt from the room, or someone wrote into the block.
-/// Pasting it would move the wrong cells or wipe their entry.
-pub const CUT_CANCELLED_TEXT: &str = "Your cut was cancelled because another editor changed those cells or the rows and columns around them. Cut again to move them.";
+/// A cut was cancelled because what it took changed: another editor inserted or deleted a row
+/// or column, or wrote into the block, or the window was rebuilt from the room. Pasting it would
+/// move the wrong cells or wipe their entry.
+pub const CUT_CANCELLED_TEXT: &str = "Your cut was cancelled because the cells it took were changed or moved. Cut again to move them.";
+/// Says [`CUT_CANCELLED_TEXT`] once, however many ways the cut was cancelled in one frame.
+pub(crate) fn tell_cut_cancelled(notices: &mut Vec<String>) {
+    if !notices.iter().any(|n| n == CUT_CANCELLED_TEXT) {
+        notices.push(CUT_CANCELLED_TEXT.to_owned());
+    }
+}
+
 pub const UNDO_FAILED_TEXT: &str = "Undo stopped working in this window. Reopen the file to get it back.";
 
 impl<H: Hub> GridLive<H> {
@@ -302,7 +309,7 @@ impl<H: Hub> GridLive<H> {
         // The other editors' changes are in: a cut they made stale was cancelled. Checked before
         // this window's own ordered run, whose insert or delete ends cut mode as any local one does.
         if cut && !session.clipboard.as_ref().is_some_and(|c| c.cut && c.doc_uid == self.map.doc) {
-            self.map.notices.push(CUT_CANCELLED_TEXT.to_owned());
+            tell_cut_cancelled(&mut self.map.notices);
         }
         self.drive_ordered(session);
         self.after_pump(session);

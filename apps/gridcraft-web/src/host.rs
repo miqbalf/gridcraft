@@ -501,8 +501,7 @@ impl Live {
                 let hub = DynHub::renewing(hub, move |r: &craft_collab::Reopen<'_>| {
                     craft_collab::web::WebHub::connect_as(&url, r.ticket, r.applied, Some(&schema()))
                 });
-                gridcraft_live::GridLive::start(hub, &message.room, &base, access, &uid, &mut app.session)
-                    .map_err(|e| fail_text(&e))
+                gridcraft_live::GridLive::start(hub, &message.room, &base, access, &uid, &mut app.session).map_err(|e| fail_text(&e))
             })
             .and_then(|mut live| {
                 // The page's clock, for the caret limit and the lock's wait.

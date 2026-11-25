@@ -992,6 +992,9 @@ impl LiveApp<Grid> for GridApp<'_> {
     fn resync(&mut self, replica: &GridDoc) -> Result<(), String> {
         self.map.pending.clear();
         // The workbook is rebuilt from the room: a copied or cut range may name other cells now.
+        if self.session.clipboard.as_ref().is_some_and(|c| c.cut && c.doc_uid == self.map.doc) {
+            crate::session::tell_cut_cancelled(&mut self.map.notices);
+        }
         self.session.cancel_copy_mode_for(self.map.doc);
         let held = self.map.layout.clone();
         self.set_layout(Layout::from_doc(replica, &self.map.base));
