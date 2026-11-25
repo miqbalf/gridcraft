@@ -479,13 +479,17 @@ fn a_rolled_back_group_that_began_earlier_is_marked_structure() {
 }
 
 #[test]
-fn cut_and_paste_is_a_move_edit() {
+fn cut_and_paste_is_reported_as_the_cells_it_changed() {
+    // A move shifts no line, so it is not a structural edit for the observer (GX1): the target,
+    // the cleared source and every formula whose references followed are plain cell changes.
     let (mut s, tap) = sample("budget");
     s.execute("edit.cut", json!({"range": "C5:C6"})).unwrap();
     let r = one(&mut s, &tap, "edit.paste", json!({"at": "M40"}));
-    assert!(r.edits.iter().any(|(_, e)| matches!(e, Edit::Move { .. })), "{:?}", r.edits);
-    assert!(r.unshared.contains(&Unshared::Structure(0)));
-    assert!(r.cells.contains(&(0, at("M40"))), "the moved cells are still reported");
+    assert!(r.edits.is_empty(), "no structural edit: {:?}", r.edits);
+    assert!(!r.unshared.contains(&Unshared::Structure(0)), "{:?}", r.unshared);
+    for c in ["M40", "M41", "C5", "C6"] {
+        assert!(r.cells.contains(&(0, at(c))), "{c} is reported: {:?}", r.cells);
+    }
 }
 
 #[test]

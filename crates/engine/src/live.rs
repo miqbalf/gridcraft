@@ -195,7 +195,14 @@ fn replay_lines(before: &Workbook, edits: &[(usize, Edit)]) -> Option<Workbook> 
 }
 
 fn diff(doc: u64, command: &str, params: &Json, before: Arc<Workbook>, after: Arc<Workbook>, seen: Observed) -> EditReport {
-    let Observed { edits: named, restored, .. } = seen;
+    let Observed { edits: mut named, restored, .. } = seen;
+    // A cut pasted (a move of cells, to the same sheet or another) shifts no row or column: every
+    // cell it changed (the block written at the target, the source cleared, the formulas whose
+    // references followed it) is where the comparison by position finds it. With no line edit in
+    // the command, the moves are left out and the cells are reported like any other writes.
+    if !restored && named.iter().all(|(_, e)| matches!(e, Edit::Move { .. } | Edit::MoveToSheet { .. })) {
+        named.clear();
+    }
     let mut r = EditReport {
         doc,
         command: command.to_string(),
