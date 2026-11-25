@@ -533,6 +533,8 @@ pub struct RemoteCtx<'a> {
     changed: Vec<Key>,
     /// Lines or sizes changed: every formula is recalculated.
     recalc_all: bool,
+    /// Lines were inserted or deleted: a copied or cut block no longer sits where it was taken.
+    lines: bool,
     _session: std::marker::PhantomData<&'a mut Session>,
 }
 
@@ -620,6 +622,7 @@ impl RemoteCtx<'_> {
         crate::cmd::sheet::insert_lines_in(&mut wb, sheet, axis, at, count)?;
         self.wb = wb;
         self.recalc_all = true;
+        self.lines = true;
         Ok(())
     }
 
@@ -655,6 +658,7 @@ impl RemoteCtx<'_> {
         crate::cmd::sheet::delete_lines_in(&mut wb, sheet, axis, &areas)?;
         self.wb = wb;
         self.recalc_all = true;
+        self.lines = true;
         Ok(())
     }
 }
@@ -672,9 +676,9 @@ impl Session {
             return Err(EngineError::RemoteBusy);
         }
         let Some(d) = self.docs.iter_mut().find(|d| d.uid == doc) else { return Err(EngineError::NoDocument) };
-        let mut cx = RemoteCtx { wb: (*d.wb).clone(), changed: Vec::new(), recalc_all: false, _session: std::marker::PhantomData };
+        let mut cx = RemoteCtx { wb: (*d.wb).clone(), changed: Vec::new(), recalc_all: false, lines: false, _session: std::marker::PhantomData };
         let r = f(&mut cx)?;
-        let RemoteCtx { mut wb, changed, recalc_all, .. } = cx;
+        let RemoteCtx { mut wb, changed, recalc_all, lines, .. } = cx;
         if recalc_all {
             d.calc.recalc_all(&mut wb);
         } else if !changed.is_empty() {
@@ -683,7 +687,29 @@ impl Session {
         crate::cmd::controls::sync_linked_values(&mut wb);
         d.wb = Arc::new(wb);
         d.revision += 1;
+        self.cancel_stale_clipboard(doc, lines, &changed);
         Ok(r)
+    }
+
+    /// A remote change can leave the clipboard pointing at the wrong cells. Lines inserted or
+    /// deleted move the copied block away from its stored range, so copy and cut mode end, as for
+    /// a local insert or delete. A write into the cut block means the move would wipe what the
+    /// other editor wrote there, so cut mode ends. Copy mode keeps its snapshot and stays.
+    fn cancel_stale_clipboard(&mut self, doc: u64, lines: bool, changed: &[Key]) {
+        let stale = self.clipboard.as_ref().is_some_and(|c| {
+            c.doc_uid == doc && (lines || (c.cut && changed.iter().any(|(sheet, at)| *sheet == c.sheet && c.range.contains(*at))))
+        });
+        if stale {
+            self.clipboard = None;
+        }
+    }
+
+    /// Ends copy and cut mode on document `doc` (its workbook was replaced from elsewhere, so the
+    /// stored range may name other cells now). Other documents' clipboards stay.
+    pub fn cancel_copy_mode_for(&mut self, doc: u64) {
+        if self.clipboard.as_ref().is_some_and(|c| c.doc_uid == doc) {
+            self.clipboard = None;
+        }
     }
 
     /// Puts `wb` in place of the document's workbook without an undo step or an observer call, and

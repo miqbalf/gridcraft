@@ -46,7 +46,7 @@ pub use layout::{Hosted, Layout, SheetLayout};
 pub use op::Op;
 pub use ops::{LINES_MAX, TOO_MANY_TEXT};
 pub use ordered::Tracked;
-pub use session::{BaseFile, GridLive, LiveFail, Peer, Ran, schema, volatile_for, workbook_from_state};
+pub use session::{BaseFile, CUT_CANCELLED_TEXT, GridLive, LiveFail, Peer, Ran, schema, volatile_for, workbook_from_state};
 pub use unmerged::{RECOVERY_TEXT, TAKE_BACK_TEXTS, UNMERGED_TEXT, UnmergedCopy, unmerged_name};
 pub use volatile::LiveVolatile;
 pub use worker::{GridWorkerLive, SERVICE_RESYNC_TEXT};

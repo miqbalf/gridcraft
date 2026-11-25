@@ -147,6 +147,10 @@ const NOT_ACTIVE: &str = "The live workbook is not open any more";
 /// Told when the replica cannot catch up and the file has to be reopened.
 pub const RESYNC_TEXT: &str = "This window fell out of step with the other editors. Reopen the file to keep editing.";
 /// Told when the engine's undo hook failed.
+/// A cut was cancelled because another editor changed what it took: a row or column was
+/// inserted or deleted, the window was rebuilt from the room, or someone wrote into the block.
+/// Pasting it would move the wrong cells or wipe their entry.
+pub const CUT_CANCELLED_TEXT: &str = "Your cut was cancelled because another editor changed those cells or the rows and columns around them. Cut again to move them.";
 pub const UNDO_FAILED_TEXT: &str = "Undo stopped working in this window. Reopen the file to get it back.";
 
 impl<H: Hub> GridLive<H> {
@@ -277,6 +281,7 @@ impl<H: Hub> GridLive<H> {
             // Everything this window wrote has been ordered: no delete can have missed it.
             self.map.recent.clear();
         }
+        let cut = session.clipboard.as_ref().is_some_and(|c| c.cut && c.doc_uid == self.map.doc);
         let peers = {
             let mut app = GridApp { session, map: &mut self.map };
             self.core.pump(&mut app)
@@ -293,6 +298,11 @@ impl<H: Hub> GridLive<H> {
         }
         for p in &peers {
             self.names.insert(uid_of(&p.id).to_owned(), p.display.clone());
+        }
+        // The other editors' changes are in: a cut they made stale was cancelled. Checked before
+        // this window's own ordered run, whose insert or delete ends cut mode as any local one does.
+        if cut && !session.clipboard.as_ref().is_some_and(|c| c.cut && c.doc_uid == self.map.doc) {
+            self.map.notices.push(CUT_CANCELLED_TEXT.to_owned());
         }
         self.drive_ordered(session);
         self.after_pump(session);
