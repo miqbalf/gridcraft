@@ -247,7 +247,8 @@ pub struct LiveUi {
     bar: PresenceBar,
     /// Where each peer's active cell was last seen, and when it moved there (egui time).
     moved: HashMap<String, (GridPos, f64)>,
-    /// Peers known to be read-only (the roster does not say).
+    /// Peers the host says are read-only. The roster says so too now (craft-live `Peer.access`);
+    /// either is enough.
     viewers: HashSet<String>,
     /// Ribbon names of the commands the gate refuses.
     blocked: Blocked,
@@ -295,8 +296,8 @@ impl LiveUi {
         &self.peers
     }
 
-    /// Marks which peers (by peer id) only read. The roster carries no access, so the host says,
-    /// when it knows; those peers are labelled "viewing".
+    /// Marks which peers (by peer id) only read, when the host knows; those peers are labelled
+    /// "viewing", as are those the relay's roster says only view.
     pub fn set_viewers(&mut self, ids: impl IntoIterator<Item = String>) {
         self.viewers = ids.into_iter().collect();
     }
@@ -304,7 +305,7 @@ impl LiveUi {
     /// Whether the peer with this id is known to be read-only.
     #[must_use]
     pub fn is_viewer(&self, id: &str) -> bool {
-        self.viewers.contains(id)
+        self.viewers.contains(id) || self.peers.iter().any(|p| p.id == id && p.access == craft_live::Access::Read)
     }
 
     /// The colour of each peer, in [`LiveUi::peers`] order: the one its badge has, so the badge
@@ -338,7 +339,7 @@ impl LiveUi {
         self.peers
             .iter()
             .map(|p| {
-                let viewing = self.viewers.contains(&p.id);
+                let viewing = self.is_viewer(&p.id);
                 let display = if viewing { lang.tr_fill("{name} (viewing)", &[("name", &p.display)]) } else { p.display.clone() };
                 let mut badge = Badge::new(p.id.clone(), display);
                 if let Some(c) = &p.caret {

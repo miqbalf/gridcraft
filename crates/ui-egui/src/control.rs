@@ -20,7 +20,7 @@
 use std::sync::mpsc::Sender;
 
 use craft_ui::capture::CaptureSlot;
-use gridcraft_engine::core::CellRef;
+use gridcraft_engine::core::{CellRef, RangeRef};
 use serde_json::{Value as Json, json};
 
 use crate::SheetApp;
@@ -159,6 +159,41 @@ pub fn inspect(app: &SheetApp, ctx: &egui::Context) -> Json {
         "windows": app.session.window_list(),
         "activeWindow": app.session.active_window(),
         "perf": {"frameMs": app.perf.frame_ms, "gridMs": app.perf.grid_ms, "fps": app.perf.fps},
+        "notice": app.notice.as_ref().map(|n| json!({"text": n.text, "kind": format!("{:?}", n.kind), "action": n.action.as_ref().map(|a| &a.0)})),
+        "live": live_json(app),
+    })
+}
+
+/// The live session for `ui.inspect`, or null when the window is not live: the link's status,
+/// the other editors (name, active cell, selection, read-only) and how many unmerged copies wait.
+fn live_json(app: &SheetApp) -> Json {
+    let Some(lu) = app.live() else { return Json::Null };
+    let lang = app.ui.language;
+    let (status, problem) = lu.status_text(lang);
+    let peers: Vec<Json> = lu
+        .peers()
+        .iter()
+        .map(|p| {
+            let caret = p.caret.as_ref();
+            json!({
+                "id": p.id,
+                "display": p.display,
+                "viewing": lu.is_viewer(&p.id),
+                "sheet": caret.map(|c| c.sheet),
+                "cell": caret.map(|c| c.active.a1()),
+                "ranges": caret.map(|c| c.ranges.iter().map(RangeRef::a1).collect::<Vec<_>>()),
+                "editing": caret.is_some_and(|c| c.editing),
+            })
+        })
+        .collect();
+    json!({
+        "status": status,
+        "problem": problem,
+        "line": lu.status_line(lang),
+        "readOnly": app.live_read_only().is_some(),
+        "peers": peers,
+        "copiesWaiting": app.pending_unmerged.len(),
+        "unconfirmed": app.live_unconfirmed(),
     })
 }
 

@@ -285,6 +285,48 @@ fn viewer_is_labelled_viewing() {
     h.get_by_label("Viewing only");
 }
 
+#[test]
+fn a_peer_the_relay_says_only_views_is_labelled_viewing() {
+    // Carol joins read-only. The relay's roster now says so (craft-live `Peer.access`), so Alice's
+    // presence bar labels her "viewing" with no hint from the host.
+    let (mut rig, app) = rig(Access::Edit);
+    let (mut carol_session, mut carol) = join(&rig.relay, &rig.bytes, "carol", "Carol", Access::Read);
+    let mut h = harness(app);
+    for _ in 0..4 {
+        let _ = carol.pump(&mut carol_session);
+        settle(&mut rig, &mut h);
+    }
+    let live = h.state().live().expect("live");
+    let carol_id = live.peers().iter().find(|p| p.display == "Carol").map(|p| p.id.clone()).expect("Carol is in the roster");
+    assert!(live.is_viewer(&carol_id), "the roster's access marks Carol as viewing");
+    h.get_by_label("Carol (viewing)");
+    // Bob edits: no label.
+    h.get_by_label("Bob");
+}
+
+#[test]
+fn ui_inspect_reports_the_live_session() {
+    // A browser test reads presence, the info bar and waiting copies through `ui.inspect`.
+    let (mut rig, app) = rig(Access::Edit);
+    let mut h = harness(app);
+    rig.bob.select("D9:E10", "D9");
+    settle(&mut rig, &mut h);
+    let ctx = h.ctx.clone();
+    let r = gridcraft_ui_egui::control::inspect(h.state(), &ctx);
+    let live = &r["live"];
+    assert!(live["status"].as_str().is_some_and(|s| s.starts_with("Live")), "status: {live}");
+    assert_eq!(live["readOnly"], json!(false));
+    assert_eq!(live["peers"][0]["display"], json!("Bob"), "{live}");
+    assert_eq!(live["peers"][0]["cell"], json!("D9"), "{live}");
+    assert_eq!(live["peers"][0]["ranges"], json!(["D9:E10"]), "{live}");
+    assert_eq!(live["peers"][0]["viewing"], json!(false));
+    assert_eq!(live["copiesWaiting"], json!(0));
+    assert!(r.get("notice").is_some(), "the info bar is reported (null when empty)");
+    // A window that is not live says so.
+    let plain = gridcraft_ui_egui::control::inspect(&crate::common::prepare(SheetApp::new(Session::new(), Services::default())), &ctx);
+    assert!(plain["live"].is_null());
+}
+
 fn rig_viewer() -> (Rig, SheetApp) {
     rig(Access::Read)
 }

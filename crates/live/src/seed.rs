@@ -31,7 +31,15 @@ pub(crate) fn open_base(base: &BaseFile) -> Result<(Workbook, GridSeed), LiveFai
 /// Adds `wb` to `session` as a document and builds the mapping over a replica seeded with
 /// `seed`: the random source and layout, in step. `name` is the base file's name (unmerged copies
 /// are named after it).
-pub(crate) fn seat(session: &mut Session, wb: Workbook, seed: &GridSeed, title: String, uid: &str, hash: StyleHash, name: &str) -> Result<Mapping, LiveFail> {
+pub(crate) fn seat(
+    session: &mut Session,
+    wb: Workbook,
+    seed: &GridSeed,
+    title: String,
+    uid: &str,
+    hash: StyleHash,
+    name: &str,
+) -> Result<Mapping, LiveFail> {
     session.add_document(DocState::new(wb, None, title, Trust::FromFile));
     let (doc, wb) = session.active().map(|d| (d.uid, d.wb.clone())).ok_or(LiveFail::Open("no workbook".into()))?;
     let replica = GridDoc::seeded(seed).map_err(LiveFail::Live)?;
