@@ -64,8 +64,7 @@ impl DynHub {
     /// `hub`, switched to a new link opened by `open` whenever the host hands it a renewed
     /// ticket ([`Hub::set_token`]) while connected, so a ticket renewal drops nothing.
     pub fn renewing<H: Hub + 'static>(hub: H, open: impl FnMut(&Reopen<'_>) -> craft_collab::Result<H> + 'static) -> DynHub {
-        let _ = open;
-        DynHub(Box::new(hub))
+        DynHub(Box::new(craft_collab::Handover::new(hub, open)))
     }
 }
 

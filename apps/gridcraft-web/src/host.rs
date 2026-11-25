@@ -45,7 +45,9 @@
 //!   If the fetch, the connect or the start fails, the window says why and the next `live` tries
 //!   again ([`crate::live_ticket::Joining`]).
 //! - A later `live` for the same room is the page's ticket refresh: it goes to the hub
-//!   (`Hub::set_token`). One for another room, or one that gives less access, ends the session.
+//!   (`Hub::set_token`), a `craft_collab::Handover` that opens a link with the new ticket and
+//!   switches to it once joined, so the old ticket's expiry drops nothing. One for another room,
+//!   or one that gives less access, ends the session.
 //!   A message while the file is fetched waits for the join.
 //! - Another `proto` shows "This file is being edited with a newer GridCraft. Update to join."
 //! - `live-state` `{state, reason, savedAt, peers}` goes to the parent on every change of state
@@ -493,7 +495,13 @@ impl Live {
             })
             .and_then(|hub| {
                 let base = BaseFile { bytes, name: &message.file_name, expected_sha256: Some(hash) };
-                gridcraft_live::GridLive::start(DynHub(Box::new(hub)), &message.room, &base, access, &uid, &mut app.session)
+                // A renewed ticket opens a second link to the same relay, with the same schema,
+                // and switches to it once it joined: the old ticket's expiry drops nothing.
+                let url = message.relay_url.clone();
+                let hub = DynHub::renewing(hub, move |r: &craft_collab::Reopen<'_>| {
+                    craft_collab::web::WebHub::connect_as(&url, r.ticket, r.applied, Some(&schema()))
+                });
+                gridcraft_live::GridLive::start(hub, &message.room, &base, access, &uid, &mut app.session)
                     .map_err(|e| fail_text(&e))
             })
             .and_then(|mut live| {
