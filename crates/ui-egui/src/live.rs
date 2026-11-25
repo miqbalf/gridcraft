@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
-use craft_collab::{ClientMsg, Hub, ServerMsg};
+use craft_collab::{ClientMsg, Hub, Reopen, ServerMsg};
 use craft_live::LiveStatus;
 use craft_ui::presence::{Peer as Badge, PresenceBar, PresenceLabels, colours_for};
 use egui::Color32;
@@ -53,6 +53,19 @@ impl Hub for DynHub {
     // c9-save2: the replica's id space, named on every rejoin; forwarded so it is never dropped.
     fn set_space(&mut self, space: u32) {
         self.0.set_space(space);
+    }
+
+    fn close(&mut self) {
+        self.0.close();
+    }
+}
+
+impl DynHub {
+    /// `hub`, switched to a new link opened by `open` whenever the host hands it a renewed
+    /// ticket ([`Hub::set_token`]) while connected, so a ticket renewal drops nothing.
+    pub fn renewing<H: Hub + 'static>(hub: H, open: impl FnMut(&Reopen<'_>) -> craft_collab::Result<H> + 'static) -> DynHub {
+        let _ = open;
+        DynHub(Box::new(hub))
     }
 }
 

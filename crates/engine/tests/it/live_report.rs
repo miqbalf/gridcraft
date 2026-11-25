@@ -483,13 +483,38 @@ fn cut_and_paste_is_reported_as_the_cells_it_changed() {
     // A move shifts no line, so it is not a structural edit for the observer (GX1): the target,
     // the cleared source and every formula whose references followed are plain cell changes.
     let (mut s, tap) = sample("budget");
+    // A formula that reads the block: its references follow the move.
+    s.execute("cell.set", json!({"cell": "Z1", "input": "=C5+C6"})).unwrap();
     s.execute("edit.cut", json!({"range": "C5:C6"})).unwrap();
     let r = one(&mut s, &tap, "edit.paste", json!({"at": "M40"}));
     assert!(r.edits.is_empty(), "no structural edit: {:?}", r.edits);
-    assert!(!r.unshared.contains(&Unshared::Structure(0)), "{:?}", r.unshared);
-    for c in ["M40", "M41", "C5", "C6"] {
+    // Nothing unshared at all: any part the live layer cannot share refuses the whole paste.
+    assert!(r.unshared.is_empty(), "{:?}", r.unshared);
+    for c in ["M40", "M41", "C5", "C6", "Z1"] {
         assert!(r.cells.contains(&(0, at(c))), "{c} is reported: {:?}", r.cells);
     }
+    let z1 = s.active().unwrap().wb.sheet(0).and_then(|sh| sh.cell(at("Z1"))).and_then(|c| c.formula.clone()).map(|f| f.text.clone());
+    assert_eq!(z1.as_deref(), Some("M40+M41"), "the follower was rewritten");
+}
+
+#[test]
+fn a_cut_inserted_with_its_lines_is_still_structure() {
+    // Insert Cut Cells inserts rows and then moves the block: an insert among the moves keeps
+    // the whole command structural, so the live layer refuses it rather than diffing by position.
+    let (mut s, tap) = sample("budget");
+    s.execute("edit.cut", json!({"range": "5:6"})).unwrap();
+    let r = one(&mut s, &tap, "home.insertCopiedCells", json!({"at": "A12"}));
+    assert!(!r.edits.is_empty(), "the moves are kept: {:?}", r.edits);
+    assert!(r.unshared.contains(&Unshared::Structure(0)), "{:?}", r.unshared);
+}
+
+#[test]
+fn moving_columns_is_still_structure() {
+    // A line reorder must never be shared as cell rewrites: peers' line ids follow the lines.
+    let (mut s, tap) = sample("budget");
+    let r = one(&mut s, &tap, "sheet.moveColumns", json!({"cols": "B:C", "before": 6}));
+    assert!(r.edits.iter().any(|(_, e)| !matches!(e, Edit::Move { .. } | Edit::MoveToSheet { .. })), "{:?}", r.edits);
+    assert!(r.unshared.contains(&Unshared::Structure(0)), "{:?}", r.unshared);
 }
 
 #[test]

@@ -979,3 +979,60 @@ fn a_cancelled_save_dialog_keeps_the_copy() {
     assert!(!text.contains("Saved a copy") && !text.contains("Downloaded"), "{text:?}");
     assert!(h.state().notice.as_ref().is_some_and(|n| n.action.is_some()), "still offered");
 }
+
+// --- a renewed ticket -------------------------------------------------------------------------
+
+#[test]
+fn a_renewed_ticket_switches_links_and_no_typing_is_lost() {
+    // The host hands the hub a renewed ticket before the old one expires; the relay drops the
+    // old link at its expiry. The window switches to a link opened with the new ticket first,
+    // so typing before, during and after the switch reaches Bob and the window stays live.
+    let relay = MemRelay::new();
+    let bytes = base_bytes();
+    let (session, live) = join(&relay, &bytes, "bob", "Bob", Access::Edit);
+    let mut bob = Bob { session, live };
+    let first = relay.connect("alice", "Alice", true);
+    let old = first.clone();
+    let opened: Arc<std::sync::Mutex<Vec<(craft_live::testing::MemHub, String)>>> = Arc::default();
+    let (to, log) = (relay.clone(), Arc::clone(&opened));
+    let hub = DynHub::renewing(first, move |r: &craft_collab::Reopen<'_>| {
+        let hub = to.connect("alice", "Alice", true);
+        log.lock().expect("lock").push((hub.clone(), r.ticket.to_owned()));
+        Ok(hub)
+    });
+    let mut session = Session::new();
+    let base = BaseFile { bytes: &bytes, name: FILE, expected_sha256: None };
+    let live = GridLive::start(hub, ROOM, &base, Access::Edit, "alice", &mut session).expect("starts");
+    let app = crate::common::prepare(SheetApp::new(session, Services { live: Some(live), ..Services::default() }));
+    bob.live.set_clock(Box::new({
+        let mut t = 0.0;
+        move || {
+            t += 1000.0;
+            t
+        }
+    }));
+    let mut rig = Rig { left: Arc::default(), alice: old.clone(), relay: relay.clone(), bytes: bytes.clone(), bob };
+    let mut h = harness(app);
+    settle(&mut rig, &mut h);
+    h.state_mut().run("cell.set", json!({"cell": "D1", "input": "before"})).expect("types");
+    settle(&mut rig, &mut h);
+    // The renewal, as the web host's `refresh_ticket` hands it over, and typing right after it.
+    h.state_mut().live_mut().expect("live").live_mut().core_mut().hub_mut().set_token("renewed".to_owned());
+    h.state_mut().run("cell.set", json!({"cell": "D2", "input": "during"})).expect("types");
+    settle(&mut rig, &mut h);
+    // The old ticket expires: the relay drops its link.
+    relay.drop_link(&old);
+    h.state_mut().run("cell.set", json!({"cell": "D3", "input": "after"})).expect("types");
+    settle(&mut rig, &mut h);
+    for (cell, want) in [("D1", "before"), ("D2", "during"), ("D3", "after")] {
+        assert_eq!(bob_value(&rig, cell), Value::Text(want.into()), "Bob has {cell}");
+        assert_eq!(value(h.state(), 0, cell), Value::Text(want.into()), "Alice has {cell}");
+    }
+    let opened = opened.lock().expect("lock");
+    assert_eq!(opened.len(), 1, "one new link, for the one renewal");
+    assert_eq!(opened[0].1, "renewed", "opened with the renewed ticket");
+    assert!(opened[0].0.connected(), "the new link is the one in use");
+    let status = h.state().live().expect("live").live().status().clone();
+    assert!(matches!(status, craft_live::LiveStatus::Live { .. }), "the window stayed live: {status:?}");
+    assert!(!notice_text(h.state()).contains("Reconnecting"), "no reconnect was shown: {}", notice_text(h.state()));
+}
