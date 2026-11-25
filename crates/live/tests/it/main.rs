@@ -1,6 +1,8 @@
 //! The one integration test binary of `gridcraft-live`; modules sit beside this file.
 
 mod axis;
+#[cfg(feature = "test-util")]
+mod cut;
 mod doc;
 #[cfg(any(feature = "test-util", feature = "native-hub"))]
 mod fingerprint;
