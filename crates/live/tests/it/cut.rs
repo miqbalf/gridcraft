@@ -23,7 +23,10 @@ fn same_everywhere(room: &Room, what: &str) {
 }
 
 fn cell_on(room: &Room, i: usize, sheet: usize, cell: &str) -> (Value, Option<String>) {
-    room.wb(i).sheet(sheet).and_then(|s| s.cell(a1(cell))).map_or((Value::Empty, None), |c| (c.value.clone(), c.formula.as_ref().map(|f| f.text.clone())))
+    room.wb(i)
+        .sheet(sheet)
+        .and_then(|s| s.cell(a1(cell)))
+        .map_or((Value::Empty, None), |c| (c.value.clone(), c.formula.as_ref().map(|f| f.text.clone())))
 }
 
 /// The same commands on a desktop session (no live editing): what the move must give.
