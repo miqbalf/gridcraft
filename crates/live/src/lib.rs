@@ -25,12 +25,14 @@ pub mod presence;
 mod remote;
 pub mod reprint;
 pub mod schema;
+mod seed;
 pub mod session;
 pub mod split;
 pub mod styles;
 pub(crate) mod undo;
 pub mod unmerged;
 pub mod volatile;
+mod worker;
 
 pub use app::SentCommand;
 pub use axis::{Axis, AxisKind, Insertion};
@@ -47,6 +49,7 @@ pub use ordered::Tracked;
 pub use session::{BaseFile, GridLive, LiveFail, Peer, Ran, schema, volatile_for, workbook_from_state};
 pub use unmerged::{RECOVERY_TEXT, TAKE_BACK_TEXTS, UNMERGED_TEXT, UnmergedCopy, unmerged_name};
 pub use volatile::LiveVolatile;
+pub use worker::{GridWorkerLive, SERVICE_RESYNC_TEXT};
 
 /// Rows, for callers that name an axis without importing the formula crate.
 #[must_use]

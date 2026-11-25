@@ -2,7 +2,7 @@
 //! between the engine and the room's document, and the command gate; the host owns the engine
 //! [`Session`] and passes it to each call.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
@@ -11,19 +11,16 @@ use craft_live::ordered::{Action, Ordered, Polled};
 use craft_live::{Access, LiveApp, LiveEditing, LiveStatus, uid_of};
 use gridcraft_calc::VolatileSource;
 use gridcraft_core::CellRef;
-use gridcraft_engine::{DocState, EditObserver, EditReport, Session, Trust};
+use gridcraft_engine::{EditObserver, EditReport, Session};
 use gridcraft_model::Workbook;
 use serde_json::Value as Json;
-use sha2::{Digest, Sha256};
 
 use crate::app::{GridApp, Mapping};
 use crate::axis::AxisKind;
-use crate::doc::{GridDoc, GridSeed};
+use crate::doc::GridDoc;
 use crate::gate::{Class, NOT_YET_TEXT, class};
 use crate::ids::Id;
 use crate::kind::{Grid, GridEdit, GridPos};
-use crate::layout::Layout;
-use crate::local::has_random;
 use crate::ordered::{
     BUSY_TEXT, LOCK_LOST_BROKEN_TEXT, LOCK_LOST_KEPT_TEXT, LOCK_LOST_LINK_TEXT, LOCK_LOST_TEXT, LOCK_LOST_UNRUN_LINK_TEXT, LOCK_LOST_UNRUN_TEXT,
     Pending, SCOPE, TAKEN_BACK_TEXT, Tracked, request, resolve, send_actions,
@@ -53,6 +50,16 @@ pub enum LiveFail {
     /// The base bytes are not the file the room was opened on.
     BaseMismatch,
     Live(LiveError),
+}
+
+impl std::fmt::Display for LiveFail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LiveFail::Open(e) => write!(f, "the base file did not open: {e}"),
+            LiveFail::BaseMismatch => f.write_str("the base is not the file the room was opened on"),
+            LiveFail::Live(e) => write!(f, "the live session did not start: {e}"),
+        }
+    }
 }
 
 /// What running a command did.
@@ -176,66 +183,12 @@ impl<H: Hub> GridLive<H> {
     }
 
     fn start_inner(hub: H, room: &str, base: &BaseFile, access: Access, uid: &str, session: &mut Session, hash: StyleHash) -> Result<Self, LiveFail> {
-        let sha: [u8; 32] = Sha256::digest(base.bytes).into();
-        if base.expected_sha256.is_some_and(|want| want != sha) {
-            return Err(LiveFail::BaseMismatch);
-        }
-        let (wb, warnings) = gridcraft_engine::io::open_bytes(base.name, base.bytes).map_err(|e| LiveFail::Open(e.to_string()))?;
-        if !warnings.is_empty() {
-            log::info!("gridcraft-live: opening the base gave {} warnings", warnings.len());
-        }
-        let seed = GridSeed { base_sha256: sha, sheets: u32::try_from(wb.sheets.len()).unwrap_or(u32::MAX) };
+        let (wb, seed) = crate::seed::open_base(base)?;
         let (hub, joins) = Tracked::new(hub);
         let core = LiveEditing::<Tracked<H>, Grid>::start(hub, room, &seed, access).map_err(LiveFail::Live)?;
         let title = std::path::Path::new(base.name).file_name().map_or_else(|| base.name.to_owned(), |n| n.to_string_lossy().into_owned());
-        session.add_document(DocState::new(wb, None, title, Trust::FromFile));
-        let (doc, wb) = session.active().map(|d| (d.uid, d.wb.clone())).ok_or(LiveFail::Open("no workbook".into()))?;
-        let replica = GridDoc::seeded(&seed).map_err(LiveFail::Live)?;
-        let vol = LiveVolatile::new(&replica, &wb);
-        let layout = Layout::from_doc(&replica, &wb);
-        let layout_rev = vol.update_layout(layout.clone());
-        let map = Mapping {
-            doc,
-            has_random: has_random(&wb),
-            base: wb,
-            layout,
-            layout_rev,
-            uid: uid.to_owned(),
-            space: 0,
-            hash,
-            keys: HashMap::new(),
-            minted: 0,
-            vol,
-            notices: Vec::new(),
-            pending: Vec::new(),
-            restore: None,
-            recalc: false,
-            resync_wanted: false,
-            skipped: 0,
-            rebuilds: 0,
-            unresolved: BTreeSet::new(),
-            mine: HashMap::new(),
-            lost: Vec::new(),
-            editor: None,
-            applied_ops: 0,
-            index: crate::reprint::RefIndex::default(),
-            recent: std::collections::BTreeMap::new(),
-            lines_minted: 0,
-            removed: Vec::new(),
-            resets: 0,
-            undo_resets: 0,
-            sent: Vec::new(),
-            group: 0,
-            undo: crate::undo::UndoLog::default(),
-            replays: Vec::new(),
-            replay: None,
-            undo_skipped: Vec::new(),
-            landing: Vec::new(),
-            replay_busy: false,
-            held: Vec::new(),
-            name: base.name.to_owned(),
-            unmerged: None,
-        };
+        let map = crate::seed::seat(session, wb, &seed, title, uid, hash, base.name)?;
+        let doc = map.doc;
         let observed = Arc::new(std::sync::atomic::AtomicU64::new(doc));
         let mut live = GridLive {
             core,
