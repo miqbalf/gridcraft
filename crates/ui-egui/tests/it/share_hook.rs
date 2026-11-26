@@ -2,7 +2,7 @@
 //! not an export menu. Uses only the app's public command and UI surface, so it also runs against
 //! a build that lost the hook (where it fails).
 
-use egui_kittest::kittest::{NodeT as _, Queryable as _};
+use egui_kittest::kittest::Queryable as _;
 use gridcraft_ui_egui::Services;
 use serde_json::json;
 
