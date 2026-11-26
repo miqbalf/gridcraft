@@ -350,6 +350,14 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Action\nJournal" => "Ιστορικό\nενεργειών",
         "About\nGridCraft" => "Πληροφορίες για\nτο GridCraft",
         "Share" => "Κοινή χρήση",
+        "No Nextcloud connected" => "Δεν υπάρχει συνδεδεμένο Nextcloud",
+        "Share in Nextcloud" => "Κοινή χρήση στο Nextcloud",
+        "Share works only for {name}, the first file opened from Nextcloud" => {
+            "Η κοινή χρήση ισχύει μόνο για το {name}, το πρώτο αρχείο που άνοιξε από το Nextcloud"
+        }
+        "Couldn't reach Nextcloud to share this workbook" => {
+            "Δεν ήταν δυνατή η επικοινωνία με το Nextcloud για κοινή χρήση αυτού του βιβλίου εργασίας"
+        }
         "Add Chart\nElement" => "Προσθήκη στοιχείου\nγραφήματος",
         "Change\nChart Type" => "Αλλαγή τύπου\nγραφήματος",
         "Switch\nRow/Column" => "Εναλλαγή\nγραμμής/στήλης",

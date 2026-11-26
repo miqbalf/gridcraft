@@ -63,7 +63,7 @@ pub fn start() {
                     let live_events = crate::host::LiveEvents::default();
                     let live = crate::host::Live::default();
                     if let Some(bridge) = &app_bridge {
-                        bridge.connect(&mut services, inbox.clone(), cc.egui_ctx.clone());
+                        bridge.connect(&mut services, cc.egui_ctx.clone());
                         bridge.listen_live(live_events.clone(), live.joining(), cc.egui_ctx.clone());
                     }
                     let mut app = SheetApp::new(session, services);

@@ -10,6 +10,8 @@ type PrintPdf = Box<dyn Fn(&[u8])>;
 /// downloaded it instead (a page that does not answer saves), `Err` when it could not be handed
 /// over.
 pub type SaveCopy = Box<dyn FnMut(&str, &[u8]) -> Result<Option<String>, String>>;
+type HostShare = Box<dyn Fn() -> Result<(), String>>;
+type ShareRoute = Box<dyn Fn(&std::path::Path) -> craft_share::ShareRoute>;
 
 /// Host services the platform shell provides (file pickers, opening URLs).
 #[derive(Default)]
@@ -58,6 +60,19 @@ pub struct Services {
     pub save_copy: Option<SaveCopy>,
     /// Web: the browser download for a copy of unmerged edits the page could not store.
     pub download_copy: Option<Download>,
+    /// Web: the page hosting GridCraft shares files itself (`gridcraft:host` with `share: true`).
+    /// Share posts `gridcraft:share` to it, for the workbook it opened ([`Services::host_doc`]).
+    pub host_share: Option<HostShare>,
+    /// Web: the id (`DocState::uid`) of the workbook the hosting page opened in the frame: the one
+    /// its own open from [`Services::host_inbox`] produced. Share asks the page only while that
+    /// workbook is the active one, whatever it is named.
+    pub host_doc: Option<u64>,
+    /// Web: files the hosting page sent (name, bytes), opened on the next frame like
+    /// [`Services::inbox`]; the workbook such an open produces becomes [`Services::host_doc`].
+    pub host_inbox: Option<Inbox>,
+    /// Desktop: where Share goes for a workbook saved at a path (`craft_share::desktop_route`:
+    /// Nextcloud sharing in the browser for a file in a folder the Nextcloud client syncs).
+    pub share_route: Option<ShareRoute>,
 }
 
 /// Shared queue of files read asynchronously (browser file picker, drag and drop).

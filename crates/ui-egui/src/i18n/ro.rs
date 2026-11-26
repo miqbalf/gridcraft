@@ -251,6 +251,12 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Action\nJournal" => "Jurnal de\nacțiuni",
         "About\nGridCraft" => "Despre\nGridCraft",
         "Share" => "Partajare",
+        "No Nextcloud connected" => "Niciun Nextcloud conectat",
+        "Share in Nextcloud" => "Partajare în Nextcloud",
+        "Share works only for {name}, the first file opened from Nextcloud" => {
+            "Partajarea funcționează doar pentru {name}, primul fișier deschis din Nextcloud"
+        }
+        "Couldn't reach Nextcloud to share this workbook" => "Nu s-a putut contacta Nextcloud pentru a partaja acest registru",
         "Add Chart\nElement" => "Adăugare element\nde diagramă",
         "Change\nChart Type" => "Schimbare\ntip diagramă",
         "Switch\nRow/Column" => "Comutare\nrând/coloană",

@@ -250,6 +250,12 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Action\nJournal" => "Registro\nazioni",
         "About\nGridCraft" => "Informazioni su\nGridCraft",
         "Share" => "Condividi",
+        "No Nextcloud connected" => "Nessun Nextcloud collegato",
+        "Share in Nextcloud" => "Condividi in Nextcloud",
+        "Share works only for {name}, the first file opened from Nextcloud" => {
+            "La condivisione funziona solo per {name}, il primo file aperto da Nextcloud"
+        }
+        "Couldn't reach Nextcloud to share this workbook" => "Impossibile raggiungere Nextcloud per condividere questa cartella di lavoro",
         "Add Chart\nElement" => "Aggiungi\nelemento grafico",
         "Change\nChart Type" => "Cambia tipo\ndi grafico",
         "Switch\nRow/Column" => "Inverti\nriga/colonna",

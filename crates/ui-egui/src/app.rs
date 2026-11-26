@@ -23,6 +23,7 @@ mod keys;
 mod prefs;
 mod print;
 mod quit;
+mod share;
 mod view;
 
 impl SheetApp {
@@ -52,6 +53,7 @@ impl SheetApp {
             copy_clock: None,
             page_refused_copy: false,
             toast: None,
+            share_routes: HashMap::new(),
             notice: None,
             services,
             live,
@@ -136,6 +138,8 @@ impl SheetApp {
         let open: Vec<u64> = self.session.documents().iter().map(|d| d.uid).collect();
         floating_pictures::forget_closed(ctx, &open);
         self.chart_cache.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).retain_docs(open.iter().copied());
+        self.share_routes.retain(|uid, _| open.contains(uid));
+        self.note_share_route();
         self.apply_font_state(ctx);
         if let Some(answer) = self.desktop_theme.take_change() {
             self.desktop_dark = Some(answer);

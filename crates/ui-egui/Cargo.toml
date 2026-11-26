@@ -10,15 +10,17 @@ workspace = true
 
 [dependencies]
 # The shared capture slot (`craft_ui::capture`) and `craft_ui::presence`. This is the
-# miqbalf/craft-libs revision `craft-web-host` already uses; it departs from AGENTS.md rule 10 by
-# owner decision (as for WordCraft).
-craft-ui = { git = "https://github.com/miqbalf/craft-libs", rev = "71e6ef899f551665f690970d57a204afb433c5dd" }
+# miqbalf/craft-libs revision `craft-web-host` and `craft-share` use (feat/share-hook, a
+# fast-forward of 71e6ef89); it departs from AGENTS.md rule 10 by owner decision (as for WordCraft).
+craft-ui = { git = "https://github.com/miqbalf/craft-libs", rev = "0434267cbc03705d1a4a22986bfc533ae92b812b" }
 gridcraft-engine = { workspace = true }
 # Live co-editing (layer 6, below this crate in `xtask layers`): the session this window pumps and
 # routes its commands through (`live.rs`).
 gridcraft-live = { workspace = true }
 craft-collab = { workspace = true }
 craft-live = { workspace = true }
+# The shared Share hook (miqbalf/craft-libs feat/share-hook until merged upstream).
+craft-share = { git = "https://github.com/miqbalf/craft-libs", rev = "0434267cbc03705d1a4a22986bfc533ae92b812b", version = "0.1.0" }
 gridcraft-chart = { workspace = true }
 # `monochrome_emoji_fonts` restores the Noto Emoji and emoji-icon faces that 0.37 moved behind
 # this feature. The UI draws ✕, ◀, ↘ and 📋 as text; without these faces the strict kittest

@@ -364,6 +364,12 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Action\nJournal" => "İşlem\nGünlüğü",
         "About\nGridCraft" => "GridCraft\nHakkında",
         "Share" => "Paylaş",
+        "No Nextcloud connected" => "Bağlı Nextcloud yok",
+        "Share in Nextcloud" => "Nextcloud'da paylaş",
+        "Share works only for {name}, the first file opened from Nextcloud" => {
+            "Paylaşım yalnızca Nextcloud'dan ilk açılan dosya olan {name} için çalışır"
+        }
+        "Couldn't reach Nextcloud to share this workbook" => "Bu çalışma kitabını paylaşmak için Nextcloud'a ulaşılamadı",
         "Add Chart\nElement" => "Grafik Öğesi\nEkle",
         "Change\nChart Type" => "Grafik Türünü\nDeğiştir",
         "Switch\nRow/Column" => "Satır/Sütun\nDeğiştir",

@@ -21,6 +21,11 @@ use gridcraft_engine::model::PageOrder;
 pub(crate) fn build_params(d: &Dialog) -> Json {
     let mut v = Json::Object(d.values.clone());
     match d.name.as_str() {
+        "openPassword" => {
+            if let Some(m) = v.as_object_mut() {
+                m.remove(crate::dialogs::HOST_OPEN);
+            }
+        }
         "insertLink" => {
             if d.original_link_text.as_deref().is_some_and(|text| d.values.get("text").and_then(Json::as_str) == Some(text))
                 && let Some(m) = v.as_object_mut()
@@ -438,8 +443,7 @@ pub fn show(app: &mut SheetApp, ctx: &egui::Context) {
                 if d.name == "solver" {
                     app.open_dialog("solverResults", r);
                 } else if d.name == "openPassword" {
-                    let path = d.values.get("path").and_then(Json::as_str).map(str::to_string);
-                    app.after_open(path.as_deref(), &r);
+                    app.after_password_open(&d.values, &r);
                 }
             }
             // Data Analysis asks before replacing data in its output range.

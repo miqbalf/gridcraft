@@ -257,6 +257,12 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Action\nJournal" => "Actie-\nlogboek",
         "About\nGridCraft" => "Over\nGridCraft",
         "Share" => "Delen",
+        "No Nextcloud connected" => "Geen Nextcloud verbonden",
+        "Share in Nextcloud" => "Delen in Nextcloud",
+        "Share works only for {name}, the first file opened from Nextcloud" => {
+            "Delen werkt alleen voor {name}, het eerste bestand dat uit Nextcloud is geopend"
+        }
+        "Couldn't reach Nextcloud to share this workbook" => "Kan Nextcloud niet bereiken om deze werkmap te delen",
         "Add Chart\nElement" => "Grafiekelement\ntoevoegen",
         "Change\nChart Type" => "Ander\ngrafiektype",
         "Switch\nRow/Column" => "Rij/kolom\nomwisselen",
