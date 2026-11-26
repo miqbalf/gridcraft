@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use craft_collab::{ClientMsg, Hub, ServerMsg};
+use craft_collab::{ClientMsg, Handover, Hub, ServerMsg};
 use craft_live::Access;
 use craft_live::testing::{MemHub, MemRelay, ROOM};
 use gridcraft_core::{CellRef, RangeRef, Value};
@@ -19,7 +19,9 @@ pub use crate::fingerprint::{diff, finger};
 
 /// A hub that notes the size of every submitted update.
 pub struct SpyHub {
-    inner: MemHub,
+    /// The in-memory link, in the `Handover` the web host wraps its hub in: transparent until
+    /// the test hands it a renewed ticket, then it switches to a new link once that one joined.
+    inner: Handover<MemHub>,
     pub sizes: Rc<RefCell<Vec<usize>>>,
     /// For every submit, whether it carried a fence.
     pub fenced: Rc<RefCell<Vec<bool>>>,
@@ -42,9 +44,14 @@ pub struct SpyHub {
 }
 
 impl SpyHub {
-    /// The in-memory hub, for the relay's link controls.
+    /// The in-memory hub in use, for the relay's link controls.
     pub fn mem(&self) -> &MemHub {
-        &self.inner
+        self.inner.active()
+    }
+
+    /// How many times a renewed ticket switched this peer's link.
+    pub fn switches(&self) -> u64 {
+        self.inner.switches()
     }
 }
 
@@ -95,6 +102,9 @@ impl Hub for SpyHub {
     }
     fn set_space(&mut self, space: u32) {
         self.inner.set_space(space);
+    }
+    fn close(&mut self) {
+        self.inner.close();
     }
 }
 
@@ -171,6 +181,8 @@ impl Room {
         let hold_ops = Rc::new(RefCell::new(false));
         let locks = Rc::new(RefCell::new(0));
         let lose_history = Rc::new(RefCell::new(false));
+        let (relay, again, display, edit) = (self.relay.clone(), uid.clone(), name.to_owned(), access == Access::Edit);
+        let hub = Handover::new(hub, move |_: &craft_collab::Reopen<'_>| Ok(relay.connect(&again, &display, edit)));
         let hub = SpyHub {
             inner: hub,
             sizes: sizes.clone(),

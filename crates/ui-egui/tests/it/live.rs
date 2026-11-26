@@ -1013,16 +1013,30 @@ fn a_renewed_ticket_switches_links_and_no_typing_is_lost() {
     }));
     let mut rig = Rig { left: Arc::default(), alice: old.clone(), relay: relay.clone(), bytes: bytes.clone(), bob };
     let mut h = harness(app);
-    settle(&mut rig, &mut h);
+    // Every info bar text the window shows, frame by frame (one at a time: nothing is queued
+    // ahead of a link notice here, so any would show at once).
+    let mut shown: Vec<String> = Vec::new();
+    let watch = |rig: &mut Rig, h: &mut Harness, shown: &mut Vec<String>| {
+        for _ in 0..40 {
+            rig.bob.pump();
+            h.step();
+            let text = notice_text(h.state());
+            if !text.is_empty() && shown.last() != Some(&text) {
+                shown.push(text);
+            }
+        }
+    };
+    watch(&mut rig, &mut h, &mut shown);
     h.state_mut().run("cell.set", json!({"cell": "D1", "input": "before"})).expect("types");
-    settle(&mut rig, &mut h);
+    watch(&mut rig, &mut h, &mut shown);
     // The renewal, as the web host's `refresh_ticket` hands it over, and typing right after it.
-    h.state_mut().live_mut().expect("live").live_mut().core_mut().hub_mut().set_token("renewed".to_owned());
+    h.state_mut().live_mut().expect("live").live_mut().renew_ticket("renewed".to_owned());
     h.state_mut().run("cell.set", json!({"cell": "D2", "input": "during"})).expect("types");
-    settle(&mut rig, &mut h);
+    watch(&mut rig, &mut h, &mut shown);
     // The old ticket expires: the relay drops its link.
     relay.drop_link(&old);
     h.state_mut().run("cell.set", json!({"cell": "D3", "input": "after"})).expect("types");
+    watch(&mut rig, &mut h, &mut shown);
     settle(&mut rig, &mut h);
     for (cell, want) in [("D1", "before"), ("D2", "during"), ("D3", "after")] {
         assert_eq!(bob_value(&rig, cell), Value::Text(want.into()), "Bob has {cell}");
@@ -1034,5 +1048,8 @@ fn a_renewed_ticket_switches_links_and_no_typing_is_lost() {
     assert!(opened[0].0.connected(), "the new link is the one in use");
     let status = h.state().live().expect("live").live().status().clone();
     assert!(matches!(status, craft_live::LiveStatus::Live { .. }), "the window stayed live: {status:?}");
-    assert!(!notice_text(h.state()).contains("Reconnecting"), "no reconnect was shown: {}", notice_text(h.state()));
+    // The link's own words are "Not connected to the other editors; …" and "Reconnected to the
+    // other editors." (craft-collab), and the window's "Reconnecting to the other editors. …"
+    // (craft-live): none may show for a switch, nor anything else.
+    assert!(shown.is_empty(), "the switch showed nothing in the info bar: {shown:?}");
 }

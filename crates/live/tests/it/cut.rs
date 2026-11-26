@@ -216,6 +216,20 @@ fn a_peers_write_into_the_cut_block_cancels_the_cut_and_keeps_their_value() {
 }
 
 #[test]
+fn a_peers_write_beside_the_used_part_of_a_whole_row_cut_cancels_it() {
+    // GC1 fix round 1, M1: a cut of whole rows keeps only their used part as its range, but the
+    // paste moves the whole rows. Bob's F5 is in the rows the move takes, so the cut ends.
+    let room = cut_cancelled_by("5:6", "A20", |room| {
+        room.settle();
+        room.run(1, "cell.set", json!({"cell": "F5", "input": "9"})).unwrap();
+    });
+    for i in 0..2 {
+        assert_eq!(cell_on(&room, i, 0, "F5").0, Value::Number(9.0), "peer {i}: bob's value stays where he typed it");
+        assert_eq!(cell_on(&room, i, 0, "F20"), (Value::Empty, None), "peer {i}: nothing moved");
+    }
+}
+
+#[test]
 fn a_peers_write_outside_the_cut_block_leaves_the_cut_alone() {
     let mut room = Room::new(2);
     room.run(0, "edit.cut", json!({"range": "A5:A6"})).unwrap();

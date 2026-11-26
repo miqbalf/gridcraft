@@ -945,6 +945,12 @@ impl<H: Hub> GridLive<H> {
     }
 
     #[must_use]
+    /// A renewed ticket from the host (the page's ticket refresh), for the hub: with a hub that
+    /// switches links on a new ticket (`craft_collab::Handover`), the switch is a rejoin.
+    pub fn renew_ticket(&mut self, ticket: String) {
+        self.core.hub_mut().set_token(ticket);
+    }
+
     pub fn core(&self) -> &LiveEditing<Tracked<H>, Grid> {
         &self.core
     }
