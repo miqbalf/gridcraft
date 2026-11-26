@@ -504,6 +504,9 @@ impl SheetApp {
             return Err(self.ui.language.tr(ALREADY_LIVE_TEXT).to_owned());
         }
         check_attached(&self.session, &live, self.ui.language)?;
+        // The host's live join opened the page's file (not its own open through `host_inbox`):
+        // that workbook is the page's, so Share asks the page for it (SH2).
+        self.services.host_doc = Some(live.doc());
         self.live = Some(LiveUi::new(live));
         Ok(())
     }
