@@ -1053,3 +1053,30 @@ fn a_renewed_ticket_switches_links_and_no_typing_is_lost() {
     // (craft-live): none may show for a switch, nor anything else.
     assert!(shown.is_empty(), "the switch showed nothing in the info bar: {shown:?}");
 }
+
+/// SH2: on the web the page's file opens live (the live join opens the room's workbook, not the
+/// page's own open), and Share must still ask the page for it.
+#[test]
+fn share_asks_the_page_for_the_live_workbook_it_joined() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let relay = MemRelay::new();
+    let bytes = base_bytes();
+    let hub = relay.connect("alice", "Alice", true);
+    let mut session = Session::new();
+    let base = BaseFile { bytes: &bytes, name: FILE, expected_sha256: None };
+    let live = GridLive::start(DynHub(Box::new(hub)), ROOM, &base, Access::Edit, "alice", &mut session).expect("starts");
+    let asked = Arc::new(AtomicUsize::new(0));
+    let counter = asked.clone();
+    let services = Services {
+        host_share: Some(Box::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })),
+        ..Default::default()
+    };
+    let mut app = crate::common::prepare(SheetApp::new(session, services));
+    app.attach_live(live).expect("attaches");
+    let r = app.run("file.share", json!({})).expect("Share runs");
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "{r}: the page is asked to share the live workbook it joined");
+    assert!(app.toast.is_none(), "no \"No Nextcloud connected\" for the page's own live file");
+}
