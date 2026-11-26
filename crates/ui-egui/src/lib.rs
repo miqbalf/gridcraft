@@ -81,10 +81,10 @@ mod services;
 mod state;
 
 pub use clock::{monotonic_ms, now_ms};
-pub use services::{Chrome, Inbox, SaveCopy, Services};
 /// The shared Share hook (`ShareRoute`, `desktop_route`, `sharing_url`, `NO_NEXTCLOUD`), at the
 /// revision this crate pins, for the desktop and web shells.
 pub use craft_share;
+pub use services::{Chrome, Inbox, SaveCopy, Services};
 pub use state::{NoticeKind, OpenWindow, SaveAnswer, SheetView};
 pub mod desktop_theme;
 
