@@ -206,7 +206,7 @@ const PER_ITEM_TIPS: &[&str] = &[
 
 /// Dropdowns and galleries that run no command the gate refuses (dialogs, pickers).
 const OPEN_TIPS: &[&str] =
-    &["AutoSum", "Borders", "Cell Styles", "Error Checking", "Fill Color", "Font Color", "Share: export or save a copy", "Switch Windows"];
+    &["AutoSum", "Borders", "Cell Styles", "Error Checking", "Fill Color", "Font Color", "Switch Windows"];
 
 const SEEN_MENUS_ID: &str = "gridcraft.live.menus-seen";
 
