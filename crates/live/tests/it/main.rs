@@ -15,11 +15,11 @@ mod junk;
 #[cfg(feature = "test-util")]
 mod ordered;
 #[cfg(feature = "test-util")]
-mod renew;
-#[cfg(feature = "test-util")]
 mod presence;
 #[cfg(feature = "native-hub")]
 mod relay;
+#[cfg(feature = "test-util")]
+mod renew;
 #[cfg(feature = "test-util")]
 mod support;
 #[cfg(feature = "test-util")]

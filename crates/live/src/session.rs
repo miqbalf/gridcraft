@@ -139,14 +139,29 @@ pub struct GridLive<H: Hub> {
     copy_names: crate::unmerged::Names,
     /// Notices gathered and not taken yet ([`GridLive::take_notices`]).
     told: Vec<String>,
+    /// An ordered edit was asked for and its run has not ended (asked, waiting, granted, running
+    /// or flushing): the structure lock is, or will be, held by this link.
+    ordered_open: bool,
+    /// That edit ran (its `finish` ends it once its edits are confirmed).
+    ordered_ran: bool,
+    /// A renewed ticket held back while an ordered edit is open, and since when.
+    ticket_waiting: Option<(String, f64)>,
+    /// A renewed ticket went to the hub while connected: the hub switches links once the new one
+    /// joined. Until then (or [`SWITCH_WAIT_MS`]) a granted edit does not run.
+    switch_since: Option<f64>,
 }
+
+/// How long a renewed ticket waits for an open ordered edit to end before it goes to the hub
+/// anyway. The page renews 120 s before the old ticket expires, so this leaves a minute.
+const TICKET_HOLD_MS: f64 = 60_000.0;
+/// How long a granted edit waits for a pending link switch (the new link's join).
+const SWITCH_WAIT_MS: f64 = 10_000.0;
 
 type WallClock = Box<dyn FnMut() -> chrono::NaiveDateTime + Send>;
 
 const NOT_ACTIVE: &str = "The live workbook is not open any more";
 /// Told when the replica cannot catch up and the file has to be reopened.
 pub const RESYNC_TEXT: &str = "This window fell out of step with the other editors. Reopen the file to keep editing.";
-/// Told when the engine's undo hook failed.
 /// A cut was cancelled because what it took changed: another editor inserted or deleted a row
 /// or column, or wrote into the block, or the window was rebuilt from the room. Pasting it would
 /// move the wrong cells or wipe their entry.
@@ -158,6 +173,7 @@ pub(crate) fn tell_cut_cancelled(notices: &mut Vec<String>) {
     }
 }
 
+/// Told when the engine's undo hook failed.
 pub const UNDO_FAILED_TEXT: &str = "Undo stopped working in this window. Reopen the file to get it back.";
 
 impl<H: Hub> GridLive<H> {
@@ -224,6 +240,10 @@ impl<H: Hub> GridLive<H> {
             wall: None,
             copy_names: crate::unmerged::Names::default(),
             told: Vec::new(),
+            ordered_open: false,
+            ordered_ran: false,
+            ticket_waiting: None,
+            switch_since: None,
         };
         if let Err(e) = live.bind(session) {
             // Do not leave the document open in the host's session.
@@ -312,6 +332,8 @@ impl<H: Hub> GridLive<H> {
             tell_cut_cancelled(&mut self.map.notices);
         }
         self.drive_ordered(session);
+        let now = self.now();
+        self.hand_ticket(now);
         self.after_pump(session);
         self.stamp_unmerged();
         peers
@@ -588,6 +610,8 @@ impl<H: Hub> GridLive<H> {
         let now = self.now();
         match self.ordered.request(pending, now) {
             Ok(actions) => {
+                self.ordered_open = true;
+                self.ordered_ran = false;
                 self.send(&actions);
                 Ok(Ran::Queued)
             }
@@ -649,6 +673,16 @@ impl<H: Hub> GridLive<H> {
                 }
             }
             self.seen_joins = joins;
+            self.switch_since = None;
+        }
+        if self.switch_since.is_some_and(|since| now - since >= SWITCH_WAIT_MS) {
+            // The new link never joined (refused, or another room): the hub kept the old one.
+            self.switch_since = None;
+        }
+        if self.switch_since.is_some() {
+            // A grant on the link about to close would be freed with it: wait for the new one.
+            self.finish_ordered();
+            return;
         }
         let polled = self.ordered.poll(self.core.newest_seq(), now);
         let polled = match polled {
@@ -658,17 +692,23 @@ impl<H: Hub> GridLive<H> {
         match polled {
             Polled::Nothing => {}
             Polled::Run(p) => {
+                self.ordered_ran = true;
                 self.rejoined_in_run = false;
                 self.run_told = false;
                 self.run_resets = self.map.resets;
                 self.run_pending(session, p);
             }
             Polled::GaveUp { holder, item } => {
+                self.ordered_open = false;
                 self.replay_unrun(&item);
                 let who = self.holder_name(&holder);
                 self.map.notices.push(format!("{who} is still changing the sheet's structure. Your change was not made; try again in a moment."));
             }
             Polled::LockLost { .. } => {
+                if !self.ordered_ran {
+                    // Lost before it ran: nothing is left to unlock or wait for.
+                    self.ordered_open = false;
+                }
                 if let Some(p) = self.deferred.take() {
                     // It never ran, but free edits made while it waited were under the lock too.
                     self.replay_unrun(&p);
@@ -709,8 +749,18 @@ impl<H: Hub> GridLive<H> {
                 self.map.notices.push(text.to_owned());
             }
         }
+        self.finish_ordered();
+    }
+
+    /// Unlocks once the run's edits settled (`Ordered::finish`, every frame until it does), and
+    /// notes that the ordered edit ended: its state then goes back to idle.
+    fn finish_ordered(&mut self) {
         if self.deferred.is_none() {
             let settled = self.core.local_settled();
+            if self.broken_sent || (self.ordered_ran && settled) {
+                self.ordered_open = false;
+                self.ordered_ran = false;
+            }
             let actions = self.ordered.finish(settled);
             self.send(&actions);
         }
@@ -944,13 +994,37 @@ impl<H: Hub> GridLive<H> {
         self.clock = Some(shared);
     }
 
-    #[must_use]
-    /// A renewed ticket from the host (the page's ticket refresh), for the hub: with a hub that
-    /// switches links on a new ticket (`craft_collab::Handover`), the switch is a rejoin.
+    /// A renewed ticket from the host (the page's ticket refresh), for the hub.
+    ///
+    /// With a hub that switches links on a new ticket (`craft_collab::Handover`, as on the web)
+    /// the switch is a rejoin, and the relay frees the structure lock with the old link. So
+    /// while an ordered (row or column) edit is asked, waiting or running, the ticket is held and
+    /// handed over on the first frame after that edit ended ([`TICKET_HOLD_MS`] at most), and a
+    /// lock granted while the switch is pending is not used until the new link joined: the
+    /// rejoin then asks again. A ticket for a link that is down goes over at once (it is the one
+    /// the reconnect needs).
     pub fn renew_ticket(&mut self, ticket: String) {
-        self.core.hub_mut().set_token(ticket);
+        let now = self.now();
+        self.ticket_waiting = Some((ticket, now));
+        self.hand_ticket(now);
     }
 
+    /// Hands a held ticket to the hub when nothing holds it back.
+    fn hand_ticket(&mut self, now: f64) {
+        let Some((_, since)) = &self.ticket_waiting else { return };
+        let connected = self.core.hub().connected();
+        if self.ordered_open && connected && now - since < TICKET_HOLD_MS {
+            return;
+        }
+        if let Some((ticket, _)) = self.ticket_waiting.take() {
+            self.core.hub_mut().set_token(ticket);
+            if connected {
+                self.switch_since = Some(now);
+            }
+        }
+    }
+
+    #[must_use]
     pub fn core(&self) -> &LiveEditing<Tracked<H>, Grid> {
         &self.core
     }

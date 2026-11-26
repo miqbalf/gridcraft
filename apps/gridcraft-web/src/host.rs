@@ -45,8 +45,9 @@
 //!   If the fetch, the connect or the start fails, the window says why and the next `live` tries
 //!   again ([`crate::live_ticket::Joining`]).
 //! - A later `live` for the same room is the page's ticket refresh: it goes to the hub
-//!   (`Hub::set_token`), a `craft_collab::Handover` that opens a link with the new ticket and
-//!   switches to it once joined, so the old ticket's expiry drops nothing. One for another room,
+//!   (`GridLive::renew_ticket`, then `Hub::set_token`), a `craft_collab::Handover` that opens a
+//!   link with the new ticket and switches to it once joined, so the old ticket's expiry drops
+//!   nothing. While a row or column edit holds the structure lock the ticket waits for it. One for another room,
 //!   or one that gives less access, ends the session.
 //!   A message while the file is fetched waits for the join.
 //! - Another `proto` shows "This file is being edited with a newer GridCraft. Update to join."
@@ -74,7 +75,6 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use craft_collab::Hub as _;
 use craft_live::LiveStatus;
 use craft_web_host::live::{LiveMessage, LiveState, Peer as HostPeer};
 use craft_web_host::web::{FileData, Host, Message};
@@ -575,7 +575,9 @@ fn local_now() -> chrono::NaiveDateTime {
 fn refresh_ticket(app: &mut SheetApp, ticket: &str) -> bool {
     match app.live_mut() {
         Some(live) => {
-            live.live_mut().core_mut().hub_mut().set_token(ticket.to_owned());
+            // Held while a row or column edit has the structure lock, which the link switch
+            // would free ([`gridcraft_live::GridLive::renew_ticket`]).
+            live.live_mut().renew_ticket(ticket.to_owned());
             true
         }
         None => false,

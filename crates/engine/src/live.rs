@@ -699,7 +699,7 @@ impl Session {
         let stale = self
             .clipboard
             .as_ref()
-            .is_some_and(|c| c.doc_uid == doc && (lines || (c.cut && changed.iter().any(|(sheet, at)| *sheet == c.sheet && c.range.contains(*at)))));
+            .is_some_and(|c| c.doc_uid == doc && (lines || (c.cut && changed.iter().any(|(sheet, at)| *sheet == c.sheet && cut_takes(c, *at)))));
         if stale {
             self.clipboard = None;
         }
@@ -800,4 +800,10 @@ impl Session {
             }
         }
     }
+}
+
+/// Whether pasting cut `c` moves the cell at `at`: its range, or for whole rows or columns the
+/// whole lines (the paste moves `selected` then, while `range` is only their used part).
+fn cut_takes(c: &crate::Clipboard, at: CellRef) -> bool {
+    c.range.contains(at) || (c.areas.is_empty() && (c.selected.is_full_cols() || c.selected.is_full_rows()) && c.selected.contains(at))
 }
