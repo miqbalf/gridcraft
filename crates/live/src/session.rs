@@ -152,7 +152,11 @@ pub struct GridLive<H: Hub> {
 }
 
 /// How long a renewed ticket waits for an open ordered edit to end before it goes to the hub
-/// anyway. The page renews 120 s before the old ticket expires, so this leaves a minute.
+/// anyway. The page asks for a new ticket 480 s after the last one, which came about 100 s
+/// before the old one expires (102 s in the GC1 run); failed fetches retried after 5, 10 and
+/// 20 s leave about 65 s. So the hold ends with time left for the new link to join, unless the
+/// renewal itself came late (a hidden tab's throttled timers): then the old link drops at its
+/// expiry and the edit is told as for any drop.
 const TICKET_HOLD_MS: f64 = 60_000.0;
 /// How long a granted edit waits for a pending link switch (the new link's join).
 const SWITCH_WAIT_MS: f64 = 10_000.0;
@@ -705,10 +709,6 @@ impl<H: Hub> GridLive<H> {
                 self.map.notices.push(format!("{who} is still changing the sheet's structure. Your change was not made; try again in a moment."));
             }
             Polled::LockLost { .. } => {
-                if !self.ordered_ran {
-                    // Lost before it ran: nothing is left to unlock or wait for.
-                    self.ordered_open = false;
-                }
                 if let Some(p) = self.deferred.take() {
                     // It never ran, but free edits made while it waited were under the lock too.
                     self.replay_unrun(&p);
@@ -1005,7 +1005,10 @@ impl<H: Hub> GridLive<H> {
     /// the reconnect needs).
     pub fn renew_ticket(&mut self, ticket: String) {
         let now = self.now();
-        self.ticket_waiting = Some((ticket, now));
+        // A ticket resent while one is held replaces it, but the hold still counts from the
+        // first: resends must not push the hand-over towards the old ticket's expiry.
+        let since = self.ticket_waiting.as_ref().map_or(now, |(_, since)| *since);
+        self.ticket_waiting = Some((ticket, since));
         self.hand_ticket(now);
     }
 

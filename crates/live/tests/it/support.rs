@@ -17,11 +17,47 @@ use serde_json::Value as Json;
 
 pub use crate::fingerprint::{diff, finger};
 
+/// An in-memory link whose answers can be held back: a link opened for a renewed ticket that
+/// has not heard its join answer yet (a slow network), while [`Peer::hold_join`] is set.
+pub struct Gated {
+    mem: MemHub,
+    hold: Option<Rc<RefCell<bool>>>,
+    held: Vec<ServerMsg>,
+}
+
+impl Hub for Gated {
+    fn send(&mut self, msg: ClientMsg) -> craft_collab::Result<()> {
+        self.mem.send(msg)
+    }
+    fn poll(&mut self) -> Vec<ServerMsg> {
+        let now = self.mem.poll();
+        if self.hold.as_ref().is_some_and(|h| *h.borrow()) {
+            self.held.extend(now);
+            return Vec::new();
+        }
+        let mut out = std::mem::take(&mut self.held);
+        out.extend(now);
+        out
+    }
+    fn connected(&self) -> bool {
+        self.mem.connected()
+    }
+    fn set_token(&mut self, token: String) {
+        self.mem.set_token(token);
+    }
+    fn set_space(&mut self, space: u32) {
+        self.mem.set_space(space);
+    }
+    fn close(&mut self) {
+        self.mem.close();
+    }
+}
+
 /// A hub that notes the size of every submitted update.
 pub struct SpyHub {
     /// The in-memory link, in the `Handover` the web host wraps its hub in: transparent until
     /// the test hands it a renewed ticket, then it switches to a new link once that one joined.
-    inner: Handover<MemHub>,
+    inner: Handover<Gated>,
     pub sizes: Rc<RefCell<Vec<usize>>>,
     /// For every submit, whether it carried a fence.
     pub fenced: Rc<RefCell<Vec<bool>>>,
@@ -46,7 +82,7 @@ pub struct SpyHub {
 impl SpyHub {
     /// The in-memory hub in use, for the relay's link controls.
     pub fn mem(&self) -> &MemHub {
-        self.inner.active()
+        &self.inner.active().mem
     }
 
     /// How many times a renewed ticket switched this peer's link.
@@ -118,6 +154,8 @@ pub struct Peer {
     pub hold_ops: Rc<RefCell<bool>>,
     pub lose_history: Rc<RefCell<bool>>,
     pub locks: Rc<RefCell<usize>>,
+    /// While set, links opened for a renewed ticket hear nothing (their join answer included).
+    pub hold_join: Rc<RefCell<bool>>,
     pub notices: Vec<String>,
 }
 
@@ -181,8 +219,12 @@ impl Room {
         let hold_ops = Rc::new(RefCell::new(false));
         let locks = Rc::new(RefCell::new(0));
         let lose_history = Rc::new(RefCell::new(false));
-        let (relay, again, display, edit) = (self.relay.clone(), uid.clone(), name.to_owned(), access == Access::Edit);
-        let hub = Handover::new(hub, move |_: &craft_collab::Reopen<'_>| Ok(relay.connect(&again, &display, edit)));
+        let hold_join = Rc::new(RefCell::new(false));
+        let (relay, again, display, edit, gate) = (self.relay.clone(), uid.clone(), name.to_owned(), access == Access::Edit, hold_join.clone());
+        let hub = Gated { mem: hub, hold: None, held: Vec::new() };
+        let hub = Handover::new(hub, move |_: &craft_collab::Reopen<'_>| {
+            Ok(Gated { mem: relay.connect(&again, &display, edit), hold: Some(gate.clone()), held: Vec::new() })
+        });
         let hub = SpyHub {
             inner: hub,
             sizes: sizes.clone(),
@@ -211,6 +253,7 @@ impl Room {
             hold_ops,
             lose_history,
             locks,
+            hold_join,
             notices: Vec::new(),
         });
         self.peers.len() - 1
