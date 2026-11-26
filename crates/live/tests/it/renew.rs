@@ -235,3 +235,30 @@ fn a_ticket_held_for_an_open_edit_goes_over_after_sixty_seconds() {
     let notices = room.notices_of(1);
     assert!(notices.iter().any(|n| n.contains("connection dropped before your change") && n.contains("was not made")), "{notices:?}");
 }
+
+/// LI2 (collab-craft d006c2c3): on the web the hub's socket opens only after the workbook
+/// starts, so the first pumps see a link that is not up yet. That first connect is not told as a
+/// drop and a reconnect. A real drop after it is still told, and so is the rejoin.
+#[test]
+fn the_first_connect_is_not_told_as_a_drop_and_a_reconnect() {
+    let told = |room: &Room| room.notices_of(0).iter().filter(|n| n.to_lowercase().contains("connected to the other editors")).count();
+    let mut room = Room::with(0, crate::support::base_bytes(false), None);
+    room.join("Alice", craft_live::Access::Edit, None);
+    let mem = room.peers[0].live.core().hub().inner().mem().clone();
+    // Still connecting when the workbook first pumps.
+    room.relay.drop_link(&mem);
+    for _ in 0..3 {
+        room.pump(0);
+    }
+    room.relay.restore_link(&mem);
+    room.settle();
+    room.assert_all_live("after the first connect");
+    assert_eq!(told(&room), 0, "the first connect was told: {:?}", room.notices_of(0));
+    room.relay.drop_link(&mem);
+    room.pump(0);
+    room.pump(0);
+    assert_eq!(told(&room), 1, "a real drop is told: {:?}", room.notices_of(0));
+    room.relay.restore_link(&mem);
+    room.settle();
+    assert_eq!(told(&room), 2, "and the rejoin after it: {:?}", room.notices_of(0));
+}
