@@ -29,6 +29,8 @@ pub const NOT_LIVE_TEXT: &str =
 /// The joined session's host side: the session file's watch, and the runtime the link runs on.
 pub struct DesktopLive {
     watch: SessionWatch,
+    /// Whether "not being saved" was last told (the server's `saver`).
+    told_not_saving: bool,
     /// Kept for the link's sockets; dropped with the window.
     _rt: tokio::runtime::Runtime,
 }
@@ -56,7 +58,7 @@ pub fn start(session_file: &Path, working: &Path, session: &mut Session) -> Resu
     // This computer's date and time, for the name of a copy of unmerged edits.
     live.set_wall_clock(Box::new(|| chrono::Local::now().naive_local()));
     log::info!("live: joining room {} for file {:?}", file.room, file.file_id);
-    Ok((live, DesktopLive { watch: SessionWatch::new(session_file, &file), _rt: rt }))
+    Ok((live, DesktopLive { watch: SessionWatch::new(session_file, &file), told_not_saving: false, _rt: rt }))
 }
 
 impl DesktopLive {
@@ -76,6 +78,13 @@ impl DesktopLive {
             }
             None => {}
         }
+        // The server says the room has no save worker: say so while it lasts (rule 15).
+        let saving = self.watch.saving();
+        if !saving && !self.told_not_saving {
+            let text = app.ui.language.tr(gridcraft_live::desktop::NOT_SAVING_TEXT).to_owned();
+            app.notice = Some(Notice { text, kind: NoticeKind::Warning, action: None });
+        }
+        self.told_not_saving = !saving;
         ctx.request_repaint_after(std::time::Duration::from_secs_f64(gridcraft_live::desktop::WATCH_SECS));
     }
 }

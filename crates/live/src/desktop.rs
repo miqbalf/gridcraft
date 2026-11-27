@@ -41,6 +41,8 @@ pub const NO_BASE_TEXT: &str = "The launcher did not say which file the live roo
 pub const BASE_CHANGED_TEXT: &str = "The file changed since the room was opened. Reopen the file.";
 /// Told when the relay is not on the server's own host.
 pub const RELAY_ELSEWHERE_TEXT: &str = "The live relay is not on the server's own address.";
+/// Shown while the server says the room has no save worker (`saver: false`).
+pub const NOT_SAVING_TEXT: &str = "Changes are not being saved right now";
 /// The window's end when a rewrite names another room.
 pub const RESTARTED_TEXT: &str = "The live session was restarted. Reopen the file.";
 /// The window's end when a rewrite gives less access.
@@ -78,6 +80,10 @@ pub struct SessionFile {
     pub display_name: Option<String>,
     #[serde(default)]
     pub base: Option<SessionBase>,
+    /// The ticket answer's `saver`: `false` when the room has no save worker right now. Missing
+    /// means saving.
+    #[serde(default)]
+    pub saver: Option<bool>,
 }
 
 impl std::fmt::Debug for SessionFile {
@@ -147,6 +153,13 @@ impl SessionFile {
     #[must_use]
     pub fn access(&self) -> Access {
         if self.read_only { Access::Read } else { crate::ticket::ticket_access(&self.ticket) }
+    }
+
+    /// Whether the room's edits are being saved: `false` only for an edit session the server
+    /// says has no save worker (`saver: false`).
+    #[must_use]
+    pub fn saving(&self) -> bool {
+        self.access() == Access::Read || self.saver != Some(false)
     }
 
     /// The relay to connect to, as `http(s)://host[:port]/path` for the native socket: a path
@@ -265,6 +278,7 @@ pub struct SessionWatch {
     room: String,
     access: Access,
     ticket: String,
+    saving: bool,
     modified: Option<SystemTime>,
     /// When it was last looked at, on the caller's clock (seconds).
     looked: Option<f64>,
@@ -279,6 +293,7 @@ impl SessionWatch {
             room: file.room.clone(),
             access: file.access(),
             ticket: file.ticket.clone(),
+            saving: file.saving(),
             modified: modified(path),
             looked: None,
         }
@@ -305,11 +320,20 @@ impl SessionWatch {
         if self.access == Access::Edit && file.access() == Access::Read {
             return Some(Rewrite::End(ACCESS_CHANGED_TEXT));
         }
+        self.saving = file.saving();
         if file.ticket == self.ticket {
             return None;
         }
         self.ticket.clone_from(&file.ticket);
         Some(Rewrite::Ticket(file.ticket))
+    }
+}
+
+impl SessionWatch {
+    /// Whether the room's edits are saved, as of the last rewrite read ([`SessionFile::saving`]).
+    #[must_use]
+    pub fn saving(&self) -> bool {
+        self.saving
     }
 }
 

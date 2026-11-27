@@ -80,6 +80,13 @@ fn read_only_comes_from_the_launcher_or_the_ticket() {
 }
 
 #[test]
+fn a_room_without_a_save_worker_is_told() {
+    assert!(parse(&session(json!({}))).unwrap().saving(), "missing means saving");
+    assert!(!parse(&session(json!({"saver": false}))).unwrap().saving());
+    assert!(parse(&session(json!({"saver": false, "readOnly": true}))).unwrap().saving(), "a viewer saves nothing anyway");
+}
+
+#[test]
 fn the_relay_must_be_on_the_servers_own_address() {
     let relay = |server: &str, url: &str| parse(&session(json!({"server": server, "relayUrl": url}))).unwrap().relay();
     assert_eq!(relay("https://cloud.example", "wss://cloud.example/craft").as_deref(), Ok("https://cloud.example/craft"));
