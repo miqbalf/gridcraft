@@ -474,8 +474,8 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "+ Add Level" => "+ Добавить уровень",
         "100% Stacked Bar" => "Нормированная линейчатая",
         "100% Stacked Column" => "Нормированная гистограмма",
-        "A clean-room, open-source, Rust-native spreadsheet. Part of ArtCraft." => {
-            "Электронные таблицы с открытым исходным кодом, написанные с нуля на Rust. Часть ArtCraft."
+        "A clean-room, open-source, Rust-native spreadsheet. Part of udinCraft." => {
+            "Электронные таблицы с открытым исходным кодом, написанные с нуля на Rust. Часть udinCraft."
         }
         "About" => "О программе",
         "Accessibility" => "Доступность",
