@@ -81,6 +81,12 @@ const POLL: Duration = Duration::from_millis(100);
 pub const EDITOR_GONE_TEXT: &str = "The row or column of the cell you were editing was deleted by another editor.";
 /// The same, with the entry kept.
 pub const EDITOR_GONE_DRAFT_TEXT: &str = "The row or column of the cell you were editing was deleted by another editor. Your entry was: {draft}";
+/// Told when Save on a live workbook found the room has every edit (desktop live).
+pub const ROOM_SAVED_TEXT: &str = "Saved live. The server stores the file.";
+/// Told when Save on a live workbook found edits the room has not confirmed yet.
+pub const ROOM_PENDING_TEXT: &str = "Not saved yet: your latest changes reach the server once the live link is back. They are kept.";
+/// Told when Save on a live workbook that is read-only for this window.
+pub const ROOM_READ_ONLY_TEXT: &str = "This file is read-only for you. Use Save As to keep a copy.";
 /// Told when the live workbook is closed.
 pub const LIVE_ENDED_TEXT: &str = "Live editing ended because the workbook was closed.";
 /// The info bar's button for a waiting copy of unmerged edits, and the action it runs.
@@ -728,6 +734,60 @@ impl SheetApp {
 
     /// One frame of a live window: anchors the open editor, takes in the room, moves the editor
     /// with its row, and shows what the room told.
+    /// Save on the live workbook when the room's document service saves it (desktop live,
+    /// [`crate::Services::room_saves`]): nothing is written here. `None` when Save goes on as
+    /// usual: not live, another workbook, a save to a named path, or a link that ended (the
+    /// workbook is then this computer's copy, saved like any other).
+    ///
+    /// # Errors
+    /// Why the workbook is not saved yet: the room has not confirmed every edit, or the file is
+    /// read-only for this window.
+    pub(crate) fn room_save(&mut self, params: &Json) -> Option<Result<Json, String>> {
+        if !self.services.room_saves || params.get("path").is_some_and(|p| !p.is_null()) {
+            return None;
+        }
+        let lu = self.live.as_ref()?;
+        let doc = lu.doc;
+        if self.session.active().map(|d| d.uid) != Some(doc) {
+            return None;
+        }
+        let lang = self.ui.language;
+        let unconfirmed = lu.live.core().live().unconfirmed_edits() > 0;
+        // `Some(true)`: saved; `Some(false)`: not yet; `None`: read-only. Ended links save as usual.
+        let saved = match lu.live.status() {
+            LiveStatus::Refused(_) | LiveStatus::Broken(_) => return None,
+            LiveStatus::ReadOnly => None,
+            LiveStatus::Live { .. } => Some(!unconfirmed),
+            LiveStatus::Connecting | LiveStatus::Reconnecting => Some(false),
+        };
+        Some(match saved {
+            None => Err(lang.tr(ROOM_READ_ONLY_TEXT).to_owned()),
+            Some(false) => Err(lang.tr(ROOM_PENDING_TEXT).to_owned()),
+            Some(true) => {
+                self.mark_room_saved(doc);
+                self.toast = Some((lang.tr(ROOM_SAVED_TEXT).to_owned(), crate::now_ms()));
+                Ok(json!({"live": true, "saved": true}))
+            }
+        })
+    }
+
+    /// The live workbook counts as saved: the room has all of it.
+    fn mark_room_saved(&mut self, doc: u64) {
+        if let Some(d) = self.session.document_mut(doc) {
+            d.saved = d.wb.clone();
+        }
+    }
+
+    /// Desktop live: once the room has every edit, the live workbook is saved (the document
+    /// service stores it), so closing the window does not ask about it.
+    fn room_keeps_saved(&mut self, lu: &LiveUi) {
+        let settled = matches!(lu.live.status(), LiveStatus::Live { .. }) && lu.live.core().live().unconfirmed_edits() == 0;
+        let dirty = self.session.documents().iter().any(|d| d.uid == lu.doc && d.is_dirty());
+        if self.services.room_saves && settled && dirty {
+            self.mark_room_saved(lu.doc);
+        }
+    }
+
     pub(crate) fn live_frame(&mut self, ctx: &egui::Context) {
         // A live session refused when the window was built is told in the user's language now.
         if let Some(why) = self.live_refusal.take() {
@@ -764,6 +824,7 @@ impl SheetApp {
         self.pending_unmerged.extend(lu.live.take_unmerged());
         let notes = lu.live.take_notices();
         lu.live.send_selection(&self.session);
+        self.room_keeps_saved(&lu);
         ctx.data_mut(|d| d.insert_temp(egui::Id::NULL.with(BLOCKED_ID), lu.blocked.clone()));
         // A name tag that is showing is due to go: wake up for it.
         let due = lu

@@ -26,6 +26,11 @@ impl SheetApp {
         if matches!(id, "file.save" | "file.saveAs" | "file.saveBytes") {
             self.store_view_state();
         }
+        if id == "file.save"
+            && let Some(saved) = self.room_save(&params)
+        {
+            return saved;
+        }
         if let Some(refused) = dialogs::refuse_sheet_change(self, id) {
             return Err(refused);
         }

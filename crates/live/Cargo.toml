@@ -12,7 +12,7 @@ workspace = true
 # An in-memory relay so tests can join a real session with no server (dev use only).
 test-util = ["craft-live/test-util"]
 # The native socket hub, for the relay tests.
-native-hub = ["craft-collab/native-hub"]
+native-hub = ["craft-collab/native-hub", "dep:tokio"]
 
 [dependencies]
 gridcraft-core = { workspace = true }
@@ -30,10 +30,13 @@ log = { workspace = true }
 thiserror = { workspace = true }
 sha2 = { workspace = true }
 chrono = { workspace = true }
+# Reading a ticket's claims (`ticket`).
+base64 = { workspace = true }
+# The desktop link's background connect (`native_link`, feature `native-hub`).
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"], optional = true }
 
 [dev-dependencies]
 # The relay tests (feature `native-hub`): mint relay tickets (HMAC-SHA256 over the base64url
 # payload) and drive the native hub.
-base64 = "0.23"
 hmac = "0.13"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

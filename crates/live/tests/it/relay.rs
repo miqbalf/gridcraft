@@ -430,3 +430,123 @@ async fn load_five_clients() {
     );
     eprintln!("load: overlay state size {} bytes (per client {sizes:?})", sizes.iter().max().copied().unwrap_or(0));
 }
+
+// --- the desktop app's join (`--live-session`) ---------------------------------------------
+
+/// A desktop window joined as the desktop app joins: from the launcher's session file, over the
+/// background link that hands over on a renewed ticket.
+struct Desk {
+    s: Session,
+    live: GridLive<craft_collab::Handover<gridcraft_live::native_link::BgHub>>,
+    watch: gridcraft_live::desktop::SessionWatch,
+    path: std::path::PathBuf,
+    dir: std::path::PathBuf,
+    now: f64,
+}
+
+/// The session file the launcher writes, for `room` with `ticket`.
+fn session_json(relay: &str, room: &str, ticket: &str, file: &[u8]) -> Json {
+    let sha: String = <Sha256 as sha2::Digest>::digest(file).iter().map(|b| format!("{b:02x}")).collect();
+    let origin = craft_collab::Endpoint::of(relay).origin;
+    json!({"v": 1, "server": origin, "fileId": 1, "path": format!("/Docs/{FILE}"), "ticket": ticket,
+           "relayUrl": relay, "room": format!("doc:{room}"), "readOnly": false, "displayName": "Desk",
+           "base": {"sha256": sha}})
+}
+
+fn write_session(path: &std::path::Path, j: &Json) {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, j.to_string()).unwrap();
+    std::fs::rename(&tmp, path).unwrap();
+}
+
+impl Desk {
+    fn join(relay: &str, secret: &str, room: &str, uid: &str, file: &[u8]) -> Desk {
+        let dir = std::env::temp_dir().join(format!("gridcraft-desk-{room}-{uid}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let working = dir.join(FILE);
+        std::fs::write(&working, file).unwrap();
+        let path = dir.join("session.json");
+        write_session(&path, &session_json(relay, room, &ticket(secret, room, uid, &format!("{uid}-{}", now())), file));
+        let sf = gridcraft_live::desktop::SessionFile::load(&path).unwrap();
+        let (bytes, hash) = sf.base_bytes(&working).unwrap();
+        let rt = tokio::runtime::Handle::current();
+        // Opening the link never waits for the relay: it connects in the background.
+        let link = gridcraft_live::native_link::renewing_link(&rt, &sf.relay().unwrap(), &sf.ticket, &schema());
+        let mut s = Session::new();
+        let name = sf.file_name(&working);
+        let base = BaseFile { bytes: &bytes, name: &name, expected_sha256: Some(hash) };
+        let live = GridLive::start(link, &sf.room, &base, sf.access(), uid, &mut s).unwrap_or_else(|e| panic!("{uid}: start failed: {e:?}"));
+        let watch = gridcraft_live::desktop::SessionWatch::new(&path, &sf);
+        Desk { s, live, watch, path, dir, now: 0.0 }
+    }
+
+    /// One frame of the desktop window: the session file, then the session.
+    fn pump(&mut self) {
+        self.now += gridcraft_live::desktop::WATCH_SECS;
+        if let Some(gridcraft_live::desktop::Rewrite::Ticket(t)) = self.watch.poll(self.now) {
+            self.live.renew_ticket(t);
+        }
+        self.live.pump(&mut self.s);
+        let _ = self.live.take_notices();
+    }
+
+    fn is_live(&self) -> bool {
+        matches!(self.live.status(), LiveStatus::Live { .. }) && self.live.editable()
+    }
+
+    fn finger(&self) -> String {
+        finger(&self.s.active().unwrap().wb)
+    }
+}
+
+async fn until_both(web: &mut Client, desk: &mut Desk, secs: u64, what: &str, done: impl Fn(&Client, &Desk) -> bool) {
+    let end = mono() + Duration::from_secs(secs);
+    loop {
+        web.pump();
+        desk.pump();
+        if done(web, desk) {
+            return;
+        }
+        assert!(mono() < end, "timed out waiting for {what}: web {:?}, desktop {:?}", web.live.status(), desk.live.status());
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs relay"]
+async fn a_desktop_window_from_a_session_file_coedits_with_a_web_window() {
+    let (relay, secret, room, file) = setup();
+    let mut web = Client::join(&relay, &secret, &room, "webby", &file).await;
+    let mut desk = Desk::join(&relay, &secret, &room, "desky", &file);
+    until_both(&mut web, &mut desk, 20, "both Live", |w, d| w.is_live() && d.is_live()).await;
+
+    // Edits both ways, some of them ordered (the structure lock).
+    let mut rng = Rng(21);
+    for step in 0..40 {
+        if step % 2 == 0 {
+            edit_somewhere(&mut web, &mut rng, true);
+        } else {
+            let row = 1 + rng.below(12);
+            let _ = desk.live.run(&mut desk.s, "cell.set", json!({"cell": format!("C{row}"), "input": format!("d{step}")}));
+        }
+        web.pump();
+        desk.pump();
+    }
+    assert!(desk.live.run(&mut desk.s, "home.insertRows", json!({"rows": "3:3"})).is_ok(), "an ordered edit from the desktop");
+    until_both(&mut web, &mut desk, 30, "the same workbook", |w, d| w.is_live() && d.is_live() && w.finger() == d.finger()).await;
+
+    // The launcher rewrites the session file with a fresh ticket: the desktop link hands over to
+    // a new socket without a drop, and the two keep converging.
+    let fresh = ticket(&secret, &room, "desky", &format!("desky-renewed-{}", now()));
+    // Whole-second file times: let the rewrite carry a later one.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    write_session(&desk.path, &session_json(&relay, &room, &fresh, &file));
+    until_both(&mut web, &mut desk, 30, "the switch to the renewed ticket", |_, d| d.live.core().hub().inner().switches() >= 1).await;
+    assert!(desk.live.run(&mut desk.s, "cell.set", json!({"cell": "H1", "input": "after renewal"})).is_ok());
+    assert!(web.run("cell.set", json!({"cell": "H2", "input": "from the web"})));
+    until_both(&mut web, &mut desk, 30, "the same workbook after the renewal", |w, d| {
+        w.is_live() && d.is_live() && w.finger() == d.finger() && d.finger().contains("after renewal") && d.finger().contains("from the web")
+    })
+    .await;
+    let _ = std::fs::remove_dir_all(&desk.dir);
+}

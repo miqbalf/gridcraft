@@ -1141,3 +1141,82 @@ fn share_asks_the_page_after_a_renewed_ticket() {
     assert!(h.state().live().is_some(), "still live after the renewal");
     share_asks_the_page(h.state_mut(), &asked, "after a renewed ticket");
 }
+
+// --- Save when the room saves the file (desktop live) -------------------------------------
+
+/// Alice's window with Save on the room's document service, as the desktop app runs it; the
+/// count goes up whenever the window asks where to save.
+fn rig_room_saves() -> (Rig, SheetApp, Arc<std::sync::atomic::AtomicUsize>) {
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = Arc::clone(&asked);
+    let services = Services {
+        room_saves: true,
+        pick_save: Some(Box::new(move |_: &str| {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            None
+        })),
+        ..Services::default()
+    };
+    let (rig, app) = rig_with(Access::Edit, services);
+    (rig, app, asked)
+}
+
+fn live_dirty(app: &SheetApp) -> bool {
+    let doc = app.live().expect("live").live().doc();
+    app.session.documents().iter().any(|d| d.uid == doc && d.is_dirty())
+}
+
+#[test]
+fn save_on_a_room_saved_workbook_writes_nothing_and_it_counts_as_saved() {
+    let (mut rig, app, asked) = rig_room_saves();
+    let mut h = harness(app);
+    settle(&mut rig, &mut h);
+    h.state_mut().run("cell.set", json!({"cell": "B2", "input": "7"})).expect("runs through the session");
+    settle(&mut rig, &mut h);
+    assert_eq!(bob_value(&rig, "B2"), Value::Number(7.0), "the room has the change");
+    assert!(!live_dirty(h.state()), "once the room has every edit the workbook is saved, so closing does not ask");
+    let saved = h.state_mut().run("file.save", json!({})).expect("Save is the room's");
+    assert_eq!(saved["live"], json!(true));
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0, "no Save As was asked for: nothing is written here");
+}
+
+#[test]
+fn save_while_the_link_is_down_says_the_changes_are_not_saved_yet() {
+    let (mut rig, app, asked) = rig_room_saves();
+    let mut h = harness(app);
+    settle(&mut rig, &mut h);
+    rig.relay.drop_link(&rig.alice);
+    settle(&mut rig, &mut h);
+    h.state_mut().run("cell.set", json!({"cell": "C3", "input": "9"})).expect("kept while the link is down");
+    settle(&mut rig, &mut h);
+    let refused = h.state_mut().run("file.save", json!({})).expect_err("not saved while the room lacks the edit");
+    assert!(refused.contains("Not saved yet"), "{refused}");
+    assert!(live_dirty(h.state()), "the workbook still has unsaved changes");
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0, "and nothing went to a local file");
+    rig.relay.restore_link(&rig.alice);
+    settle(&mut rig, &mut h);
+    assert_eq!(bob_value(&rig, "C3"), Value::Number(9.0), "the kept edit reached the room");
+    assert!(!live_dirty(h.state()), "then it counts as saved");
+}
+
+#[test]
+fn a_web_window_saves_its_live_workbook_as_before() {
+    // Without `room_saves` (the web host), Save goes on to the host's own save path.
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = Arc::clone(&asked);
+    let services = Services {
+        pick_save: Some(Box::new(move |_: &str| {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            None
+        })),
+        ..Services::default()
+    };
+    let (mut rig, app) = rig_with(Access::Edit, services);
+    let mut h = harness(app);
+    settle(&mut rig, &mut h);
+    h.state_mut().run("cell.set", json!({"cell": "B2", "input": "7"})).expect("runs");
+    settle(&mut rig, &mut h);
+    assert!(live_dirty(h.state()), "the window's own save decides");
+    let _ = h.state_mut().run("file.save", json!({}));
+    assert!(asked.load(std::sync::atomic::Ordering::SeqCst) > 0, "an unnamed workbook asks where to save");
+}

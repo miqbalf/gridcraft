@@ -1,6 +1,9 @@
 //! GridCraft desktop app.
 //!
-//! Usage: `gridcraft [--control <port> [--control-token <token>]] [--sample <name>] [files…]`
+//! Usage: `gridcraft [--control <port> [--control-token <token>]] [--sample <name>] [--live-session <file>] [files…]`
+//!
+//! `--live-session <file>` (from the udinCraft Launcher) joins the live co-editing session that
+//! file names, on the first file named (the launcher's copy); see `live_session`.
 //!
 //! `--control <port>` (or `GRIDCRAFT_CONTROL_PORT`) starts a localhost JSON-lines control
 //! server: `{"id":1,"method":"ui.inspect","params":{}}` → `{"id":1,"ok":true,"result":…}`.
@@ -14,6 +17,7 @@ mod apple_events;
 mod control_server;
 #[cfg(any(target_os = "windows", target_os = "macos", test))]
 mod graphics;
+mod live_session;
 mod logging;
 #[cfg(target_os = "macos")]
 mod native_menu;
@@ -29,19 +33,28 @@ use gridcraft_ui_egui::{Services, SheetApp};
 use serde_json::json;
 
 /// The app, its native window per workbook window, and (macOS) the menu bar and Finder events.
-struct App(SheetApp, DocWindows, #[cfg(target_os = "macos")] Option<native_menu::NativeMenu>, #[cfg(target_os = "macos")] fmv_macos_events::Inbox);
+struct App(
+    SheetApp,
+    DocWindows,
+    Option<live_session::DesktopLive>,
+    #[cfg(target_os = "macos")] Option<native_menu::NativeMenu>,
+    #[cfg(target_os = "macos")] fmv_macos_events::Inbox,
+);
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         #[cfg(target_os = "macos")]
         {
-            if self.2.is_none() && std::env::var_os("GRIDCRAFT_NO_NATIVE_MENU").is_none() {
-                self.2 = Some(native_menu::NativeMenu::install(ctx));
+            if self.3.is_none() && std::env::var_os("GRIDCRAFT_NO_NATIVE_MENU").is_none() {
+                self.3 = Some(native_menu::NativeMenu::install(ctx));
             }
-            if let Some(m) = &mut self.2 {
+            if let Some(m) = &mut self.3 {
                 m.poll(&mut self.0, ctx, self.1.focused_viewport());
             }
-            apple_events::poll(&self.3, &mut self.0, ctx);
+            apple_events::poll(&self.4, &mut self.0, ctx);
+        }
+        if let Some(live) = &mut self.2 {
+            live.frame(&mut self.0, ctx);
         }
         self.0.logic(ctx);
         self.1.logic(&mut self.0, ctx);
@@ -290,6 +303,7 @@ fn main() -> eframe::Result<()> {
     let mut control_port: Option<u16> = std::env::var("GRIDCRAFT_CONTROL_PORT").ok().and_then(|p| p.parse().ok());
     let mut control_token: Option<String> = std::env::var("GRIDCRAFT_CONTROL_TOKEN").ok();
     let mut sample: Option<String> = None;
+    let mut live_session: Option<String> = None;
     let mut files: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -301,6 +315,10 @@ fn main() -> eframe::Result<()> {
             "--control-token" => {
                 i += 1;
                 control_token = args.get(i).cloned();
+            }
+            "--live-session" => {
+                i += 1;
+                live_session = args.get(i).cloned();
             }
             "--sample" => {
                 i += 1;
@@ -331,7 +349,28 @@ fn main() -> eframe::Result<()> {
     {
         log::warn!("sample {s}: {e}");
     }
-    let mut app = SheetApp::new(session, services());
+    // A live session from the launcher opens its room on the first file named (its copy).
+    let mut services = services();
+    let mut live_failed: Option<String> = None;
+    let mut desktop_live = None;
+    if let Some(path) = &live_session {
+        match files.first().cloned() {
+            Some(working) => match live_session::start(std::path::Path::new(path), std::path::Path::new(&working), &mut session) {
+                Ok((live, host)) => {
+                    services.live = Some(live);
+                    services.room_saves = true;
+                    desktop_live = Some(host);
+                    files.remove(0);
+                }
+                Err(e) => {
+                    log::warn!("live: not started: {e}");
+                    live_failed = Some(e);
+                }
+            },
+            None => live_failed = Some("no file was named to open".to_owned()),
+        }
+    }
+    let mut app = SheetApp::new(session, services);
     app.watch_desktop_theme();
     app.start_update_check();
     let control_port = control_port;
@@ -346,6 +385,9 @@ fn main() -> eframe::Result<()> {
     // only logged. Each replaces the untouched blank Book1, as a file opened from Finder does.
     for f in &files {
         app.open_path(f);
+    }
+    if let Some(e) = &live_failed {
+        live_session::tell_not_live(&mut app, e);
     }
     // Linux/BSD: Excel's layout — no window-manager title bar above ours; our title bar carries the
     // window controls. `GRIDCRAFT_SYSTEM_TITLEBAR=1` keeps the system frame.
@@ -391,6 +433,7 @@ fn main() -> eframe::Result<()> {
     // The app waits here until a start gets as far as creating it; a start that fails before
     // (no graphics adapter, device or surface) leaves it here for the next attempt.
     let pending = std::cell::Cell::new(Some(app));
+    let pending_live = std::cell::Cell::new(desktop_live);
     let run = |options: eframe::NativeOptions| {
         eframe::run_native(
             "GridCraft",
@@ -410,6 +453,7 @@ fn main() -> eframe::Result<()> {
                 Ok(Box::new(App(
                     app,
                     windows,
+                    pending_live.take(),
                     #[cfg(target_os = "macos")]
                     None,
                     #[cfg(target_os = "macos")]

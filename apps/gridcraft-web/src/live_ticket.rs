@@ -4,8 +4,6 @@
 //! This is a copy of WordCraft's `live_ticket` (plus the base hash of the file URL), kept in step
 //! by hand. Logged as debt for craft-libs (Ruling R21): one shared module there replaces both.
 
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use craft_live::{Access, LiveStatus};
 use craft_web_host::live::{LiveError, LiveStatus as HostStatus};
 use sha2::{Digest, Sha256};
@@ -24,33 +22,8 @@ pub const SAVE_OFF_AFTER_FAILED_JOIN: &str = "Saving is off in this window; reop
 /// Why a workbook save is refused while the window belongs to a room.
 const SAVE_BY_SERVICE: &str = "the document service saves this file while it is edited live";
 
-/// The relay's permission bit for changing the file (OCS numbering: read 1, update 2).
-const PERMISSION_UPDATE: u64 = 2;
-
-/// The claims of a ticket (`payload.signature`, base64url JSON). The relay checks the signature
-/// and enforces the permission; this only reads what the interface needs.
-fn claims(ticket: &str) -> Option<serde_json::Value> {
-    let payload = ticket.split('.').next()?;
-    let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
-    serde_json::from_slice(&bytes).ok()
-}
-
-/// The access a ticket grants, read from its `perm` claim. Only the interface uses it, to start a
-/// read-only ticket read-only. A ticket that can't be read is taken as an edit ticket and left to
-/// the relay: one it can't verify either is refused at the join (the window says why), and one
-/// without the update bit has its first edit refused.
-pub fn ticket_access(ticket: &str) -> Access {
-    let perm = claims(ticket).and_then(|c| c.get("perm").and_then(serde_json::Value::as_u64));
-    match perm {
-        Some(perm) if perm & PERMISSION_UPDATE == 0 => Access::Read,
-        _ => Access::Edit,
-    }
-}
-
-/// The user id a ticket names (its `uid` claim), or `None` when it can't be read.
-pub fn ticket_uid(ticket: &str) -> Option<String> {
-    claims(ticket)?.get("uid")?.as_str().filter(|u| !u.is_empty()).map(str::to_owned)
-}
+/// The ticket's access and user, read the same way as the desktop app reads them.
+pub use gridcraft_live::ticket::{ticket_access, ticket_uid};
 
 /// Whether a resolved file URL may be fetched with the user's cookies: plain HTTP(S) on the
 /// page's own origin only, so a forged `fileUrl` cannot point the session's credentials anywhere
@@ -218,6 +191,8 @@ pub fn host_status(status: &LiveStatus) -> (HostStatus, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
     fn ticket(claims: &str) -> String {
         format!("{}.c2lnbmF0dXJl", URL_SAFE_NO_PAD.encode(claims))
