@@ -23,6 +23,10 @@ on:
         description: "Tag and publish a GitHub Release (main only); false keeps the builds as run artifacts"
         type: boolean
         default: false
+      live_build:
+        description: "GRIDCRAFT_LIVE_BUILD: the live build id of the web GridCraft the desktop app must join (the relay refuses a different one). Default: the dev and prod web build f2eff718"
+        type: string
+        default: "f2eff718"
 
 permissions:
   contents: read
@@ -37,6 +41,9 @@ env:
   UPSTREAM_TITLE: "GridCraft"
   # storytold/craft-fonts commit, checked out as ../craft-fonts (empty: the app embeds none).
   CRAFT_FONTS_REF: "b076417b5880bd4154bd22f00695b1d28c6bea83"
+  # Baked in at compile time (crates/live: option_env!). It must equal the web build's id, or the
+  # relay refuses the desktop app (room schema gridcraft/1_<id>). A push run has no inputs: the default.
+  GRIDCRAFT_LIVE_BUILD: ${{ inputs.live_build || 'f2eff718' }}
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
@@ -55,6 +62,11 @@ jobs:
           persist-credentials: false
       - name: Version
         run: echo "APP_VERSION=$(awk '/^\[/{p=($0=="[workspace.package]");next} p&&$1=="version"{gsub(/[" ]/,"",$3);print $3;exit}' Cargo.toml)" >>"$GITHUB_ENV"
+      - name: Check the live build id
+        shell: bash
+        run: |
+          [[ "$GRIDCRAFT_LIVE_BUILD" =~ ^[A-Za-z0-9]{1,40}$ ]] || { echo "::error::GRIDCRAFT_LIVE_BUILD must be 1-40 ASCII letters and digits, got '$GRIDCRAFT_LIVE_BUILD'"; exit 1; }
+          echo "GRIDCRAFT_LIVE_BUILD=$GRIDCRAFT_LIVE_BUILD"
       - name: Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
@@ -68,6 +80,23 @@ jobs:
         run: bash .github/scripts/udincraft-build-inputs.sh
       - name: Build and package (universal, ad-hoc signed, not notarized)
         run: packaging/macos/package.sh --arch universal
+      - name: The binaries carry the live build id
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Every binary with the live schema must carry this id (a build without it falls back to
+          # the crate version), and at least one binary must have the schema.
+          seen=0
+          for f in target/macos-package/*.app/Contents/MacOS/* target/macos-package/"$APP"-cli-*/"$APP"-cli; do
+            [ -f "$f" ] || continue
+            if grep -a -q "gridcraft/1_" "$f"; then
+              seen=1
+              if grep -a -q "$GRIDCRAFT_LIVE_BUILD" "$f"; then echo "ok: $f has gridcraft/1_ and $GRIDCRAFT_LIVE_BUILD"; else echo "::error::$f has gridcraft/1_ but not $GRIDCRAFT_LIVE_BUILD"; exit 1; fi
+            else
+              echo "no live schema in $f"
+            fi
+          done
+          [ "$seen" = 1 ] || { echo "::error::no binary carries the gridcraft/1_ live schema"; exit 1; }
       - name: Zip the app, check both, the DMG and the zip
         id: check
         run: |
@@ -125,6 +154,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev \
             libasound2-dev pkg-config desktop-file-utils appstream zsync
+      - name: Check the live build id
+        shell: bash
+        run: |
+          [[ "$GRIDCRAFT_LIVE_BUILD" =~ ^[A-Za-z0-9]{1,40}$ ]] || { echo "::error::GRIDCRAFT_LIVE_BUILD must be 1-40 ASCII letters and digits, got '$GRIDCRAFT_LIVE_BUILD'"; exit 1; }
+          echo "GRIDCRAFT_LIVE_BUILD=$GRIDCRAFT_LIVE_BUILD"
       - name: Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
@@ -137,6 +171,23 @@ jobs:
         run: bash .github/scripts/udincraft-build-inputs.sh
       - name: Build and package (AppImage, tar.gz)
         run: packaging/linux/package.sh --formats "appimage tar"
+      - name: The binaries carry the live build id
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Every binary with the live schema must carry this id (a build without it falls back to
+          # the crate version), and at least one binary must have the schema.
+          seen=0
+          for f in target/linux-package/root/usr/bin/"$APP" target/linux-package/root/usr/bin/"$APP"-cli; do
+            [ -f "$f" ] || continue
+            if grep -a -q "gridcraft/1_" "$f"; then
+              seen=1
+              if grep -a -q "$GRIDCRAFT_LIVE_BUILD" "$f"; then echo "ok: $f has gridcraft/1_ and $GRIDCRAFT_LIVE_BUILD"; else echo "::error::$f has gridcraft/1_ but not $GRIDCRAFT_LIVE_BUILD"; exit 1; fi
+            else
+              echo "no live schema in $f"
+            fi
+          done
+          [ "$seen" = 1 ] || { echo "::error::no binary carries the gridcraft/1_ live schema"; exit 1; }
       - name: Add the user install script to the tarball
         run: |
           set -euo pipefail
@@ -194,6 +245,11 @@ jobs:
       - name: Version
         shell: bash
         run: echo "APP_VERSION=$(awk '/^\[/{p=($0=="[workspace.package]");next} p&&$1=="version"{gsub(/[" ]/,"",$3);print $3;exit}' Cargo.toml)" >>"$GITHUB_ENV"
+      - name: Check the live build id
+        shell: bash
+        run: |
+          [[ "$GRIDCRAFT_LIVE_BUILD" =~ ^[A-Za-z0-9]{1,40}$ ]] || { echo "::error::GRIDCRAFT_LIVE_BUILD must be 1-40 ASCII letters and digits, got '$GRIDCRAFT_LIVE_BUILD'"; exit 1; }
+          echo "GRIDCRAFT_LIVE_BUILD=$GRIDCRAFT_LIVE_BUILD"
       - name: Rust toolchain
         shell: bash
         run: |
@@ -214,6 +270,23 @@ jobs:
       - name: Build and package (unsigned MSI and portable zip)
         shell: pwsh
         run: ./packaging/windows/package.ps1 -Arch x64
+      - name: The binaries carry the live build id
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Every binary with the live schema must carry this id (a build without it falls back to
+          # the crate version), and at least one binary must have the schema.
+          seen=0
+          for f in target/windows-package/x64/"$APP".exe target/windows-package/x64/"$APP"-cli.exe; do
+            [ -f "$f" ] || continue
+            if grep -a -q "gridcraft/1_" "$f"; then
+              seen=1
+              if grep -a -q "$GRIDCRAFT_LIVE_BUILD" "$f"; then echo "ok: $f has gridcraft/1_ and $GRIDCRAFT_LIVE_BUILD"; else echo "::error::$f has gridcraft/1_ but not $GRIDCRAFT_LIVE_BUILD"; exit 1; fi
+            else
+              echo "no live schema in $f"
+            fi
+          done
+          [ "$seen" = 1 ] || { echo "::error::no binary carries the gridcraft/1_ live schema"; exit 1; }
       - name: Check the portable zip
         shell: pwsh
         run: |
@@ -279,6 +352,10 @@ jobs:
             echo
             awk '/^## Fork notes/{p=1;next} p&&/^## /{exit} p' README.md
             echo
+            echo "## Live editing"
+            echo
+            echo "Live editing works with servers running GridCraft web build $GRIDCRAFT_LIVE_BUILD: this build joins only rooms of that web build (\`gridcraft/1_$GRIDCRAFT_LIVE_BUILD\`)."
+            echo
             echo "## Downloads"
             echo
             echo "macOS 11 or later, Intel and Apple silicon (one universal app):"
@@ -286,6 +363,12 @@ jobs:
             echo
             echo "Linux x86_64 (glibc 2.35 or later). The tarball's \`./install.sh\` installs it for your user into \`~/.local\`, without sudo (\`./install.sh --uninstall\` removes it):"
             files '*-linux-*'
+            echo
+            echo "The apps load libxkbcommon, libxkbcommon-x11 and libxcb-xkb from the system; \`install.sh\` warns if they are missing. Install them from your distro, so the pair matches (a hand-copied libxkbcommon-x11 that does not match libxkbcommon crashes the apps):"
+            echo
+            echo "- Arch, CachyOS: \`sudo pacman -S --needed libxkbcommon libxkbcommon-x11 libxcb\`"
+            echo "- Debian, Ubuntu: \`sudo apt install libxkbcommon0 libxkbcommon-x11-0 libxcb-xkb1\`"
+            echo "- Fedora: \`sudo dnf install libxkbcommon libxkbcommon-x11 libxcb\`"
             echo
             echo "Windows x86_64:"
             files '*-windows-*'
