@@ -114,14 +114,14 @@ fn the_room_opens_only_on_its_pinned_base() {
     let file = parse(&session(json!({}))).unwrap();
     let (bytes, _) = file.base_bytes(&working).expect("the working copy is the base");
     assert_eq!(bytes, b"base");
+    let prod = parse(&session(json!({"app": "gridcraft", "base": {"url": "https://cloud.example/apps/craft_office/live/base/r?sha256=x", "sha256": hex(b"base")}}))).unwrap();
+    assert!(prod.base_bytes(&working).is_ok(), "the ticket's base, url and all, is read for its hash");
     std::fs::write(&working, b"edited since").unwrap();
     assert_eq!(file.base_bytes(&working).map(|_| ()), Err(SessionError::BaseChanged), "another file is not joined");
     let base = d.join("base.bin");
     std::fs::write(&base, b"base").unwrap();
     let with_path = parse(&session(json!({"base": {"sha256": hex(b"base"), "path": base}}))).unwrap();
     assert!(with_path.base_bytes(&working).is_ok(), "a separately downloaded base is used");
-    let prod = parse(&session(json!({"app": "gridcraft", "base": {"url": "https://cloud.example/apps/craft_office/live/base/r?sha256=x", "sha256": hex(b"base")}}))).unwrap();
-    assert!(prod.base_bytes(&working).is_ok(), "the ticket's base, url and all, is read for its hash");
     let none = parse(&session(json!({"base": null}))).unwrap();
     assert_eq!(none.base_bytes(&working).map(|_| ()), Err(SessionError::NoBase), "no hash, no join");
     assert_eq!(file.file_name(&working), "Budget.xlsx");
