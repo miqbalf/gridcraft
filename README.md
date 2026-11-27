@@ -66,6 +66,16 @@
   <a href="#license-and-credits">License and credits</a>
 </p>
 
+## Fork notes
+
+This fork adds, on top of upstream GridCraft:
+
+- Hosting inside a web page of a self-hosted file server: the page opens and saves the workbook, and Share asks the page to share the file.
+- Live co-editing of one workbook by several people, through the collab-craft relay, with ordered edits, per-user undo and redo, and a copy of edits that could not be shared.
+- A live worker that saves the shared workbook back to the file server.
+
+The server app that hosts these builds is not part of this repository.
+
 ## A look around
 
 <table>
