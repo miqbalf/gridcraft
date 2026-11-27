@@ -101,13 +101,13 @@ pub enum SessionError {
     Unreadable,
     #[error("the live session file is not usable")]
     Malformed,
-    #[error("{NEWER_SESSION_TEXT}")]
+    #[error("{}", NEWER_SESSION_TEXT)]
     Newer,
-    #[error("{RELAY_ELSEWHERE_TEXT}")]
+    #[error("{}", RELAY_ELSEWHERE_TEXT)]
     RelayElsewhere,
-    #[error("{NO_BASE_TEXT}")]
+    #[error("{}", NO_BASE_TEXT)]
     NoBase,
-    #[error("{BASE_CHANGED_TEXT}")]
+    #[error("{}", BASE_CHANGED_TEXT)]
     BaseChanged,
 }
 
