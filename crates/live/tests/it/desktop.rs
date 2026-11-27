@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use craft_live::Access;
-use gridcraft_live::desktop::{ACCESS_CHANGED_TEXT, RESTARTED_TEXT, Rewrite, SessionError, SessionFile, SessionWatch, WATCH_SECS};
+use gridcraft_live::desktop::{ACCESS_CHANGED_TEXT, fallback_path, write_fallback, RESTARTED_TEXT, Rewrite, SessionError, SessionFile, SessionWatch, WATCH_SECS};
 use serde_json::{Value as Json, json};
 use sha2::{Digest, Sha256};
 
@@ -175,5 +175,26 @@ fn the_file_is_looked_at_no_more_than_every_two_seconds() {
     write_atomic(&path, &session(json!({"ticket": fresh})));
     assert_eq!(watch.poll(10.0 + WATCH_SECS / 2.0), None, "too soon");
     assert_eq!(watch.poll(10.0 + WATCH_SECS), Some(Rewrite::Ticket(fresh)));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn the_fallback_signal_is_written_beside_the_session_file_for_the_owner_only() {
+    let d = dir("fallback");
+    let path = d.join("abc.json");
+    write_atomic(&path, &session(json!({})));
+    write_fallback(&path, "the relay is not reachable").expect("written");
+    let signal = fallback_path(&path);
+    assert_eq!(signal.file_name().and_then(|n| n.to_str()), Some("abc.json.fallback"));
+    let j: Json = serde_json::from_slice(&std::fs::read(&signal).unwrap()).unwrap();
+    assert_eq!(j["v"], json!(1));
+    assert_eq!(j["reason"], json!("the relay is not reachable"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&signal).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode & 0o077, 0, "nobody but the owner reads it ({mode:o})");
+    }
+    assert!(path.exists(), "the session file itself stays for the launcher");
     let _ = std::fs::remove_dir_all(&d);
 }

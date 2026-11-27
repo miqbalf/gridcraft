@@ -354,20 +354,19 @@ fn main() -> eframe::Result<()> {
     let mut live_failed: Option<String> = None;
     let mut desktop_live = None;
     if let Some(path) = &live_session {
-        match files.first().cloned() {
-            Some(working) => match live_session::start(std::path::Path::new(path), std::path::Path::new(&working), &mut session) {
-                Ok((live, host)) => {
-                    services.live = Some(live);
-                    services.room_saves = true;
-                    desktop_live = Some(host);
-                    files.remove(0);
-                }
-                Err(e) => {
-                    log::warn!("live: not started: {e}");
-                    live_failed = Some(e);
-                }
-            },
-            None => live_failed = Some("no file was named to open".to_owned()),
+        let working = files.first().cloned();
+        match live_session::open(std::path::Path::new(path), working.as_deref().map(std::path::Path::new), &mut session) {
+            Ok((live, host)) => {
+                services.live = Some(live);
+                services.room_saves = true;
+                desktop_live = Some(host);
+                files.remove(0);
+            }
+            Err(e) => {
+                // The fallback signal is written: the copy opens below as any named file does.
+                log::warn!("live: not started: {e}");
+                live_failed = Some(e);
+            }
         }
     }
     let mut app = SheetApp::new(session, services);

@@ -337,6 +337,40 @@ impl SessionWatch {
     }
 }
 
+/// Where the app tells the launcher it opened the file on its own: `<session file>.fallback`.
+#[must_use]
+pub fn fallback_path(session_file: &Path) -> PathBuf {
+    let mut p = session_file.as_os_str().to_owned();
+    p.push(".fallback");
+    PathBuf::from(p)
+}
+
+/// Tells the launcher this window could not go live and edits its copy on its own, so the
+/// launcher switches to the check-out flow and uploads the saves: writes
+/// `{"v":1,"reason":…}` to [`fallback_path`] (mode 0600 where there are modes), atomically.
+/// `reason` is short English with no secrets (never the ticket).
+///
+/// # Errors
+/// The file could not be written.
+pub fn write_fallback(session_file: &Path, reason: &str) -> std::io::Result<()> {
+    let path = fallback_path(session_file);
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    let body = serde_json::json!({"v": VERSION, "reason": reason}).to_string();
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    {
+        use std::io::Write as _;
+        let mut f = options.open(&tmp)?;
+        f.write_all(body.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, &path)
+}
+
 fn modified(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }

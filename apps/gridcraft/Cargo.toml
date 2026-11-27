@@ -41,6 +41,7 @@ gridcraft-mcp = { workspace = true }
 getrandom = "0.4"
 # Live co-editing from the launcher (`--live-session`): the session and its native relay link.
 gridcraft-live = { workspace = true, features = ["native-hub"] }
+craft-live = { workspace = true }
 # The runtime the relay link's sockets run on; already in the tree (craft-collab's native hub).
 tokio = { version = "1", features = ["rt-multi-thread", "time", "net"] }
 
