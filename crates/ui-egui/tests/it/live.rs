@@ -1122,7 +1122,8 @@ fn share_asks_the_page_after_the_live_session_ended() {
     h.run_steps(3);
     h.state_mut().end_live_for("The live session was restarted. Reopen the file.");
     h.run_steps(3);
-    assert!(h.state().live().is_none(), "the window left the live session");
+    let status = h.state().live().expect("the window keeps the ended session until the workbook closes").live().status().clone();
+    assert!(!matches!(status, craft_live::LiveStatus::Live { .. }), "the session ended: {status:?}");
     share_asks_the_page(h.state_mut(), &asked, "after the live session ended");
 }
 
