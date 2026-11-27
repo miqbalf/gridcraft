@@ -225,7 +225,10 @@ mod tests {
     fn unreachable(d: &Path) -> (PathBuf, PathBuf, Vec<u8>) {
         let mut wb = gridcraft_engine::model::Workbook::new();
         if let Some(sh) = wb.sheet_mut(0) {
-            sh.set_cell(gridcraft_engine::core::CellRef::new(0, 0), gridcraft_engine::model::Cell::value(gridcraft_engine::core::Value::Number(41.0)));
+            sh.set_cell(
+                gridcraft_engine::core::CellRef::new(0, 0),
+                gridcraft_engine::model::Cell::value(gridcraft_engine::core::Value::Number(41.0)),
+            );
         }
         let bytes = gridcraft_engine::io::save_bytes(&wb, "Plan.xlsx").unwrap();
         let working = d.join("Plan.xlsx");
@@ -241,11 +244,13 @@ mod tests {
 
     /// One window frame at `t` seconds: the launcher's side, then the window's logic.
     fn frame(ctx: &egui::Context, app: &mut SheetApp, desk: &mut DesktopLive, t: f64) {
-        let _ = ctx.run_ui(egui::RawInput { time: Some(t), ..Default::default() }, |ui| {
+        let mut out = ctx.run_ui(egui::RawInput { time: Some(t), ..Default::default() }, |ui| {
             let ctx = ui.ctx().clone();
             desk.frame(app, &ctx);
             app.logic(&ctx);
         });
+        // No renderer takes the frame's textures here.
+        out.textures_delta.clear();
     }
 
     #[test]
