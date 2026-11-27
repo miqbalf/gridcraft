@@ -221,6 +221,64 @@ mod tests {
         j["reason"].as_str().unwrap_or_default().to_owned()
     }
 
+    /// A real workbook as the launcher's copy, and a session file for a relay nobody answers on.
+    fn unreachable(d: &Path) -> (PathBuf, PathBuf, Vec<u8>) {
+        let mut wb = gridcraft_engine::model::Workbook::new();
+        if let Some(sh) = wb.sheet_mut(0) {
+            sh.set_cell(gridcraft_engine::core::CellRef::new(0, 0), gridcraft_engine::model::Cell::value(gridcraft_engine::core::Value::Number(41.0)));
+        }
+        let bytes = gridcraft_engine::io::save_bytes(&wb, "Plan.xlsx").unwrap();
+        let working = d.join("Plan.xlsx");
+        std::fs::write(&working, &bytes).unwrap();
+        let sha: String = <sha2::Sha256 as sha2::Digest>::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+        // Port 9 (discard) on the loopback: the connect is refused at once, and retried.
+        let j = serde_json::json!({"v": 1, "server": "http://127.0.0.1:9", "fileId": 3, "path": "/Docs/Plan.xlsx",
+            "ticket": "e30.c2ln", "relayUrl": "/craft", "room": "oc:3:a", "readOnly": false, "base": {"sha256": sha}});
+        let path = d.join("s.json");
+        std::fs::write(&path, j.to_string()).unwrap();
+        (path, working, bytes)
+    }
+
+    /// One window frame at `t` seconds: the launcher's side, then the window's logic.
+    fn frame(ctx: &egui::Context, app: &mut SheetApp, desk: &mut DesktopLive, t: f64) {
+        let _ = ctx.run_ui(egui::RawInput { time: Some(t), ..Default::default() }, |ui| {
+            let ctx = ui.ctx().clone();
+            desk.frame(app, &ctx);
+            app.logic(&ctx);
+        });
+    }
+
+    #[test]
+    fn typing_waits_for_the_first_join_and_a_join_that_never_comes_opens_the_copy_intact() {
+        let d = dir("unreached");
+        let (path, working, bytes) = unreachable(&d);
+        let mut session = Session::new();
+        let (live, mut desk) = open(&path, Some(&working), &mut session).expect("the session starts, connecting");
+        let services = gridcraft_ui_egui::Services { live: Some(live), room_saves: true, ..Default::default() };
+        let mut app = SheetApp::new(session, services);
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut app, &mut desk, 0.0);
+        assert!(app.live().is_some_and(gridcraft_ui_egui::live::LiveUi::waiting_for_first_join), "connecting");
+        app.begin_edit(Some("typed while connecting".into()), false);
+        assert!(app.editor.is_none(), "no typing before the join");
+        assert!(app.run("cell.set", serde_json::json!({"cell": "A2", "input": "lost?"})).is_err(), "no edit either");
+        frame(&ctx, &mut app, &mut desk, 1.0);
+        assert!(!gridcraft_live::desktop::fallback_path(&path).exists(), "not given up yet");
+        // Past the join wait: the launcher is told, then the copy opens on its own.
+        frame(&ctx, &mut app, &mut desk, JOIN_GIVE_UP_SECS + 1.0);
+        frame(&ctx, &mut app, &mut desk, JOIN_GIVE_UP_SECS + 2.0);
+        frame(&ctx, &mut app, &mut desk, JOIN_GIVE_UP_SECS + 3.0);
+        assert!(reason(&path).contains("could not be reached"), "{}", reason(&path));
+        assert!(app.live().is_none(), "no longer live");
+        let doc = app.session.active().expect("the copy is open");
+        assert_eq!(doc.path.as_deref().map(Path::new), Some(working.as_path()), "the launcher's copy, saved where it lies");
+        let a1 = doc.wb.sheet(0).and_then(|s| s.cell(gridcraft_engine::core::CellRef::new(0, 0))).map(|c| c.value.clone());
+        assert_eq!(a1, Some(gridcraft_engine::core::Value::Number(41.0)), "with the file's content");
+        assert_eq!(std::fs::read(&working).unwrap(), bytes, "and the copy on disk is intact");
+        app.run("cell.set", serde_json::json!({"cell": "A2", "input": "7"})).expect("and editable now");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn a_copy_that_is_not_the_rooms_base_falls_back_and_tells_the_launcher() {
         let d = dir("mismatch");

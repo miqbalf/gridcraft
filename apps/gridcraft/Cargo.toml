@@ -64,6 +64,10 @@ fmv-macos-events = "=0.1.0"
 objc2 = "=0.6.5"
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSWindow"] }
 
+[dev-dependencies]
+# The live-session tests hash the launcher's copy as the ticket's base does.
+sha2 = { workspace = true }
+
 # tests/mac_menu_appkit.rs: reads AppKit's menu bar back. Already in Cargo.lock (muda, winit);
 # pinned exactly to the same versions.
 [target.'cfg(target_os = "macos")'.dev-dependencies]

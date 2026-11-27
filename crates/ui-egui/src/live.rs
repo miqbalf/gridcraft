@@ -87,6 +87,8 @@ pub const ROOM_SAVED_TEXT: &str = "Saved live. The server stores the file.";
 pub const ROOM_PENDING_TEXT: &str = "Not saved yet: your latest changes reach the server once the live link is back. They are kept.";
 /// Told when Save on a live workbook that is read-only for this window.
 pub const ROOM_READ_ONLY_TEXT: &str = "This file is read-only for you. Use Save As to keep a copy.";
+/// The status, and why typing is refused, while a desktop window waits for its first join.
+pub const FIRST_JOIN_TEXT: &str = "Connecting to live session…";
 /// Told when the live workbook is closed.
 pub const LIVE_ENDED_TEXT: &str = "Live editing ended because the workbook was closed.";
 /// The info bar's button for a waiting copy of unmerged edits, and the action it runs.
@@ -273,6 +275,10 @@ pub struct LiveUi {
     shown: Option<(String, String)>,
     /// Notices not shown yet, oldest first: the info bar shows one at a time.
     queue: VecDeque<(String, NoticeKind, bool)>,
+    /// Desktop live ([`crate::Services::room_saves`]): until the first join the workbook takes
+    /// no typing and says it is connecting, because a join that never happens closes it and opens
+    /// the copy on its own (nothing typed may be lost then). Cleared at the first join.
+    first_join: bool,
 }
 
 impl LiveUi {
@@ -295,7 +301,23 @@ impl LiveUi {
             blocked,
             shown: None,
             queue: VecDeque::new(),
+            first_join: false,
         }
+    }
+
+    /// Holds the workbook read-only until the first join (desktop live).
+    pub fn hold_until_joined(&mut self) {
+        self.first_join = !self.joined_once();
+    }
+
+    fn joined_once(&self) -> bool {
+        !matches!(self.live.status(), LiveStatus::Connecting)
+    }
+
+    /// Whether the workbook is held read-only until the first join.
+    #[must_use]
+    pub fn waiting_for_first_join(&self) -> bool {
+        self.first_join
     }
 
     #[must_use]
@@ -371,6 +393,7 @@ impl LiveUi {
     #[must_use]
     pub fn status_text(&self, lang: Language) -> (String, bool) {
         match self.live.status() {
+            LiveStatus::Connecting if self.first_join => (lang.tr(FIRST_JOIN_TEXT).to_owned(), false),
             LiveStatus::Connecting => (lang.tr("Connecting…").to_owned(), false),
             LiveStatus::Live { saved_at: None } => (lang.tr("Live").to_owned(), false),
             LiveStatus::Live { saved_at: Some(at) } => (lang.tr_fill("Live, saved {time}", &[("time", at)]), false),
@@ -527,6 +550,9 @@ impl SheetApp {
     /// (or while it connects, when the entry is held until the link is up).
     pub(crate) fn live_read_only(&self) -> Option<String> {
         let live = self.live.as_ref()?;
+        if live.first_join {
+            return Some(self.ui.language.tr(FIRST_JOIN_TEXT).to_owned());
+        }
         matches!(live.live.status(), LiveStatus::ReadOnly).then(|| self.ui.language.tr(&live.live.core().not_editable()).to_owned())
     }
 
@@ -539,6 +565,10 @@ impl SheetApp {
     pub(crate) fn engine_run(&mut self, id: &str, params: Json) -> Result<Json, String> {
         let target = self.session.active().map(|d| d.uid);
         match self.live.as_mut().filter(|lu| target == Some(lu.doc)) {
+            // Before the first join (desktop) only commands that change nothing shared run.
+            Some(lu) if lu.first_join && gridcraft_live::gate::class(id) != gridcraft_live::gate::Class::Local => {
+                Err(self.ui.language.tr(FIRST_JOIN_TEXT).to_owned())
+            }
             Some(lu) => match lu.live.run(&mut self.session, id, params)? {
                 Ran::Done(done) => Ok(done),
                 Ran::Queued => Ok(json!({"queued": true})),
@@ -825,6 +855,9 @@ impl SheetApp {
         let notes = lu.live.take_notices();
         lu.live.send_selection(&self.session);
         self.room_keeps_saved(&lu);
+        if lu.first_join && lu.joined_once() {
+            lu.first_join = false;
+        }
         ctx.data_mut(|d| d.insert_temp(egui::Id::NULL.with(BLOCKED_ID), lu.blocked.clone()));
         // A name tag that is showing is due to go: wake up for it.
         let due = lu

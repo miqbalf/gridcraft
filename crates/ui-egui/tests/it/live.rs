@@ -1220,3 +1220,26 @@ fn a_web_window_saves_its_live_workbook_as_before() {
     let _ = h.state_mut().run("file.save", json!({}));
     assert!(asked.load(std::sync::atomic::Ordering::SeqCst) > 0, "an unnamed workbook asks where to save");
 }
+
+#[test]
+fn before_the_first_join_a_desktop_window_takes_no_typing_and_says_it_connects() {
+    let (mut rig, app, _) = rig_room_saves();
+    // The link is down before the window ever joined.
+    rig.relay.drop_link(&rig.alice);
+    let mut h = harness(app);
+    settle(&mut rig, &mut h);
+    assert!(h.state().live().expect("live").waiting_for_first_join(), "held until the first join");
+    let (status, _) = h.state().live().expect("live").status_text(gridcraft_ui_egui::i18n::Language::default());
+    assert!(status.contains("Connecting to live session"), "{status}");
+    let before = value(h.state(), 0, "B2");
+    h.state_mut().begin_edit(Some("typed early".into()), false);
+    assert!(h.state().editor.is_none(), "no cell editor opens, so no draft can be lost");
+    assert!(h.state_mut().run("cell.set", json!({"cell": "B2", "input": "typed early"})).is_err(), "nor does a command change it");
+    assert_eq!(value(h.state(), 0, "B2"), before, "the workbook is unchanged");
+    rig.relay.restore_link(&rig.alice);
+    settle(&mut rig, &mut h);
+    assert!(!h.state().live().expect("live").waiting_for_first_join(), "joined");
+    h.state_mut().run("cell.set", json!({"cell": "B2", "input": "5"})).expect("editable once joined");
+    settle(&mut rig, &mut h);
+    assert_eq!(bob_value(&rig, "B2"), Value::Number(5.0));
+}
