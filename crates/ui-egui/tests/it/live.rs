@@ -1054,29 +1054,89 @@ fn a_renewed_ticket_switches_links_and_no_typing_is_lost() {
     assert!(shown.is_empty(), "the switch showed nothing in the info bar: {shown:?}");
 }
 
-/// SH2: on the web the page's file opens live (the live join opens the room's workbook, not the
-/// page's own open), and Share must still ask the page for it.
-#[test]
-fn share_asks_the_page_for_the_live_workbook_it_joined() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let relay = MemRelay::new();
-    let bytes = base_bytes();
-    let hub = relay.connect("alice", "Alice", true);
-    let mut session = Session::new();
-    let base = BaseFile { bytes: &bytes, name: FILE, expected_sha256: None };
-    let live = GridLive::start(DynHub(Box::new(hub)), ROOM, &base, Access::Edit, "alice", &mut session).expect("starts");
-    let asked = Arc::new(AtomicUsize::new(0));
-    let counter = asked.clone();
+// --- Share for the page's live workbook (SH2) ------------------------------------------------
+
+/// A window framed by a page that shares files: its services, and the count of share requests.
+fn page_sharing() -> (Services, Arc<std::sync::atomic::AtomicUsize>) {
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&asked);
     let services = Services {
         host_share: Some(Box::new(move || {
-            counter.fetch_add(1, Ordering::SeqCst);
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         })),
         ..Default::default()
     };
+    (services, asked)
+}
+
+/// Share, run now, asks the page once more and shows no "No Nextcloud connected".
+fn share_asks_the_page(app: &mut SheetApp, asked: &std::sync::atomic::AtomicUsize, case: &str) {
+    let before = asked.load(std::sync::atomic::Ordering::SeqCst);
+    app.toast = None;
+    let r = app.run("file.share", json!({})).expect("Share runs");
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), before + 1, "{case}: {r}: the page is asked to share the live workbook it joined");
+    assert!(app.toast.is_none(), "{case}: no \"No Nextcloud connected\" for the page's own live file");
+}
+
+/// The page's window on a live session started on `hub` with `access`, attached after the window
+/// exists, as the web host does.
+fn page_window(hub: DynHub, access: Access, uid: &str) -> (SheetApp, Arc<std::sync::atomic::AtomicUsize>) {
+    let bytes = base_bytes();
+    let mut session = Session::new();
+    let base = BaseFile { bytes: &bytes, name: FILE, expected_sha256: None };
+    let live = GridLive::start(hub, ROOM, &base, access, uid, &mut session).expect("starts");
+    let (services, asked) = page_sharing();
     let mut app = crate::common::prepare(SheetApp::new(session, services));
     app.attach_live(live).expect("attaches");
-    let r = app.run("file.share", json!({})).expect("Share runs");
-    assert_eq!(asked.load(Ordering::SeqCst), 1, "{r}: the page is asked to share the live workbook it joined");
-    assert!(app.toast.is_none(), "no \"No Nextcloud connected\" for the page's own live file");
+    (app, asked)
+}
+
+/// On the web the page's file opens live (the live join opens the room's workbook, not the page's
+/// own open), and Share must still ask the page for it.
+#[test]
+fn share_asks_the_page_for_the_live_workbook_it_joined() {
+    let relay = MemRelay::new();
+    let (mut app, asked) = page_window(DynHub(Box::new(relay.connect("alice", "Alice", true))), Access::Edit, "alice");
+    share_asks_the_page(&mut app, &asked, "an editor");
+}
+
+/// A read-only or guest ticket: Share is not an edit, so the live gate does not refuse it; whether
+/// this person may share is the Nextcloud page's call.
+#[test]
+fn share_asks_the_page_for_a_viewer_of_the_live_workbook() {
+    let relay = MemRelay::new();
+    let bytes = base_bytes();
+    let _bob = join(&relay, &bytes, "bob", "Bob", Access::Edit);
+    let (mut app, asked) = page_window(DynHub(Box::new(relay.connect("vic", "Vic", false))), Access::Read, "vic");
+    share_asks_the_page(&mut app, &asked, "a read-only viewer");
+}
+
+/// The live session ended (the page reopened the file elsewhere, access changed): the workbook is
+/// still the page's file, so Share still asks the page.
+#[test]
+fn share_asks_the_page_after_the_live_session_ended() {
+    let relay = MemRelay::new();
+    let (app, asked) = page_window(DynHub(Box::new(relay.connect("alice", "Alice", true))), Access::Edit, "alice");
+    let mut h = harness(app);
+    h.run_steps(3);
+    h.state_mut().end_live_for("The live session was restarted. Reopen the file.");
+    h.run_steps(3);
+    assert!(h.state().live().is_none(), "the window left the live session");
+    share_asks_the_page(h.state_mut(), &asked, "after the live session ended");
+}
+
+/// A renewed ticket switches the link under the same session: Share keeps asking the page.
+#[test]
+fn share_asks_the_page_after_a_renewed_ticket() {
+    let relay = MemRelay::new();
+    let to = relay.clone();
+    let hub = DynHub::renewing(relay.connect("alice", "Alice", true), move |_: &craft_collab::Reopen<'_>| Ok(to.connect("alice", "Alice", true)));
+    let (app, asked) = page_window(hub, Access::Edit, "alice");
+    let mut h = harness(app);
+    h.run_steps(3);
+    h.state_mut().live_mut().expect("live").live_mut().renew_ticket("renewed".to_owned());
+    h.run_steps(10);
+    assert!(h.state().live().is_some(), "still live after the renewal");
+    share_asks_the_page(h.state_mut(), &asked, "after a renewed ticket");
 }
