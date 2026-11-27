@@ -19,7 +19,7 @@ pub(crate) struct Runtime {
 
 impl Default for Runtime {
     fn default() -> Self {
-        Self { updater: Updater::new(&crate::UPDATE_APP, VERSION), startup: false, manual: false }
+        Self { updater: Updater::new(&crate::UPDATE_APP, VERSION).with_source(crate::fork_update_source()), startup: false, manual: false }
     }
 }
 
