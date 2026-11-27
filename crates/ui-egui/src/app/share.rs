@@ -26,7 +26,10 @@ impl SheetApp {
         let path = doc.path.as_deref();
         if self.services.host_share.is_some() {
             // The page shares the one workbook it opened in the frame; a workbook made or opened
-            // in the frame is not that file, even under the same name.
+            // in the frame is not that file, even under the same name. Bound by uid alone: on the
+            // web GridCraft never sets the page's workbook's path (a name the page answers with
+            // only retitles it), and the page always shares the file it opened. DeckCraft also
+            // compares the path, because its host saves set it (SH2 fix 1, review I3).
             return if self.services.host_doc == Some(doc.uid) { ShareRoute::NextcloudWebHost } else { ShareRoute::None };
         }
         match (self.share_routes.get(&doc.uid), path) {
