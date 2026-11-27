@@ -155,6 +155,7 @@ pub const LOCAL: &[&str] = &[
     "file.save",
     "file.saveAs",
     "file.saveBytes",
+    "file.share",
     "formulas.calculateSheet",
     "formulas.dateTime",
     "formulas.errorChecking",
