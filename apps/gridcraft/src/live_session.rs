@@ -117,7 +117,7 @@ pub fn fallback(session_file: &Path, why: &str) {
 
 impl DesktopLive {
     /// Gives up on a first join that was refused or did not happen in time: tells the launcher,
-    /// and closes the live workbook; the copy opens on its own at the next frame.
+    /// opens the copy on its own and closes the live workbook; the next frame says why.
     fn give_up(&mut self, app: &mut SheetApp, now: f64) {
         if self.went_live || self.falling_back.is_some() {
             return;
@@ -139,11 +139,17 @@ impl DesktopLive {
         log::warn!("live: not joined, opening the copy on its own: {why}");
         fallback(&self.session_file, &why);
         let doc = lu.live().doc();
+        // The copy opens before the live workbook closes: a window closes with its last
+        // workbook, and the app with its last window, so the copy would never show.
+        app.open_path(&self.working.to_string_lossy());
         if let Some(i) = app.session.document_index(doc) {
             app.session.set_active(i);
             if let Err(e) = app.run("file.close", serde_json::json!({"force": true, "document": true})) {
                 log::warn!("live: the live workbook did not close: {e}");
             }
+        }
+        if let Some(i) = app.session.documents().iter().position(|d| d.path.as_deref().map(Path::new) == Some(self.working.as_path())) {
+            app.session.set_active(i);
         }
         self.falling_back = Some(why);
     }
@@ -155,8 +161,8 @@ impl DesktopLive {
             return;
         }
         let now = ctx.input(|i| i.time);
+        // The copy is open already (`give_up`); said once the live session's own ending is shown.
         if let Some(why) = self.falling_back.as_ref().filter(|_| app.live().is_none()) {
-            app.open_path(&self.working.to_string_lossy());
             tell_not_live(app, why);
             self.done = true;
             return;
@@ -271,9 +277,14 @@ mod tests {
         assert!(!gridcraft_live::desktop::fallback_path(&path).exists(), "not given up yet");
         // Past the join wait: the launcher is told, then the copy opens on its own.
         frame(&ctx, &mut app, &mut desk, JOIN_GIVE_UP_SECS + 1.0);
+        // Never a frame without a workbook: the window closes with its last one, and the app with it.
+        let shown = app.session.active().and_then(|d| d.path.clone());
+        assert_eq!(shown.as_deref().map(Path::new), Some(working.as_path()), "the copy is open in the frame the live workbook closes");
         frame(&ctx, &mut app, &mut desk, JOIN_GIVE_UP_SECS + 2.0);
         frame(&ctx, &mut app, &mut desk, JOIN_GIVE_UP_SECS + 3.0);
         assert!(reason(&path).contains("could not be reached"), "{}", reason(&path));
+        let told = app.notice.as_ref().map(|n| n.text.clone()).unwrap_or_default();
+        assert!(told.contains("could not be reached"), "the window says why it isn't live: {told:?}");
         assert!(app.live().is_none(), "no longer live");
         let doc = app.session.active().expect("the copy is open");
         assert_eq!(doc.path.as_deref().map(Path::new), Some(working.as_path()), "the launcher's copy, saved where it lies");
