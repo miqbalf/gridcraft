@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use craft_live::Access;
-use gridcraft_live::desktop::{ACCESS_CHANGED_TEXT, fallback_path, write_fallback, RESTARTED_TEXT, Rewrite, SessionError, SessionFile, SessionWatch, WATCH_SECS};
+use gridcraft_live::desktop::{
+    ACCESS_CHANGED_TEXT, RESTARTED_TEXT, Rewrite, SessionError, SessionFile, SessionWatch, WATCH_SECS, fallback_path, write_fallback,
+};
 use serde_json::{Value as Json, json};
 use sha2::{Digest, Sha256};
 
@@ -114,7 +116,10 @@ fn the_room_opens_only_on_its_pinned_base() {
     let file = parse(&session(json!({}))).unwrap();
     let (bytes, _) = file.base_bytes(&working).expect("the working copy is the base");
     assert_eq!(bytes, b"base");
-    let prod = parse(&session(json!({"app": "gridcraft", "base": {"url": "https://cloud.example/apps/craft_office/live/base/r?sha256=x", "sha256": hex(b"base")}}))).unwrap();
+    let prod = parse(&session(
+        json!({"app": "gridcraft", "base": {"url": "https://cloud.example/apps/craft_office/live/base/r?sha256=x", "sha256": hex(b"base")}}),
+    ))
+    .unwrap();
     assert!(prod.base_bytes(&working).is_ok(), "the ticket's base, url and all, is read for its hash");
     std::fs::write(&working, b"edited since").unwrap();
     assert_eq!(file.base_bytes(&working).map(|_| ()), Err(SessionError::BaseChanged), "another file is not joined");

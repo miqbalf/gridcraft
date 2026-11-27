@@ -19,10 +19,10 @@
 
 use std::path::{Path, PathBuf};
 
+use craft_live::LiveStatus;
 use gridcraft_engine::Session;
 use gridcraft_live::desktop::{Rewrite, SessionFile, SessionWatch};
 use gridcraft_live::{BaseFile, GridLive, schema};
-use craft_live::LiveStatus;
 use gridcraft_ui_egui::live::{DynHub, Live};
 use gridcraft_ui_egui::{Notice, NoticeKind, SheetApp};
 
@@ -77,17 +77,20 @@ pub fn start(session_file: &Path, working: &Path, session: &mut Session) -> Resu
     // This computer's date and time, for the name of a copy of unmerged edits.
     live.set_wall_clock(Box::new(|| chrono::Local::now().naive_local()));
     log::info!("live: joining room {} for file {:?}", file.room, file.file_id);
-    Ok((live, DesktopLive {
-        watch: SessionWatch::new(session_file, &file),
-        session_file: session_file.to_owned(),
-        working: working.to_owned(),
-        first_frame: None,
-        went_live: false,
-        falling_back: None,
-        done: false,
-        told_not_saving: false,
-        _rt: rt,
-    }))
+    Ok((
+        live,
+        DesktopLive {
+            watch: SessionWatch::new(session_file, &file),
+            session_file: session_file.to_owned(),
+            working: working.to_owned(),
+            first_frame: None,
+            went_live: false,
+            falling_back: None,
+            done: false,
+            told_not_saving: false,
+            _rt: rt,
+        },
+    ))
 }
 
 /// [`start`], and when it fails, the fallback signal for the launcher ([`fallback`]).
