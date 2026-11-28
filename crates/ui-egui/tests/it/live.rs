@@ -774,7 +774,10 @@ fn copy_services() -> (Services, Copies, Copies) {
             p.borrow_mut().push((name.to_owned(), bytes.to_vec()));
             Ok(Some(format!("copy-{}", p.borrow().len())))
         })),
-        download_copy: Some(Box::new(move |name: &str, bytes: &[u8]| d.borrow_mut().push((name.to_owned(), bytes.to_vec())))),
+        download_copy: Some(Box::new(move |name: &str, _mime: &str, bytes: &[u8]| {
+            d.borrow_mut().push((name.to_owned(), bytes.to_vec()));
+            Ok(())
+        })),
         ..Default::default()
     };
     (services, posted, downloaded)

@@ -770,7 +770,16 @@ impl SheetApp {
                 }
             };
         }
-        if let Some(download) = self.services.download_copy.as_ref().or(self.services.download.as_ref()) {
+        if let Some(download) = self.services.download_copy.as_ref() {
+            return match download(name, craft_share::export::mime_for_ext(name.rsplit_once('.').map_or("", |(_, ext)| ext)), bytes) {
+                Ok(()) => true,
+                Err(e) => {
+                    self.message = Some(("GridCraft".into(), e));
+                    false
+                }
+            };
+        }
+        if let Some(download) = self.services.download.as_ref() {
             download(name, bytes);
             return true;
         }

@@ -203,20 +203,22 @@ fn services() -> Services {
                 .pick_file()
                 .and_then(|p| p.to_str().map(str::to_string))
         })),
+        // Plain Save of a workbook with no file yet: the file it is saved to becomes its own, so
+        // only the workbook's own type is offered (copies in other types are Save As's).
         pick_save: Some(Box::new(|suggested: &str| {
-            let path = std::path::Path::new(suggested);
-            let stem = path.file_stem().and_then(std::ffi::OsStr::to_str).unwrap_or("Book1").to_string();
-            // The suggested name's type (an export asks for .pdf, .csv or .html) comes first.
-            const TYPES: [(&str, &str); 4] =
-                [("Excel Workbook (.xlsx)", "xlsx"), ("CSV UTF-8 (.csv)", "csv"), ("Web Page (.html)", "html"), ("PDF (.pdf)", "pdf")];
-            let ext = path.extension().and_then(std::ffi::OsStr::to_str).map(str::to_ascii_lowercase).filter(|e| TYPES.iter().any(|(_, x)| x == e));
-            let ext = ext.unwrap_or_else(|| "xlsx".to_string());
-            let mut dialog = rfd::FileDialog::new().set_file_name(format!("{stem}.{ext}"));
-            for (label, x) in TYPES.iter().filter(|(_, x)| *x == ext).chain(TYPES.iter().filter(|(_, x)| *x != ext)) {
-                dialog = dialog.add_filter(*label, &[*x]);
+            let stem = std::path::Path::new(suggested).file_stem().and_then(std::ffi::OsStr::to_str).unwrap_or("Book1").to_string();
+            let mut dialog = rfd::FileDialog::new().set_file_name(format!("{stem}.xlsx"));
+            for (label, ext) in PLAIN_SAVE_TYPES {
+                dialog = dialog.add_filter(label, &[ext]);
             }
             dialog.save_file().and_then(|p| p.to_str().map(str::to_string))
         })),
+        // Save As / Export: the system dialog for the one type chosen; the copy is written where
+        // it says and the workbook keeps its own file.
+        pick_save_as: Some(Box::new(|suggested: &str, label: &str, ext: &str| {
+            rfd::FileDialog::new().set_file_name(suggested).add_filter(label, &[ext]).save_file().and_then(|p| p.to_str().map(str::to_string))
+        })),
+        runtime: Some(gridcraft_ui_egui::craft_share::export::Runtime::Desktop),
         open_url: Some(Box::new(|url: &str| open_with_system(url))),
         // Share: Nextcloud sharing in the browser for a workbook in a folder the Nextcloud client
         // syncs; anywhere else "No Nextcloud connected".
@@ -229,6 +231,9 @@ fn services() -> Services {
         ..Default::default()
     }
 }
+
+/// The types plain Save's dialog offers for a workbook with no file yet: the workbook's own.
+const PLAIN_SAVE_TYPES: [(&str, &str); 1] = [("Excel Workbook (.xlsx)", "xlsx")];
 
 /// Opens a URL or file with the system's default application.
 fn open_with_system(target: &str) {
@@ -504,5 +509,29 @@ mod packaging_tests {
         for ext in &mac {
             assert!(FileKind::from_path(&format!("book.{ext}")).is_some(), "GridCraft doesn't open .{ext}");
         }
+    }
+}
+
+#[cfg(test)]
+mod plain_save_tests {
+    /// Plain Save of a new workbook offers only types that become the workbook's own file: a
+    /// save to any of them gives the workbook that path and clears its unsaved state (a CSV,
+    /// web page or PDF would only be exported, leaving the workbook unsaved).
+    #[test]
+    fn plain_save_offers_only_types_the_workbook_keeps_as_its_file() {
+        let dir = std::env::temp_dir().join(format!("gridcraft-plain-save-types-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!super::PLAIN_SAVE_TYPES.is_empty());
+        for (_, ext) in super::PLAIN_SAVE_TYPES {
+            let mut s = gridcraft_engine::Session::new();
+            s.new_workbook();
+            s.execute("cell.set", serde_json::json!({"cell": "A1", "input": "1"})).unwrap();
+            let path = dir.join(format!("Book.{ext}")).to_string_lossy().into_owned();
+            s.execute("file.save", serde_json::json!({"path": &path})).unwrap();
+            let d = s.doc().unwrap();
+            assert_eq!(d.path.as_deref(), Some(path.as_str()), ".{ext} becomes the workbook's file");
+            assert!(!d.is_dirty(), ".{ext} saves the workbook");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -3014,6 +3014,37 @@ fn save_as_into_another_folder_keeps_linked_workbooks_on_the_same_file() {
     std::fs::remove_dir_all(a).unwrap();
 }
 
+/// A copy encoded for another folder (`file.saveBytes {path}`, the desktop Save As copy) keeps the
+/// link on the same file, like `file.save`, and leaves the workbook on its own file: nothing is
+/// written and the workbook is neither re-pointed nor marked saved.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn save_bytes_for_a_path_rebases_links_and_leaves_the_workbook_alone() {
+    let nonce = unique_nonce();
+    let a = std::env::temp_dir().join(format!("gridcraft-copy-links-{}-{nonce}", std::process::id()));
+    let b = a.join("b");
+    std::fs::create_dir_all(&b).unwrap();
+    let dest = a.join("Dest.xlsx");
+    std::fs::write(&dest, linked_workbook("Source.xlsx")).unwrap();
+    let mut s = s();
+    s.execute("file.open", json!({"path": dest})).unwrap();
+    s.execute("cell.set", json!({"cell": "A2", "input": "1"})).unwrap();
+    let copy = b.join("Copy.xlsx");
+    let r = s.execute("file.saveBytes", json!({"path": copy})).unwrap();
+    assert_eq!(r["name"], "Copy.xlsx");
+    assert!(!copy.exists(), "saveBytes writes nothing");
+    std::fs::write(&copy, crate::io::base64_decode(r["base64"].as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!(link_target(&copy), "../Source.xlsx", "the link still names the same file from the copy's folder");
+    let d = s.doc().unwrap();
+    assert_eq!(d.path.as_deref(), Some(dest.to_str().unwrap()), "the workbook keeps its own file");
+    assert!(d.is_dirty(), "and its unsaved changes");
+    // Without a path the bytes are the workbook's own, links unchanged.
+    let own = s.execute("file.saveBytes", json!({})).unwrap();
+    std::fs::write(&copy, crate::io::base64_decode(own["base64"].as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!(link_target(&copy), "Source.xlsx");
+    std::fs::remove_dir_all(a).unwrap();
+}
+
 /// A typo like `report.cvs` must not quietly write an XLSX under that name and adopt it as the
 /// document's file.
 #[test]

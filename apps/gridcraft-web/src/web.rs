@@ -199,7 +199,7 @@ impl eframe::App for WebShell {
 fn services(inbox: Inbox, ctx: egui::Context) -> Services {
     let open_inbox = inbox.clone();
     let picture_ctx = ctx.clone();
-    Services {
+    let mut services = Services {
         copy_html: Some(Box::new(copy_html)),
         open_async: Some(Box::new(move || {
             let inbox = open_inbox.clone();
@@ -228,19 +228,6 @@ fn services(inbox: Inbox, ctx: egui::Context) -> Services {
                 ctx.request_repaint();
             });
         })),
-        download: Some(Box::new(|name: &str, bytes: &[u8]| {
-            if let Err(e) = download(name, bytes) {
-                log::error!("download of {name} failed: {e}");
-            }
-        })),
-        // A copy of unmerged live edits the page could not store is downloaded, on the plain
-        // download: a save dialog the person cancels would report nothing back, and the window
-        // would count the copy as kept.
-        download_copy: Some(Box::new(|name: &str, bytes: &[u8]| {
-            if let Err(e) = download_plain(name, bytes) {
-                log::error!("download of {name} failed: {e}");
-            }
-        })),
         print: Some(Box::new(|bytes: &[u8]| {
             if let Err(e) = print_pdf(bytes) {
                 log::error!("print failed: {e}");
@@ -258,7 +245,19 @@ fn services(inbox: Inbox, ctx: egui::Context) -> Services {
         })),
         inbox: Some(inbox),
         ..Default::default()
-    }
+    };
+    // Save As and Export copies download, framed by a page or not (never handed to it); plain
+    // Save downloads too, until a hosting page takes it over (`host`).
+    crate::delivery::browser(
+        &mut services,
+        Box::new(|name: &str, mime: &str, bytes: &[u8]| craft_web_host::web::download(name, mime, bytes)),
+        Box::new(|name: &str, bytes: &[u8]| {
+            if let Err(e) = download(name, bytes) {
+                log::error!("download of {name} failed: {e}");
+            }
+        }),
+    );
+    services
 }
 
 /// Start inside the copy gesture; deferring `write` can lose browser user activation.
@@ -433,9 +432,7 @@ fn download(name: &str, bytes: &[u8]) -> Result<(), String> {
         // Anything but the user cancelling (no user gesture, a denied permission, a failed write)
         // falls back to an ordinary download, so a save never fails silently.
         let fallback = move |bytes: &[u8]| {
-            if let Some(w) = web_sys::window()
-                && let Err(e) = trigger_anchor_download(&w, &name_owned, bytes)
-            {
+            if let Err(e) = craft_web_host::web::download(&name_owned, mime_for(&name_owned), bytes) {
                 log::error!("download fallback failed: {e}");
             }
         };
@@ -464,7 +461,7 @@ fn download(name: &str, bytes: &[u8]) -> Result<(), String> {
     }
 
     // Fallback for browsers without showSaveFilePicker (e.g. Firefox, Safari):
-    trigger_anchor_download(&window, name, bytes)
+    craft_web_host::web::download(name, mime_for(name), bytes)
 }
 
 async fn write_file_handle(handle: &JsValue, bytes: &[u8]) -> Result<(), String> {
@@ -492,29 +489,5 @@ async fn write_file_handle(handle: &JsValue, bytes: &[u8]) -> Result<(), String>
 /// The browser's plain download of `bytes` as `name` (no save dialog that could be cancelled
 /// unseen), for the copies of unmerged live edits.
 pub(crate) fn download_plain(name: &str, bytes: &[u8]) -> Result<(), String> {
-    let window = web_sys::window().ok_or("no window")?;
-    trigger_anchor_download(&window, name, bytes)
-}
-
-fn trigger_anchor_download(window: &web_sys::Window, name: &str, bytes: &[u8]) -> Result<(), String> {
-    let js = |e: wasm_bindgen::JsValue| format!("{e:?}");
-    let document = window.document().ok_or("no document")?;
-    let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(bytes));
-    let opts = web_sys::BlobPropertyBag::new();
-    opts.set_type(mime_for(name));
-    let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &opts).map_err(js)?;
-    let url = web_sys::Url::create_object_url_with_blob(&blob).map_err(js)?;
-    let a: web_sys::HtmlAnchorElement = document.create_element("a").map_err(js)?.dyn_into().map_err(|_| "not an anchor".to_string())?;
-    a.set_href(&url);
-    a.set_download(name);
-    a.style().set_property("display", "none").map_err(js)?;
-    let body = document.body().ok_or("no body")?;
-    body.append_child(&a).map_err(js)?;
-    a.click();
-    a.remove();
-    let revoke = wasm_bindgen::closure::Closure::once_into_js(move || {
-        web_sys::Url::revoke_object_url(&url).ok();
-    });
-    window.set_timeout_with_callback_and_timeout_and_arguments_0(revoke.unchecked_ref(), 10_000).map_err(js)?;
-    Ok(())
+    craft_web_host::web::download(name, mime_for(name), bytes)
 }

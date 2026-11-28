@@ -1,42 +1,6 @@
 use super::{Json, SheetApp, json, now_ms, printing};
 
 impl SheetApp {
-    /// Web: `file.exportPdf` without a path returns the PDF as base64; hand it to the browser as a download.
-    pub(super) fn deliver_pdf(&self, result: &Json) {
-        if result.get("path").is_some() {
-            return;
-        }
-        if let Some(dl) = &self.services.download
-            && let Some(b) = result.get("base64").and_then(Json::as_str).and_then(gridcraft_engine::io::base64_decode)
-        {
-            let title = self.session.active().map(|d| d.display_title()).unwrap_or_else(|| "Book1".into());
-            dl(&std::path::Path::new(&title).with_extension("pdf").to_string_lossy(), &b);
-        }
-    }
-
-    /// Asks for a `.pdf` path with the save picker, then re-runs `file.exportPdf` with it. Other
-    /// params (range, sheets, fitToPage) are kept. A cancelled picker does nothing.
-    pub(super) fn export_pdf_with_picker(&mut self, mut params: Json) {
-        if !self.commit_edit(0, 0, false, false) {
-            return;
-        }
-        let title = self.session.active().map(|d| d.display_title()).unwrap_or_else(|| "Book1".into());
-        let stem = std::path::Path::new(&title).file_stem().and_then(std::ffi::OsStr::to_str).unwrap_or("Book1").to_string();
-        let Some(pick) = &self.services.pick_save else { return };
-        let Some(path) = pick(&format!("{stem}.pdf")) else { return };
-        // The picker may suggest a workbook extension; the export writes a PDF.
-        let path = std::path::Path::new(&path).with_extension("pdf").to_string_lossy().into_owned();
-        match &mut params {
-            Json::Object(map) => {
-                map.insert("path".into(), Json::String(path));
-            }
-            other => *other = json!({"path": path}),
-        }
-        if let Err(e) = self.run("file.exportPdf", params) {
-            self.alert(e);
-        }
-    }
-
     /// Builds the selected sheets' print-ready PDF and hands it to the desktop worker or the
     /// browser. Rendering errors use the usual alert; asynchronous spooler errors stay visible
     /// on the Print page. The engine command still returns PDF bytes without submitting.

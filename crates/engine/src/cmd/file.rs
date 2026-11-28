@@ -10,8 +10,8 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!(noundo "file.new", "New Workbook", ["File"], Some("Cmd+N"), "{sample?: \"budget\"|\"sales\"|\"grades\"}", always, new_workbook),
         cmd!(noundo "file.open", "Open…", ["File"], Some("Cmd+O"), "{path} | {name, base64}, plus {password} for a password-protected workbook and {csvAsText?: bool} to keep every csv/tsv/txt field as text, with no number or date conversion (xlsx, xlsm, xls import, xlsb and ods data import, csv, tsv, txt, json)", always, open),
         cmd!(noundo "file.save", "Save", ["File"], Some("Cmd+S"), "{path?} (xlsx by default; .csv/.tsv/.json/.html/.pdf by extension)", has_doc, save),
-        cmd!(noundo "file.saveAs", "Save As…", ["File"], Some("Cmd+Shift+S"), "{path} (.xlsx, .csv, .tsv, .json, .html, or .pdf: a PDF of the active sheet)", has_doc, save_as),
-        cmd!(query "file.saveBytes", "Encode Workbook", [], None, "{format?: xlsx|csv|tsv|json|html} → {base64}", has_doc, save_bytes),
+        cmd!(noundo "file.saveAs", "Save As…", ["File"], Some("Cmd+Shift+S"), "{path} (.xlsx, .csv, .tsv, .json, .html, or .pdf: a PDF of the active sheet) | {format?: xlsx|csv|tsv|json|html|pdf} (no path: the window saves a copy, a download on the web, the save dialog on the desktop; the workbook keeps its file)", has_doc, save_as),
+        cmd!(query "file.saveBytes", "Encode Workbook", [], None, "{format?: xlsx|csv|tsv|json|html} | {path} (encoded for that file: links rebased for its folder, its name in PivotChart links; nothing is written) → {name, base64}", has_doc, save_bytes),
         cmd!(noundo "file.close", "Close", ["File"], Some("Cmd+W"), "{force?: bool, document?: bool} (closes the active window, or with `document` the workbook and all its windows; the workbook closes with its last window)", has_doc, close),
         cmd!(noundo "file.exportCsv", "Export as CSV", ["File", "Export"], None, "{path, sheet?, values?: bool} → {path, bytes}: writes the cells as displayed, like Excel's Save As CSV; `values: true` writes raw values instead (full-precision numbers, ISO 8601 dates and times, TRUE/FALSE)", has_doc, |s, p| export(s, p, "csv")),
         cmd!(noundo "file.exportHtml", "Save as Web Page", ["File", "Export"], None, "{path}", has_doc, |s, p| export(s, p, "html")),
@@ -152,17 +152,33 @@ fn save(s: &mut Session, p: &Json) -> Result<Json> {
     Ok(json!({"path": path, "bytes": bytes.len()}))
 }
 
+/// With a `path`, automation writes the file there (and an `.xlsx`/`.json` becomes the workbook's
+/// file). Without one the window's Save As saves a copy (`saveAsCopy`): the File tab's Save As
+/// page, or the copy in `format` at once.
 fn save_as(s: &mut Session, p: &Json) -> Result<Json> {
     if str_param(p, "path").is_none() {
-        s.ui_requests.push(crate::UiRequest::Dialog("saveAs".into(), json!({})));
+        let request = match str_param(p, "format") {
+            Some(format) => json!({"format": format}),
+            None => json!({}),
+        };
+        s.ui_requests.push(crate::UiRequest::Dialog("saveAsCopy".into(), request));
         return ok();
     }
     save(s, p)
 }
 
 fn save_bytes(s: &mut Session, p: &Json) -> Result<Json> {
-    let fmt = str_param(p, "format").unwrap_or("xlsx");
     let d = s.doc()?;
+    // A copy about to be written at `path` (Save As on the desktop) is encoded for that file:
+    // relative links to other workbooks are rewritten for its folder and its own name goes into
+    // a PivotChart's link, as `file.save` does, but nothing is written and the workbook keeps its
+    // own file and unsaved state.
+    if let Some(path) = str_param(p, "path").filter(|p| !p.is_empty()) {
+        let bytes = crate::io::save_file_bytes(&d.wb, path)?;
+        let name = std::path::Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or(path).to_string();
+        return Ok(json!({"name": name, "base64": crate::io::base64_encode(&bytes), "bytes": bytes.len()}));
+    }
+    let fmt = str_param(p, "format").unwrap_or("xlsx");
     let name = format!("{}.{fmt}", std::path::Path::new(&d.display_title()).file_stem().and_then(|x| x.to_str()).unwrap_or("Book"));
     // The file name goes into a PivotChart's link to its PivotTable.
     let bytes = crate::io::save_bytes(&d.wb, &name)?;

@@ -23,9 +23,13 @@ struct Calls {
 type Log = Arc<Mutex<Calls>>;
 
 fn deliveries(log: &Log) -> Services {
-    let (d, u) = (log.clone(), log.clone());
+    let (d, c, u) = (log.clone(), log.clone(), log.clone());
     Services {
         download: Some(Box::new(move |name: &str, _: &[u8]| d.lock().unwrap().delivered.push(name.into()))),
+        download_copy: Some(Box::new(move |name: &str, _: &str, _: &[u8]| {
+            c.lock().unwrap().delivered.push(name.into());
+            Ok(())
+        })),
         open_url: Some(Box::new(move |url: &str| u.lock().unwrap().urls.push(url.into()))),
         ..Default::default()
     }
@@ -280,7 +284,8 @@ fn the_exports_stay_in_the_more_menu() {
     h.run_steps(3);
     h.get_by_label("Export as CSV…").click();
     h.run_steps(3);
-    assert_eq!(h.state().dialog.as_ref().map(|d| d.name.as_str()), Some("saveCopy"), "Export › CSV still saves a copy");
+    assert!(log.lock().unwrap().delivered.last().is_some_and(|n| n.ends_with(".csv")), "Export › CSV still saves a copy");
+    assert!(h.state().dialog.is_none());
 }
 
 #[test]

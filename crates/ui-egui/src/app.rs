@@ -23,8 +23,11 @@ mod keys;
 mod prefs;
 mod print;
 mod quit;
+mod save_as;
 mod share;
 mod view;
+
+pub use save_as::SAVE_AS;
 
 impl SheetApp {
     /// Constructs a `SheetApp` with default UI, grid, printing, control and screenshot state and the caller's session and services.

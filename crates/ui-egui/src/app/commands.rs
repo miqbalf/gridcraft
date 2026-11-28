@@ -99,10 +99,12 @@ impl SheetApp {
         {
             self.selected_object = Some(gridcraft_engine::model::ObjRef::new(gridcraft_engine::model::ObjKind::Chart, chart));
         }
+        // Automation's Export as PDF with no path gets the bytes back; on the web the browser also
+        // downloads them as a copy (`save_as`), never through the hosting page.
         if id == "file.exportPdf"
             && let Ok(r) = &r
         {
-            self.deliver_pdf(r);
+            self.deliver_pdf_result(r);
         }
         // The scan stopped at its cell allowance: say that some cells were not checked.
         if id == "data.circleInvalid"
@@ -131,10 +133,24 @@ impl SheetApp {
             }
             return self.print_now(params);
         }
-        // Menu-style Export as PDF with no file named: ask where to save, like Save As does.
-        // Programmatic callers use `run` and keep getting the PDF bytes back.
-        if id == "file.exportPdf" && self.services.pick_save.is_some() && params.get("path").and_then(Json::as_str).is_none_or(str::is_empty) {
-            return self.export_pdf_with_picker(params);
+        // Menus, the palette, key tips and buttons: Export with no file named is Save As in that
+        // type (`save_as`), the save dialog on the desktop and a download on the web. Automation
+        // calls `run` and keeps the commands' own behaviour (bytes back, `path` required).
+        if params.get("path").and_then(Json::as_str).is_none_or(str::is_empty) {
+            let copy = match id {
+                "file.exportPdf" => Some("pdf"),
+                // Options of their own (`sheet`, `values`) are the command's, not Save As's.
+                "file.exportCsv" | "file.exportHtml" if params.as_object().is_none_or(|m| m.keys().all(|k| k == "path")) => {
+                    Some(if id == "file.exportCsv" { "csv" } else { "html" })
+                }
+                _ => None,
+            };
+            if let Some(copy) = copy {
+                if let Err(e) = self.save_as_copy_with(copy, params) {
+                    self.alert(e);
+                }
+                return;
+            }
         }
         // Recommended Charts with no chart type named (ribbon button, keytip, command search) asks
         // which chart to insert; programmatic callers of `run` still get the first recommendation.
@@ -429,6 +445,9 @@ impl SheetApp {
                     self.open_path(&path);
                 }
             }
+            // Save As with no type chosen (`file.saveAs` without a path): a copy (`save_as`).
+            "saveAsCopy" => self.open_save_as(&params),
+            // Plain Save of a workbook with no file yet (`file.save`): its file is picked here.
             "saveAs" => {
                 let suggested = self.session.active().map(|d| d.display_title()).unwrap_or_else(|| "Book1".into());
                 if let Some(pick) = &self.services.pick_save {

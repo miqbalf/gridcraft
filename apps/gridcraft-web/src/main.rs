@@ -23,6 +23,8 @@
 
 #[cfg(any(target_arch = "wasm32", test))]
 mod api;
+#[cfg(any(target_arch = "wasm32", test))]
+mod delivery;
 #[cfg(target_arch = "wasm32")]
 mod host;
 #[cfg(any(target_arch = "wasm32", test))]

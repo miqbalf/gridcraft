@@ -1120,7 +1120,6 @@ impl Dialog {
             "assignAction" => return crate::control_ui::open_assign(app, &params),
             "formatControl" => return crate::control_ui::open_format(app, &params),
             "controlQuestion" => return crate::control_ui::open_question(&params),
-            "saveCopy" => Dialog::custom("saveCopy", "Save a Copy", json!({"format": p("format")})),
             "saveChanges" => Dialog::custom("saveChanges", "Save Changes?", json!({"title": p("title"), "quit": p("quit")})),
             "start" => Dialog::custom("start", "GridCraft", json!({})),
             "comments" => {

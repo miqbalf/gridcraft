@@ -38,9 +38,11 @@ craft-live-worker = { git = "https://github.com/miqbalf/collab-craft", rev = "d0
 # ui-egui, craft-print in the app, craft-web-api and craft-web-host in the web app) comes from one
 # craft-libs revision.
 # craft-update: app-specific pretend versions apply to startup and manual checks.
-# udinCraft: craft-update comes from the miqbalf fork (main, adbb69f0), whose `fork` rules
-# install this fork's unsigned builds from its udincraft-v* releases; the others stay on storytold.
-craft-update = { git = "https://github.com/miqbalf/craft-libs", rev = "adbb69f094e001aa53dbf78e8c0036b9c291d013", version = "=0.1.0", features = ["egui"] }
+# udinCraft: craft-update, craft-ui, craft-share, craft-web-host and craft-mcp-server come from
+# the miqbalf fork's main (3e44705e, which holds feat/save-as); craft-update's `fork` rules install
+# this fork's unsigned builds from its udincraft-v* releases. The others stay on storytold: their
+# revisions are not in the fork's main, so moving them would drop code.
+craft-update = { git = "https://github.com/miqbalf/craft-libs", rev = "3e44705e862d2b26bb74dd4d44e492c89fc4bffe", version = "=0.1.0", features = ["egui"] }
 # PDF RunLength encoding; this revision also fixes the vendored JBIG2 dependency for Git consumers.
 craft-pdf = { git = "https://github.com/storytold/craft-libs", rev = "ff142b3ad58aa7306676749428f4f2f9b277b5dd", version = "0.1.0", default-features = false }
 craft-stream-codecs = { git = "https://github.com/storytold/craft-libs", rev = "f7e0d7fd5577e102b4634bcbe062e649eb68165f", version = "0.1.0" }
@@ -62,7 +64,7 @@ craft-xlsx = { git = "https://github.com/storytold/craft-libs", rev = "a20dfd162
 craft-xml = { git = "https://github.com/storytold/craft-libs", rev = "a20dfd1623709b0bd9830106d3a92a1a443902e3", version = "0.1.0" }
 craft-xls = { git = "https://github.com/storytold/craft-libs", rev = "3b8e426a260695af840a2cd79a064d40778f939e", version = "0.1.0" }
 craft-drawingml = { git = "https://github.com/storytold/craft-libs", rev = "a20dfd1623709b0bd9830106d3a92a1a443902e3", version = "0.1.0" }
-craft-mcp-server = { git = "https://github.com/storytold/craft-libs", rev = "08da5e1486ee640de1d2cccd8fe8dd32b1d3b62c", version = "=0.1.0" }
+craft-mcp-server = { git = "https://github.com/miqbalf/craft-libs", rev = "3e44705e862d2b26bb74dd4d44e492c89fc4bffe", version = "=0.1.0" }
 
 # foundation
 thiserror = "2"

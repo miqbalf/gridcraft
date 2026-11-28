@@ -1075,7 +1075,7 @@ dependencies = [
 [[package]]
 name = "craft-fonts-build"
 version = "0.1.0"
-source = "git+https://github.com/miqbalf/craft-libs?rev=0434267cbc03705d1a4a22986bfc533ae92b812b#0434267cbc03705d1a4a22986bfc533ae92b812b"
+source = "git+https://github.com/miqbalf/craft-libs?rev=3e44705e862d2b26bb74dd4d44e492c89fc4bffe#3e44705e862d2b26bb74dd4d44e492c89fc4bffe"
 
 [[package]]
 name = "craft-gridcraft-format"
@@ -1090,7 +1090,7 @@ dependencies = [
 [[package]]
 name = "craft-i18n"
 version = "0.1.0"
-source = "git+https://github.com/miqbalf/craft-libs?rev=0434267cbc03705d1a4a22986bfc533ae92b812b#0434267cbc03705d1a4a22986bfc533ae92b812b"
+source = "git+https://github.com/miqbalf/craft-libs?rev=3e44705e862d2b26bb74dd4d44e492c89fc4bffe#3e44705e862d2b26bb74dd4d44e492c89fc4bffe"
 dependencies = [
  "fixed_decimal",
  "icu_decimal",
@@ -1154,7 +1154,7 @@ dependencies = [
 [[package]]
 name = "craft-mcp-server"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=08da5e1486ee640de1d2cccd8fe8dd32b1d3b62c#08da5e1486ee640de1d2cccd8fe8dd32b1d3b62c"
+source = "git+https://github.com/miqbalf/craft-libs?rev=3e44705e862d2b26bb74dd4d44e492c89fc4bffe#3e44705e862d2b26bb74dd4d44e492c89fc4bffe"
 dependencies = [
  "serde_json",
 ]
@@ -1238,7 +1238,7 @@ dependencies = [
 [[package]]
 name = "craft-share"
 version = "0.1.0"
-source = "git+https://github.com/miqbalf/craft-libs?rev=0434267cbc03705d1a4a22986bfc533ae92b812b#0434267cbc03705d1a4a22986bfc533ae92b812b"
+source = "git+https://github.com/miqbalf/craft-libs?rev=3e44705e862d2b26bb74dd4d44e492c89fc4bffe#3e44705e862d2b26bb74dd4d44e492c89fc4bffe"
 dependencies = [
  "serde",
 ]
@@ -1272,7 +1272,7 @@ dependencies = [
 [[package]]
 name = "craft-ui"
 version = "0.1.0"
-source = "git+https://github.com/miqbalf/craft-libs?rev=0434267cbc03705d1a4a22986bfc533ae92b812b#0434267cbc03705d1a4a22986bfc533ae92b812b"
+source = "git+https://github.com/miqbalf/craft-libs?rev=3e44705e862d2b26bb74dd4d44e492c89fc4bffe#3e44705e862d2b26bb74dd4d44e492c89fc4bffe"
 dependencies = [
  "craft-fonts-build",
  "craft-i18n",
@@ -1292,7 +1292,7 @@ dependencies = [
 [[package]]
 name = "craft-update"
 version = "0.1.0"
-source = "git+https://github.com/miqbalf/craft-libs?rev=adbb69f094e001aa53dbf78e8c0036b9c291d013#adbb69f094e001aa53dbf78e8c0036b9c291d013"
+source = "git+https://github.com/miqbalf/craft-libs?rev=3e44705e862d2b26bb74dd4d44e492c89fc4bffe#3e44705e862d2b26bb74dd4d44e492c89fc4bffe"
 dependencies = [
  "chrono",
  "dunce",
@@ -1330,7 +1330,7 @@ dependencies = [
 [[package]]
 name = "craft-web-host"
 version = "0.1.0"
-source = "git+https://github.com/miqbalf/craft-libs?rev=0434267cbc03705d1a4a22986bfc533ae92b812b#0434267cbc03705d1a4a22986bfc533ae92b812b"
+source = "git+https://github.com/miqbalf/craft-libs?rev=3e44705e862d2b26bb74dd4d44e492c89fc4bffe#3e44705e862d2b26bb74dd4d44e492c89fc4bffe"
 dependencies = [
  "serde_json",
  "wasm-bindgen",

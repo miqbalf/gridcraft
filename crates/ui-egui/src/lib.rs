@@ -95,6 +95,7 @@ mod clock;
 mod services;
 mod state;
 
+pub use app::SAVE_AS;
 pub use clock::{monotonic_ms, now_ms};
 /// The shared Share hook (`ShareRoute`, `desktop_route`, `sharing_url`, `NO_NEXTCLOUD`), at the
 /// revision this crate pins, for the desktop and web shells.

@@ -124,16 +124,11 @@ pub struct Backstage {
     preview_page: usize,
     /// Print: the preview for (document, revision, whole workbook, fit to page).
     preview: Option<((u64, u64, bool, bool), Json)>,
-    /// Save As: the chosen file type (an extension from [`SAVE_TYPES`]).
+    /// Save As: the chosen file type (an id from [`crate::SAVE_AS`]).
     pub save_format: &'static str,
     /// Home and Open: when the recent workbooks were last changed.
     recent: RecentFiles,
 }
-
-/// Save As file types: (extension, label). The first is the workbook itself; the others are
-/// exports that leave the workbook's own file and unsaved state alone.
-pub const SAVE_TYPES: [(&str, &str); 4] =
-    [("xlsx", "Excel Workbook (*.xlsx)"), ("csv", "CSV UTF-8 (Comma delimited) (*.csv)"), ("html", "Web Page (*.html)"), ("pdf", "PDF (*.pdf)")];
 
 impl Backstage {
     pub fn new(page: Page) -> Backstage {
@@ -252,8 +247,11 @@ pub fn show(app: &mut SheetApp, ui: &mut Ui) {
     }
 }
 
-/// Save: saves a workbook that has a file and returns to the sheet; a new workbook goes to the
-/// Save As page first, like Excel's.
+/// Save: plain Save. A workbook with a file saves it and returns to the sheet. A new workbook
+/// gets its file as it always did (the Save As page is only for copies now, so it no longer goes
+/// there): the save picker on the desktop, where the view returns to the sheet only once the
+/// workbook has its file (a cancelled pick keeps the view); a download or the hosting page on the
+/// web.
 fn save(app: &mut SheetApp, out: &mut Outcome) {
     if !app.commit_edit(0, 0, false, false) {
         return;
@@ -261,8 +259,13 @@ fn save(app: &mut SheetApp, out: &mut Outcome) {
     if app.session.active().is_some_and(|d| d.path.is_some()) {
         app.run_or_alert("file.save", json!({}));
         out.close = true;
-    } else {
-        out.page = Some(Page::SaveAs);
+        return;
+    }
+    let before = app.session.active().map(|d| (d.path.clone(), d.is_dirty()));
+    app.open_dialog("saveAs", json!({}));
+    let after = app.session.active().map(|d| (d.path.clone(), d.is_dirty()));
+    if after != before || app.services.pick_save.is_none() {
+        out.close = true;
     }
 }
 
@@ -395,6 +398,7 @@ fn recent_list(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &mut Ou
             t.text_dim,
         );
     }
+    #[cfg(not(target_arch = "wasm32"))]
     let now = crate::now_ms() / 1000.0;
     for path in app.ui.recent.iter().take(limit).cloned().collect::<Vec<_>>() {
         let (name, folder) = split_path(&path);
@@ -492,7 +496,9 @@ fn ask(_ctx: egui::Context, _paths: Vec<String>, _found: Arc<Mutex<HashMap<Strin
 
 /// How long ago, in words. The clock's time zone isn't known here, so the list tells ages rather
 /// than dates, which could be a day out. From two days on the counts are never one, so each
-/// language needs one form of "days", "weeks", "months" and "years".
+/// language needs one form of "days", "weeks", "months" and "years". Desktop only: the web build
+/// has no file times.
+#[cfg(not(target_arch = "wasm32"))]
 fn age(lang: Language, seconds: f64) -> String {
     const DAY: f64 = 86_400.0;
     let s = if seconds.is_finite() { seconds.max(0.0) } else { 0.0 };
@@ -668,22 +674,23 @@ fn info(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage) {
     });
 }
 
-/// Draws the Save As type picker and action: xlsx opens the `saveAs` dialog, other types export, and the page closes when the save/export succeeds (or a web download handles it).
+/// Draws the Save As type picker and action. Every type is a copy (`SheetApp::save_as_copy`):
+/// the page closes once it is delivered, and the workbook keeps its own file.
 fn save_as(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &mut Outcome) {
     let lang = app.ui.language;
     dim(ui, lang.tr("Save the workbook under another name or in another folder."));
     ui.add_space(14.0);
-    let fmt = bs.save_format;
-    let current = SAVE_TYPES.iter().find(|(ext, _)| *ext == fmt).map_or("Excel Workbook (*.xlsx)", |(_, label)| *label);
+    let formats = crate::SAVE_AS.formats();
+    let Some(current) = crate::SAVE_AS.get(bs.save_format).or_else(|| formats.first().copied()) else { return };
     ui.horizontal(|ui| {
         let label = ui.label(lang.tr("Save as type"));
         craft_ui::ComboBox::from_id_salt("backstage_save_type")
             .width(280.0)
-            .selected_text(lang.tr(current))
+            .selected_text(lang.tr(current.label))
             .show_ui(ui, |ui| {
-                for (ext, label) in SAVE_TYPES {
-                    if ui.selectable_label(fmt == ext, lang.tr(label)).clicked() {
-                        bs.save_format = ext;
+                for f in formats {
+                    if ui.selectable_label(current.id == f.id, lang.tr(f.label)).clicked() {
+                        bs.save_format = f.id;
                     }
                 }
             })
@@ -691,29 +698,18 @@ fn save_as(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &mut Outcom
             .labelled_by(label.id);
     });
     ui.add_space(14.0);
-    // Desktop: the system Save dialog. Web: the file downloads.
-    let web = app.services.pick_save.is_none() && app.services.download.is_some();
-    let label = if web { format!("{} (.{fmt})", lang.tr("Download")) } else { lang.tr("Browse…").to_string() };
-    if square_button(ui, Icon::OpenFolder, &label).clicked() && app.commit_edit(0, 0, false, false) {
-        if fmt == "xlsx" {
-            let before = app.session.active().map(|d| (d.path.clone(), d.is_dirty()));
-            app.open_dialog("saveAs", json!({}));
-            let after = app.session.active().map(|d| (d.path.clone(), d.is_dirty()));
-            if after != before || app.services.pick_save.is_none() {
-                out.close = true;
-            }
-        } else if export_as(app, fmt) {
-            out.close = true;
-        }
+    // Desktop: the system Save dialog. Web: the copy downloads.
+    let download = app.save_as_runtime().save_as_delivery() == craft_share::export::Delivery::Download;
+    let label = if download { format!("{} (.{})", lang.tr("Download"), current.ext) } else { lang.tr("Browse…").to_string() };
+    if square_button(ui, Icon::OpenFolder, &label).clicked() && app.save_as_copy_or_alert(current.id) {
+        out.close = true;
     }
-    ui.add_space(18.0);
-    dim(ui, lang.tr("A CSV file, web page or PDF is a copy: the workbook keeps its own file."));
 }
 
 fn export(app: &mut SheetApp, ui: &mut Ui, out: &mut Outcome) {
     let lang = app.ui.language;
     if action_row(ui, Icon::Paper, lang.tr("Create PDF"), lang.tr("Save the sheet as a PDF document that keeps its page layout.")).clicked()
-        && export_as(app, "pdf")
+        && app.save_as_copy_or_alert("pdf")
     {
         out.close = true;
     }
@@ -723,68 +719,8 @@ fn export(app: &mut SheetApp, ui: &mut Ui, out: &mut Outcome) {
         ("csv", Icon::TextColumns, "CSV (Comma delimited)", "Save the active sheet as comma-separated text."),
         ("html", Icon::Link, "Web Page (.html)", "Save the workbook as a web page."),
     ] {
-        if action_row(ui, icon, lang.tr(title), lang.tr(detail)).clicked() && export_as(app, fmt) {
+        if action_row(ui, icon, lang.tr(title), lang.tr(detail)).clicked() && app.save_as_copy_or_alert(fmt) {
             out.close = true;
-        }
-    }
-}
-
-/// Exports the active workbook as `pdf`, `csv` or `html`: through the save picker on the desktop,
-/// as a browser download on the web. Returns whether a file was written or handed over.
-pub fn export_as(app: &mut SheetApp, fmt: &str) -> bool {
-    if !app.commit_edit(0, 0, false, false) {
-        return false;
-    }
-    let id = match fmt {
-        "pdf" => "file.exportPdf",
-        "csv" => "file.exportCsv",
-        "html" => "file.exportHtml",
-        _ => return false,
-    };
-    let title = app.session.active().map(|d| d.display_title()).unwrap_or_else(|| "Book1".into());
-    let stem = std::path::Path::new(&title).file_stem().and_then(std::ffi::OsStr::to_str).unwrap_or("Book1").to_string();
-    if let Some(pick) = &app.services.pick_save {
-        let Some(path) = pick(&format!("{stem}.{fmt}")) else { return false };
-        // The picker may suggest a workbook extension; the export writes the chosen format.
-        let path = std::path::Path::new(&path).with_extension(fmt).to_string_lossy().into_owned();
-        return match app.run(id, json!({"path": path})) {
-            Ok(_) => true,
-            Err(e) => {
-                app.message = Some(("GridCraft".into(), crate::clean_error(&e)));
-                false
-            }
-        };
-    }
-    if app.services.download.is_none() {
-        app.message = Some(("GridCraft".into(), "Exporting needs a file picker, which this window doesn't have.".into()));
-        return false;
-    }
-    if fmt == "pdf" {
-        // Without a path the PDF comes back as bytes, which `SheetApp::run` hands to the browser.
-        return match app.run(id, json!({})) {
-            Ok(_) => true,
-            Err(e) => {
-                app.message = Some(("GridCraft".into(), crate::clean_error(&e)));
-                false
-            }
-        };
-    }
-    app.store_view_state();
-    match app.session.run("file.saveBytes", json!({"format": fmt})) {
-        Ok(r) => {
-            let bytes = r.get("base64").and_then(Json::as_str).and_then(gridcraft_engine::io::base64_decode);
-            let name = r.get("name").and_then(Json::as_str).map_or_else(|| format!("{stem}.{fmt}"), str::to_string);
-            match (bytes, &app.services.download) {
-                (Some(b), Some(dl)) => {
-                    dl(&name, &b);
-                    true
-                }
-                _ => false,
-            }
-        }
-        Err(e) => {
-            app.message = Some(("GridCraft".into(), crate::clean_error(&e)));
-            false
         }
     }
 }

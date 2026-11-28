@@ -315,15 +315,17 @@ pub fn window_frame(app: &mut SheetApp, ctx: &egui::Context) {
     app.flush_viewport_commands(ctx);
 }
 
-/// The title bar's Export menu: a PDF, or a copy as a workbook, CSV or web page.
+/// The title bar's Export menu: a PDF, or a copy as a workbook, CSV or web page. Each is Save As
+/// in that type (`SheetApp::save_as_copy`).
 fn export_items(app: &mut SheetApp, ui: &mut egui::Ui) {
-    if ui.button("Export as PDF…").clicked() {
-        app.run_or_alert("file.exportPdf", json!({}));
-    }
-    for (label, fmt) in [("Save a Copy as Excel Workbook (.xlsx)…", "xlsx"), ("Export as CSV…", "csv"), ("Export as Web Page (.html)…", "html")]
-    {
+    for (label, fmt) in [
+        ("Export as PDF…", "pdf"),
+        ("Save a Copy as Excel Workbook (.xlsx)…", "xlsx"),
+        ("Export as CSV…", "csv"),
+        ("Export as Web Page (.html)…", "html"),
+    ] {
         if ui.button(label).clicked() {
-            app.open_dialog("saveCopy", json!({"format": fmt}));
+            app.save_as_copy_or_alert(fmt);
         }
     }
 }
