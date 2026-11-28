@@ -52,6 +52,15 @@ impl SheetApp {
         self.share_routes.insert(doc.uid, (path.to_string(), route));
     }
 
+    /// Drops the active workbook's cached route when it is [`ShareRoute::None`], so the next
+    /// [`Self::note_share_route`] reads the Nextcloud client's settings again.
+    fn forget_none_route(&mut self) {
+        let Some(doc) = self.session.active() else { return };
+        if matches!(self.share_routes.get(&doc.uid), Some((_, ShareRoute::None))) {
+            self.share_routes.remove(&doc.uid);
+        }
+    }
+
     /// Web: the hosting page's own open (from [`crate::Services::host_inbox`], or the password
     /// prompt it led to) produced the workbook in `opened` (`file.open`'s result): it is the
     /// page's, and Share asks the page for it alone. The page edits one file per frame: while its
@@ -73,7 +82,10 @@ impl SheetApp {
 
     /// The one Share function (`file.share`).
     pub(super) fn share(&mut self) -> Result<Json, String> {
-        // Normally already known from the frame the workbook became active in.
+        // Normally already known from the frame the workbook became active in. A cached "none" is
+        // looked up again: the file may have become synced since (a cheap config read, only on
+        // a Share press), and the workbook would otherwise say "No Nextcloud connected" until reopened.
+        self.forget_none_route();
         self.note_share_route();
         match self.share_route() {
             ShareRoute::NextcloudWebHost => {

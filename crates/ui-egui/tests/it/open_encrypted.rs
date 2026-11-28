@@ -3,7 +3,7 @@
 use egui::accesskit::Role;
 use egui_kittest::kittest::Queryable as _;
 use gridcraft_engine::{Session, core::CellRef, core::Value};
-use gridcraft_ui_egui::{Inbox, Services, SheetApp};
+use gridcraft_ui_egui::{Inbox, Services, SheetApp, craft_share};
 use serde_json::json;
 
 const PW: &str = "synthetic-pw-8842";
@@ -158,4 +158,88 @@ fn app_open_over_the_control_channel_never_opens_a_dialog() {
     assert_eq!(a1(&h), Value::Number(42.0));
     assert_eq!(h.state().ui.recent.first(), Some(&p));
     std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+/// Framed by a Nextcloud page that shares files: `post` is what Share asks of it.
+fn page_services(post: impl Fn() -> Result<(), String> + 'static, posts: &std::rc::Rc<std::cell::Cell<usize>>) -> (Services, Inbox) {
+    let host_inbox: Inbox = Default::default();
+    let counted = std::rc::Rc::clone(posts);
+    let services = Services {
+        host_inbox: Some(host_inbox.clone()),
+        host_share: Some(Box::new(move || {
+            counted.set(counted.get() + 1);
+            post()
+        })),
+        ..Default::default()
+    };
+    (services, host_inbox)
+}
+
+fn click_share(h: &mut egui_kittest::Harness<'static, SheetApp>) {
+    h.get_by_role_and_label(Role::Button, "Share").click();
+    h.run_steps(3);
+}
+
+fn toast_text(h: &egui_kittest::Harness<'static, SheetApp>) -> Option<String> {
+    h.state().toast.as_ref().map(|(t, _)| t.clone())
+}
+
+#[test]
+fn the_pages_password_protected_file_is_shared_once_its_password_opened_it() {
+    let posts = std::rc::Rc::new(std::cell::Cell::new(0));
+    let (services, page) = page_services(|| Ok(()), &posts);
+    let mut h = harness(services);
+    page.lock().unwrap().push(("Secret.xlsx".into(), encrypted_bytes()));
+    h.run_steps(3);
+    assert_eq!(dialog(&h).as_deref(), Some("openPassword"), "the page's file asks for its password too");
+    click_share(&mut h);
+    assert_eq!(posts.get(), 0, "nothing of the page's is open yet, so nothing to share");
+    h.state_mut().toast = None;
+    h.state_mut().dialog.as_mut().unwrap().values.insert("password".into(), json!(PW));
+    h.get_by_label("   OK   ").click();
+    h.run_steps(3);
+    assert_eq!(a1(&h), Value::Number(42.0));
+    click_share(&mut h);
+    assert_eq!(posts.get(), 1, "the workbook the password opened is the page's file: Share asks the page");
+    assert_ne!(toast_text(&h).as_deref(), Some(craft_share::NO_NEXTCLOUD));
+}
+
+#[test]
+fn cancelling_the_pages_password_leaves_a_local_file_of_that_name_unshared() {
+    let posts = std::rc::Rc::new(std::cell::Cell::new(0));
+    let (services, page) = page_services(|| Ok(()), &posts);
+    let local: Inbox = Default::default();
+    let services = Services { inbox: Some(local.clone()), ..services };
+    let mut h = harness(services);
+    page.lock().unwrap().push(("Secret.xlsx".into(), encrypted_bytes()));
+    h.run_steps(3);
+    assert_eq!(dialog(&h).as_deref(), Some("openPassword"));
+    h.get_by_label(" Cancel ").click();
+    h.run_steps(3);
+    assert_eq!(dialog(&h), None);
+    // The person opens their own copy of the same name, with its password.
+    local.lock().unwrap().push(("Secret.xlsx".into(), encrypted_bytes()));
+    h.run_steps(3);
+    h.state_mut().dialog.as_mut().unwrap().values.insert("password".into(), json!(PW));
+    h.get_by_label("   OK   ").click();
+    h.run_steps(3);
+    assert_eq!(a1(&h), Value::Number(42.0));
+    click_share(&mut h);
+    assert_eq!(posts.get(), 0, "a local file is never the page's, whatever its name");
+    assert_eq!(toast_text(&h).as_deref(), Some("No Nextcloud connected"));
+}
+
+#[test]
+fn an_unreachable_page_says_so_in_a_toast_with_this_exact_text() {
+    let posts = std::rc::Rc::new(std::cell::Cell::new(0));
+    let (services, page) = page_services(|| Err("no same-origin parent".into()), &posts);
+    let mut h = harness(services);
+    page.lock().unwrap().push(("Secret.xlsx".into(), encrypted_bytes()));
+    h.run_steps(3);
+    h.state_mut().dialog.as_mut().unwrap().values.insert("password".into(), json!(PW));
+    h.get_by_label("   OK   ").click();
+    h.run_steps(3);
+    click_share(&mut h);
+    assert_eq!(posts.get(), 1);
+    assert_eq!(toast_text(&h).as_deref(), Some("Couldn't reach Nextcloud to share this workbook"));
 }
