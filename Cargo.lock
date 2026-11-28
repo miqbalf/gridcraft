@@ -2474,6 +2474,7 @@ version = "0.19.1"
 dependencies = [
  "arboard",
  "chrono",
+ "craft-live",
  "craft-print",
  "craft-update",
  "eframe",
@@ -2481,6 +2482,7 @@ dependencies = [
  "fmv-macos-events",
  "getrandom 0.4.3",
  "gridcraft-engine",
+ "gridcraft-live",
  "gridcraft-mcp",
  "gridcraft-sandbox",
  "gridcraft-ui-egui",
@@ -2492,6 +2494,8 @@ dependencies = [
  "pollster 1.0.1",
  "rfd",
  "serde_json",
+ "sha2 0.11.1",
+ "tokio",
  "winit",
  "winresource",
 ]

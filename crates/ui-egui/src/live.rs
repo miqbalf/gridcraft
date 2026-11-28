@@ -81,6 +81,20 @@ const POLL: Duration = Duration::from_millis(100);
 pub const EDITOR_GONE_TEXT: &str = "The row or column of the cell you were editing was deleted by another editor.";
 /// The same, with the entry kept.
 pub const EDITOR_GONE_DRAFT_TEXT: &str = "The row or column of the cell you were editing was deleted by another editor. Your entry was: {draft}";
+/// Told when Save on a live workbook found the room has every edit (desktop live).
+pub const ROOM_SAVED_TEXT: &str = "Saved live. The server stores the file.";
+/// Told when Save on a live workbook found edits the room has not confirmed yet.
+pub const ROOM_PENDING_TEXT: &str = "Not saved yet: your latest changes reach the server once the live link is back. They are kept.";
+/// Told when Save on a live workbook that is read-only for this window.
+pub const ROOM_READ_ONLY_TEXT: &str = "This file is read-only for you. Use Save As to keep a copy.";
+/// The status, and why typing is refused, while a desktop window waits for its first join.
+pub const FIRST_JOIN_TEXT: &str = "Connecting to live session…";
+/// The status while the session is live and its document service saved the room: the service
+/// names the save by its ETag, which means nothing to a person, so no time or id is shown.
+pub const LIVE_SAVED_TEXT: &str = "Live, saved";
+/// The control channel's answer to an edit while the first join is pending (an agent gets an
+/// error it can act on; the UI's typing is held the same way, see `live_read_only`).
+pub const CONTROL_CONNECTING_TEXT: &str = "live session connecting; edits not accepted yet";
 /// Told when the live workbook is closed.
 pub const LIVE_ENDED_TEXT: &str = "Live editing ended because the workbook was closed.";
 /// The info bar's button for a waiting copy of unmerged edits, and the action it runs.
@@ -267,6 +281,14 @@ pub struct LiveUi {
     shown: Option<(String, String)>,
     /// Notices not shown yet, oldest first: the info bar shows one at a time.
     queue: VecDeque<(String, NoticeKind, bool)>,
+    /// Desktop live ([`crate::Services::room_saves`]): until the first join the workbook takes
+    /// no typing and says it is connecting, because a join that never happens closes it and opens
+    /// the copy on its own (nothing typed may be lost then). Cleared at the first join.
+    first_join: bool,
+    /// The host's own word on the link, shown instead of the session's status while set (a
+    /// desktop window retrying after the relay refused its ticket, or given up on that). Always
+    /// a problem: the window's edits are not reaching the room.
+    link_note: Option<&'static str>,
 }
 
 impl LiveUi {
@@ -289,7 +311,29 @@ impl LiveUi {
             blocked,
             shown: None,
             queue: VecDeque::new(),
+            first_join: false,
+            link_note: None,
         }
+    }
+
+    /// Shows `note` as the status instead of the session's own, until set back to `None`.
+    pub fn set_link_note(&mut self, note: Option<&'static str>) {
+        self.link_note = note;
+    }
+
+    /// Holds the workbook read-only until the first join (desktop live).
+    pub fn hold_until_joined(&mut self) {
+        self.first_join = !self.joined_once();
+    }
+
+    fn joined_once(&self) -> bool {
+        !matches!(self.live.status(), LiveStatus::Connecting)
+    }
+
+    /// Whether the workbook is held read-only until the first join.
+    #[must_use]
+    pub fn waiting_for_first_join(&self) -> bool {
+        self.first_join
     }
 
     #[must_use]
@@ -364,10 +408,14 @@ impl LiveUi {
     /// The link's status in words, and whether it is a problem.
     #[must_use]
     pub fn status_text(&self, lang: Language) -> (String, bool) {
+        if let Some(note) = self.link_note {
+            return (lang.tr(note).to_owned(), true);
+        }
         match self.live.status() {
+            LiveStatus::Connecting if self.first_join => (lang.tr(FIRST_JOIN_TEXT).to_owned(), false),
             LiveStatus::Connecting => (lang.tr("Connecting…").to_owned(), false),
             LiveStatus::Live { saved_at: None } => (lang.tr("Live").to_owned(), false),
-            LiveStatus::Live { saved_at: Some(at) } => (lang.tr_fill("Live, saved {time}", &[("time", at)]), false),
+            LiveStatus::Live { saved_at: Some(_) } => (lang.tr(LIVE_SAVED_TEXT).to_owned(), false),
             LiveStatus::ReadOnly => (lang.tr("Viewing only").to_owned(), false),
             LiveStatus::Reconnecting => (lang.tr("Reconnecting…").to_owned(), true),
             LiveStatus::Refused(m) | LiveStatus::Broken(m) => (lang.tr(m).to_owned(), true),
@@ -521,7 +569,16 @@ impl SheetApp {
     /// (or while it connects, when the entry is held until the link is up).
     pub(crate) fn live_read_only(&self) -> Option<String> {
         let live = self.live.as_ref()?;
+        if live.first_join {
+            return Some(self.ui.language.tr(FIRST_JOIN_TEXT).to_owned());
+        }
         matches!(live.live.status(), LiveStatus::ReadOnly).then(|| self.ui.language.tr(&live.live.core().not_editable()).to_owned())
+    }
+
+    /// Whether the control channel refuses edits now: while a desktop window waits for its first
+    /// join, by the same read-only check the UI's typing uses ([`Self::live_read_only`]).
+    pub(crate) fn control_edits_held(&self) -> bool {
+        self.live.as_ref().is_some_and(LiveUi::waiting_for_first_join) && self.live_read_only().is_some()
     }
 
     /// Runs a command on the workbook: through the live session when there is one (the gate
@@ -533,6 +590,10 @@ impl SheetApp {
     pub(crate) fn engine_run(&mut self, id: &str, params: Json) -> Result<Json, String> {
         let target = self.session.active().map(|d| d.uid);
         match self.live.as_mut().filter(|lu| target == Some(lu.doc)) {
+            // Before the first join (desktop) only commands that change nothing shared run.
+            Some(lu) if lu.first_join && gridcraft_live::gate::class(id) != gridcraft_live::gate::Class::Local => {
+                Err(self.ui.language.tr(FIRST_JOIN_TEXT).to_owned())
+            }
             Some(lu) => match lu.live.run(&mut self.session, id, params)? {
                 Ran::Done(done) => Ok(done),
                 Ran::Queued => Ok(json!({"queued": true})),
@@ -728,6 +789,60 @@ impl SheetApp {
 
     /// One frame of a live window: anchors the open editor, takes in the room, moves the editor
     /// with its row, and shows what the room told.
+    /// Save on the live workbook when the room's document service saves it (desktop live,
+    /// [`crate::Services::room_saves`]): nothing is written here. `None` when Save goes on as
+    /// usual: not live, another workbook, a save to a named path, or a link that ended (the
+    /// workbook is then this computer's copy, saved like any other).
+    ///
+    /// # Errors
+    /// Why the workbook is not saved yet: the room has not confirmed every edit, or the file is
+    /// read-only for this window.
+    pub(crate) fn room_save(&mut self, params: &Json) -> Option<Result<Json, String>> {
+        if !self.services.room_saves || params.get("path").is_some_and(|p| !p.is_null()) {
+            return None;
+        }
+        let lu = self.live.as_ref()?;
+        let doc = lu.doc;
+        if self.session.active().map(|d| d.uid) != Some(doc) {
+            return None;
+        }
+        let lang = self.ui.language;
+        let unconfirmed = lu.live.core().live().unconfirmed_edits() > 0;
+        // `Some(true)`: saved; `Some(false)`: not yet; `None`: read-only. Ended links save as usual.
+        let saved = match lu.live.status() {
+            LiveStatus::Refused(_) | LiveStatus::Broken(_) => return None,
+            LiveStatus::ReadOnly => None,
+            LiveStatus::Live { .. } => Some(!unconfirmed),
+            LiveStatus::Connecting | LiveStatus::Reconnecting => Some(false),
+        };
+        Some(match saved {
+            None => Err(lang.tr(ROOM_READ_ONLY_TEXT).to_owned()),
+            Some(false) => Err(lang.tr(ROOM_PENDING_TEXT).to_owned()),
+            Some(true) => {
+                self.mark_room_saved(doc);
+                self.toast = Some((lang.tr(ROOM_SAVED_TEXT).to_owned(), crate::now_ms()));
+                Ok(json!({"live": true, "saved": true}))
+            }
+        })
+    }
+
+    /// The live workbook counts as saved: the room has all of it.
+    fn mark_room_saved(&mut self, doc: u64) {
+        if let Some(d) = self.session.document_mut(doc) {
+            d.saved = d.wb.clone();
+        }
+    }
+
+    /// Desktop live: once the room has every edit, the live workbook is saved (the document
+    /// service stores it), so closing the window does not ask about it.
+    fn room_keeps_saved(&mut self, lu: &LiveUi) {
+        let settled = matches!(lu.live.status(), LiveStatus::Live { .. }) && lu.live.core().live().unconfirmed_edits() == 0;
+        let dirty = self.session.documents().iter().any(|d| d.uid == lu.doc && d.is_dirty());
+        if self.services.room_saves && settled && dirty {
+            self.mark_room_saved(lu.doc);
+        }
+    }
+
     pub(crate) fn live_frame(&mut self, ctx: &egui::Context) {
         // A live session refused when the window was built is told in the user's language now.
         if let Some(why) = self.live_refusal.take() {
@@ -764,6 +879,10 @@ impl SheetApp {
         self.pending_unmerged.extend(lu.live.take_unmerged());
         let notes = lu.live.take_notices();
         lu.live.send_selection(&self.session);
+        self.room_keeps_saved(&lu);
+        if lu.first_join && lu.joined_once() {
+            lu.first_join = false;
+        }
         ctx.data_mut(|d| d.insert_temp(egui::Id::NULL.with(BLOCKED_ID), lu.blocked.clone()));
         // A name tag that is showing is due to go: wake up for it.
         let due = lu

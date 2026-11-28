@@ -55,6 +55,10 @@ pub struct Services {
     /// workbook as the session's active document). [`crate::live`] pumps it every frame and
     /// routes the window's commands through it.
     pub live: Option<crate::live::Live>,
+    /// Desktop live: the room's document service saves the live workbook, so Save on it writes
+    /// nothing here and says so, AutoSave leaves it alone, and it counts as saved once the room
+    /// has every edit ([`crate::live`]). Save As and the exports still write local files.
+    pub room_saves: bool,
     /// Web host: hand the copy of unmerged live edits to the page as a new file beside the
     /// original, also while live (the workbook itself is the room's).
     pub save_copy: Option<SaveCopy>,

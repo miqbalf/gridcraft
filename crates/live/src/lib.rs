@@ -12,12 +12,15 @@
 mod app;
 pub mod axis;
 pub mod cells;
+pub mod desktop;
 pub mod doc;
 pub mod gate;
 pub mod ids;
 pub mod kind;
 pub mod layout;
 mod local;
+#[cfg(feature = "native-hub")]
+pub mod native_link;
 pub mod op;
 mod ops;
 pub mod ordered;
@@ -29,6 +32,7 @@ mod seed;
 pub mod session;
 pub mod split;
 pub mod styles;
+pub mod ticket;
 pub(crate) mod undo;
 pub mod unmerged;
 pub mod volatile;

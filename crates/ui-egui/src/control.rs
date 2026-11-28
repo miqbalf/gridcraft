@@ -278,7 +278,43 @@ fn filter_commands(commands: Vec<Json>, search: Option<&str>) -> Vec<Json> {
 }
 
 /// Dispatches one control request: commands, inspection, UI state, dialogs, editing, synthetic input, open/save/quit and screenshots. Unknown methods (and unknown command ids) return an error. Immediate answers request a repaint; `ui.screenshot` is admitted asynchronously instead of being answered here.
+/// An edit the control channel refuses while a desktop live window waits for its first join:
+/// typing, the cell editor, edit keys and any command that changes the workbook. Otherwise it
+/// would be answered as done and then dropped (the window takes no edits then, and a join that
+/// never comes opens the launcher's copy without them). Moving around and reading still work.
+fn held_while_connecting(app: &SheetApp, method: &str, p: &Json) -> bool {
+    if !app.control_edits_held() {
+        return false;
+    }
+    let s = |k: &str| p.get(k).and_then(Json::as_str);
+    let changes = |id: &str| gridcraft_live::gate::class(id) != gridcraft_live::gate::Class::Local;
+    match method {
+        "engine.execute" | "command" | "ui.menu.invoke" => s("command").or(s("id")).is_some_and(changes),
+        "ui.text" | "ui.edit.begin" | "ui.edit.text" | "ui.edit.commit" => true,
+        "ui.key" => s("key").and_then(key_from).is_some_and(|k| {
+            !matches!(
+                k,
+                egui::Key::ArrowUp
+                    | egui::Key::ArrowDown
+                    | egui::Key::ArrowLeft
+                    | egui::Key::ArrowRight
+                    | egui::Key::Home
+                    | egui::Key::End
+                    | egui::Key::PageUp
+                    | egui::Key::PageDown
+                    | egui::Key::Tab
+                    | egui::Key::Enter
+                    | egui::Key::Escape
+            )
+        }),
+        other => gridcraft_engine::find_command(other).is_some() && changes(other),
+    }
+}
+
 pub fn handle(app: &mut SheetApp, ctx: &egui::Context, method: &str, p: &Json) -> Outcome {
+    if held_while_connecting(app, method, p) {
+        return err(crate::live::CONTROL_CONNECTING_TEXT);
+    }
     let s = |k: &str| p.get(k).and_then(Json::as_str);
     let f = |k: &str| p.get(k).and_then(Json::as_f64).unwrap_or(0.0) as f32;
     let out = match method {

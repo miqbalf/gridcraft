@@ -3,6 +3,7 @@
 mod axis;
 #[cfg(feature = "test-util")]
 mod cut;
+mod desktop;
 mod doc;
 #[cfg(any(feature = "test-util", feature = "native-hub"))]
 mod fingerprint;

@@ -39,6 +39,11 @@ arboard = { workspace = true, features = ["image-data"] }
 gridcraft-mcp = { workspace = true }
 # The control channel's token (OS random numbers); already in the tree.
 getrandom = "0.4"
+# Live co-editing from the launcher (`--live-session`): the session and its native relay link.
+gridcraft-live = { workspace = true, features = ["native-hub"] }
+craft-live = { workspace = true }
+# The runtime the relay link's sockets run on; already in the tree (craft-collab's native hub).
+tokio = { version = "1", features = ["rt-multi-thread", "time", "net"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 arboard = { workspace = true, features = ["image-data", "wayland-data-control"] }
@@ -58,6 +63,12 @@ fmv-macos-events = "=0.1.0"
 # winit); pinned exactly to the same versions.
 objc2 = "=0.6.5"
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSWindow"] }
+
+[dev-dependencies]
+# The live-session tests hash the launcher's copy as the ticket's base does.
+sha2 = { workspace = true }
+# The renewal test joins an in-memory relay (`craft_live::testing`).
+craft-live = { workspace = true, features = ["test-util"] }
 
 # tests/mac_menu_appkit.rs: reads AppKit's menu bar back. Already in Cargo.lock (muda, winit);
 # pinned exactly to the same versions.

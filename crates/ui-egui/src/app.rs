@@ -31,7 +31,13 @@ impl SheetApp {
     pub fn new(session: Session, mut services: Services) -> SheetApp {
         let mut live_refused = None;
         let live = services.live.take().and_then(|live| match live::startup_refusal(&session, &live) {
-            None => Some(live::LiveUi::new(live)),
+            None => {
+                let mut lu = live::LiveUi::new(live);
+                if services.room_saves {
+                    lu.hold_until_joined();
+                }
+                Some(lu)
+            }
             Some(why) => {
                 live_refused = Some(why);
                 None
