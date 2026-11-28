@@ -1243,3 +1243,49 @@ fn before_the_first_join_a_desktop_window_takes_no_typing_and_says_it_connects()
     settle(&mut rig, &mut h);
     assert_eq!(bob_value(&rig, "B2"), Value::Number(5.0));
 }
+
+/// DJF-A: the UI held typing before the first join, but the control channel answered typing as
+/// done, and the value was then missing from the copy after the fallback. It refuses instead.
+#[test]
+fn before_the_first_join_the_control_channel_refuses_edits_out_loud() {
+    use gridcraft_ui_egui::control::{Outcome, handle};
+    use gridcraft_ui_egui::live::CONTROL_CONNECTING_TEXT;
+    let (mut rig, app, _) = rig_room_saves();
+    rig.relay.drop_link(&rig.alice);
+    let mut h = harness(app);
+    settle(&mut rig, &mut h);
+    assert!(h.state().live().expect("live").waiting_for_first_join());
+    let ctx = Context::default();
+    let before = value(h.state(), 0, "G2");
+    let call = |h: &mut Harness, method: &str, p: serde_json::Value| match handle(h.state_mut(), &ctx, method, &p) {
+        Outcome::Done(j) => j,
+        Outcome::Screenshot { .. } => panic!("no screenshot asked"),
+    };
+    // The harness's typing: click the cell, type, Enter.
+    assert_eq!(call(&mut h, "ui.cell.click", json!({"cell": "G2"}))["ok"], json!(true), "moving around still works");
+    for (method, p) in [
+        ("ui.text", json!({"text": "55512"})),
+        ("ui.edit.begin", json!({"text": "55512"})),
+        ("ui.edit.commit", json!({})),
+        ("ui.key", json!({"key": "Delete"})),
+        ("engine.execute", json!({"command": "cell.set", "params": {"cell": "G2", "input": "55512"}})),
+        ("cell.set", json!({"cell": "G2", "input": "55512"})),
+    ] {
+        let r = call(&mut h, method, p);
+        assert_eq!(r["ok"], json!(false), "{method} is refused");
+        assert_eq!(r["error"], json!(CONTROL_CONNECTING_TEXT), "{method} says why");
+    }
+    assert_eq!(call(&mut h, "ui.key", json!({"key": "Enter"}))["ok"], json!(true), "Enter only moves: no editor is open");
+    assert_eq!(call(&mut h, "cell.get", json!({"cell": "G2"}))["ok"], json!(true), "reading still works");
+    settle(&mut rig, &mut h);
+    assert_eq!(value(h.state(), 0, "G2"), before, "nothing changed");
+    assert!(h.state().editor.is_none());
+    // Once joined, the same calls edit.
+    rig.relay.restore_link(&rig.alice);
+    settle(&mut rig, &mut h);
+    assert!(!h.state().live().expect("live").waiting_for_first_join());
+    let r = call(&mut h, "engine.execute", json!({"command": "cell.set", "params": {"cell": "G2", "input": "6"}}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    settle(&mut rig, &mut h);
+    assert_eq!(bob_value(&rig, "G2"), Value::Number(6.0));
+}

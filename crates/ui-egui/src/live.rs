@@ -92,6 +92,9 @@ pub const FIRST_JOIN_TEXT: &str = "Connecting to live session…";
 /// The status while the session is live and its document service saved the room: the service
 /// names the save by its ETag, which means nothing to a person, so no time or id is shown.
 pub const LIVE_SAVED_TEXT: &str = "Live, saved";
+/// The control channel's answer to an edit while the first join is pending (an agent gets an
+/// error it can act on; the UI's typing is held the same way, see `live_read_only`).
+pub const CONTROL_CONNECTING_TEXT: &str = "live session connecting; edits not accepted yet";
 /// Told when the live workbook is closed.
 pub const LIVE_ENDED_TEXT: &str = "Live editing ended because the workbook was closed.";
 /// The info bar's button for a waiting copy of unmerged edits, and the action it runs.
@@ -570,6 +573,12 @@ impl SheetApp {
             return Some(self.ui.language.tr(FIRST_JOIN_TEXT).to_owned());
         }
         matches!(live.live.status(), LiveStatus::ReadOnly).then(|| self.ui.language.tr(&live.live.core().not_editable()).to_owned())
+    }
+
+    /// Whether the control channel refuses edits now: while a desktop window waits for its first
+    /// join, by the same read-only check the UI's typing uses ([`Self::live_read_only`]).
+    pub(crate) fn control_edits_held(&self) -> bool {
+        self.live.as_ref().is_some_and(LiveUi::waiting_for_first_join) && self.live_read_only().is_some()
     }
 
     /// Runs a command on the workbook: through the live session when there is one (the gate
