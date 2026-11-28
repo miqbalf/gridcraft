@@ -538,14 +538,53 @@ async fn a_desktop_window_from_a_session_file_coedits_with_a_web_window() {
     // The launcher rewrites the session file with a fresh ticket: the desktop link hands over to
     // a new socket without a drop, and the two keep converging.
     let fresh = ticket(&secret, &room, "desky", &format!("desky-renewed-{}", now()));
-    // Whole-second file times: let the rewrite carry a later one.
-    tokio::time::sleep(Duration::from_millis(1100)).await;
+    // No wait for a later file time: the watch reads content, not modification times.
     write_session(&desk.path, &session_json(&relay, &room, &fresh, &file));
     until_both(&mut web, &mut desk, 30, "the switch to the renewed ticket", |_, d| d.live.core().hub().inner().switches() >= 1).await;
     assert!(desk.live.run(&mut desk.s, "cell.set", json!({"cell": "H1", "input": "after renewal"})).is_ok());
     assert!(web.run("cell.set", json!({"cell": "H2", "input": "from the web"})));
     until_both(&mut web, &mut desk, 30, "the same workbook after the renewal", |w, d| {
         w.is_live() && d.is_live() && w.finger() == d.finger() && d.finger().contains("after renewal") && d.finger().contains("from the web")
+    })
+    .await;
+    let _ = std::fs::remove_dir_all(&desk.dir);
+}
+
+/// F5's tail: after a renewal, the relay restarts (its Valkey keeps the room); the desktop
+/// rejoins on the renewed ticket and edits flow both ways again. Needs `CRAFT_TEST_RESTART_CMD`.
+/// (The room's document service is the server's worker, which this rig has none of.)
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs relay"]
+async fn a_desktop_window_rejoins_on_its_renewed_ticket_after_a_relay_restart() {
+    let (relay, secret, room, file) = setup();
+    let restart = env("CRAFT_TEST_RESTART_CMD");
+    let mut web = Client::join(&relay, &secret, &room, "webr", &file).await;
+    let mut desk = Desk::join(&relay, &secret, &room, "deskr", &file);
+    until_both(&mut web, &mut desk, 20, "both Live", |w, d| w.is_live() && d.is_live()).await;
+    assert!(desk.live.run(&mut desk.s, "cell.set", json!({"cell": "K1", "input": "before"})).is_ok());
+    until_both(&mut web, &mut desk, 30, "the same workbook", |w, d| w.finger() == d.finger() && w.finger().contains("before")).await;
+    let fresh = ticket(&secret, &room, "deskr", &format!("deskr-renewed-{}", now()));
+    write_session(&desk.path, &session_json(&relay, &room, &fresh, &file));
+    until_both(&mut web, &mut desk, 30, "the switch to the renewed ticket", |_, d| d.live.core().hub().inner().switches() >= 1).await;
+
+    let child = std::thread::spawn(move || std::process::Command::new("sh").arg("-c").arg(restart).output());
+    while !child.is_finished() {
+        web.pump();
+        desk.pump();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let out = child.join().unwrap().unwrap();
+    assert!(out.status.success(), "the restart command failed");
+    until_both(&mut web, &mut desk, 60, "both Live after the restart", |w, d| w.is_live() && d.is_live()).await;
+    assert!(desk.live.run(&mut desk.s, "cell.set", json!({"cell": "K2", "input": "desk after restart"})).is_ok(), "the desktop edits");
+    assert!(web.run("cell.set", json!({"cell": "K3", "input": "web after restart"})), "the web edits");
+    until_both(&mut web, &mut desk, 30, "edits both ways after the restart", |w, d| {
+        w.is_live()
+            && d.is_live()
+            && w.finger() == d.finger()
+            && w.finger().contains("desk after restart")
+            && d.finger().contains("web after restart")
+            && d.finger().contains("before")
     })
     .await;
     let _ = std::fs::remove_dir_all(&desk.dir);
