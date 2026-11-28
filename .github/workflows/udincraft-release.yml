@@ -96,7 +96,13 @@ jobs:
               echo "no live schema in $f"
             fi
           done
-          [ "$seen" = 1 ] || { echo "::error::no binary carries the gridcraft/1_ live schema"; exit 1; }
+          # The desktop app joins rooms only where its source calls schema() (feat/desktop-live); a
+          # source without it has no desktop live editing, so no binary needs the id yet.
+          if grep -rqE 'schema\(\)' "apps/$APP/src"; then
+            [ "$seen" = 1 ] || { echo "::error::apps/$APP joins live rooms, but no binary carries the gridcraft/1_ live schema"; exit 1; }
+          else
+            echo "::notice::apps/$APP has no desktop live editing in this source (no schema() call), so no binary carries gridcraft/1_$GRIDCRAFT_LIVE_BUILD"
+          fi
       - name: Zip the app, check both, the DMG and the zip
         id: check
         run: |
@@ -187,7 +193,13 @@ jobs:
               echo "no live schema in $f"
             fi
           done
-          [ "$seen" = 1 ] || { echo "::error::no binary carries the gridcraft/1_ live schema"; exit 1; }
+          # The desktop app joins rooms only where its source calls schema() (feat/desktop-live); a
+          # source without it has no desktop live editing, so no binary needs the id yet.
+          if grep -rqE 'schema\(\)' "apps/$APP/src"; then
+            [ "$seen" = 1 ] || { echo "::error::apps/$APP joins live rooms, but no binary carries the gridcraft/1_ live schema"; exit 1; }
+          else
+            echo "::notice::apps/$APP has no desktop live editing in this source (no schema() call), so no binary carries gridcraft/1_$GRIDCRAFT_LIVE_BUILD"
+          fi
       - name: Add the user install script to the tarball
         run: |
           set -euo pipefail
@@ -286,7 +298,13 @@ jobs:
               echo "no live schema in $f"
             fi
           done
-          [ "$seen" = 1 ] || { echo "::error::no binary carries the gridcraft/1_ live schema"; exit 1; }
+          # The desktop app joins rooms only where its source calls schema() (feat/desktop-live); a
+          # source without it has no desktop live editing, so no binary needs the id yet.
+          if grep -rqE 'schema\(\)' "apps/$APP/src"; then
+            [ "$seen" = 1 ] || { echo "::error::apps/$APP joins live rooms, but no binary carries the gridcraft/1_ live schema"; exit 1; }
+          else
+            echo "::notice::apps/$APP has no desktop live editing in this source (no schema() call), so no binary carries gridcraft/1_$GRIDCRAFT_LIVE_BUILD"
+          fi
       - name: Check the portable zip
         shell: pwsh
         run: |
@@ -354,7 +372,11 @@ jobs:
             echo
             echo "## Live editing"
             echo
-            echo "Live editing works with servers running GridCraft web build $GRIDCRAFT_LIVE_BUILD: this build joins only rooms of that web build (\`gridcraft/1_$GRIDCRAFT_LIVE_BUILD\`)."
+            if grep -rqE 'schema\(\)' "apps/$APP/src"; then
+              echo "Live editing works with servers running GridCraft web build $GRIDCRAFT_LIVE_BUILD: this build joins only rooms of that web build (\`gridcraft/1_$GRIDCRAFT_LIVE_BUILD\`)."
+            else
+              echo "This desktop build has no live editing yet; it opens and saves files as usual."
+            fi
             echo
             echo "## Downloads"
             echo
