@@ -38,9 +38,9 @@ craft-live-worker = { git = "https://github.com/miqbalf/collab-craft", rev = "d0
 # ui-egui, craft-print in the app, craft-web-api and craft-web-host in the web app) comes from one
 # craft-libs revision.
 # craft-update: app-specific pretend versions apply to startup and manual checks.
-# udinCraft: craft-update comes from the miqbalf fork (feat/udincraft-updates), whose `fork` rules
+# udinCraft: craft-update comes from the miqbalf fork (main, adbb69f0), whose `fork` rules
 # install this fork's unsigned builds from its udincraft-v* releases; the others stay on storytold.
-craft-update = { git = "https://github.com/miqbalf/craft-libs", rev = "66f8a6e6966795fa26445baf2f30d923117a6528", version = "=0.1.0", features = ["egui"] }
+craft-update = { git = "https://github.com/miqbalf/craft-libs", rev = "adbb69f094e001aa53dbf78e8c0036b9c291d013", version = "=0.1.0", features = ["egui"] }
 # PDF RunLength encoding; this revision also fixes the vendored JBIG2 dependency for Git consumers.
 craft-pdf = { git = "https://github.com/storytold/craft-libs", rev = "ff142b3ad58aa7306676749428f4f2f9b277b5dd", version = "0.1.0", default-features = false }
 craft-stream-codecs = { git = "https://github.com/storytold/craft-libs", rev = "f7e0d7fd5577e102b4634bcbe062e649eb68165f", version = "0.1.0" }
