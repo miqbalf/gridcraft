@@ -416,9 +416,11 @@ fn recent_list(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &mut Ou
         text.text(pos2(rect.left() + 42.0, rect.center().y + 9.0), Align2::LEFT_CENTER, &folder, theme::ui_font(11.5), t.text_dim);
         if modified_w > 0.0 {
             let (words, color) = match known.get(&path) {
-                Some(Some(seconds)) => (age(lang, now - seconds), t.text_dim),
-                Some(None) => (lang.tr("Not available").to_string(), t.text_disabled),
-                None => (String::new(), t.text_dim),
+                #[cfg(not(target_arch = "wasm32"))]
+                Some(Modified::At(seconds)) => (age(lang, now - seconds), t.text_dim),
+                #[cfg(not(target_arch = "wasm32"))]
+                Some(Modified::Unknown) => (lang.tr("Not available").to_string(), t.text_disabled),
+                _ => (String::new(), t.text_dim),
             };
             p.text(pos2(rect.right() - modified_w, rect.center().y), Align2::LEFT_CENTER, words, theme::ui_font(12.0), color);
         }
@@ -432,10 +434,17 @@ fn recent_list(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &mut Ou
     }
 }
 
-/// What the file system said about a recent workbook: when it was last changed, in seconds since
-/// 1970, or `None` when it can't be reached (moved, deleted, or on a drive that is away). The web
-/// build never asks, so it holds no answers.
-type Modified = Option<f64>;
+/// What the file system said about a recent workbook. The web build has no file system to ask,
+/// so it has no answers either.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Modified {
+    /// When it was last changed, in seconds since 1970.
+    #[cfg(not(target_arch = "wasm32"))]
+    At(f64),
+    /// It can't be reached: moved, deleted, or on a drive that is away.
+    #[cfg(not(target_arch = "wasm32"))]
+    Unknown,
+}
 
 /// One thread at a time asks about recent workbooks, so a drive that never answers holds up one
 /// thread, not one for every time the view is opened.
@@ -480,7 +489,7 @@ fn ask(ctx: egui::Context, paths: Vec<String>, found: Arc<Mutex<HashMap<String, 
         let _done = Done;
         for path in paths {
             let changed = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok());
-            let answer: Modified = changed.map(|since| since.as_secs_f64());
+            let answer = changed.map_or(Modified::Unknown, |since| Modified::At(since.as_secs_f64()));
             found.lock().unwrap_or_else(PoisonError::into_inner).insert(path, answer);
             ctx.request_repaint();
         }
@@ -819,8 +828,8 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        assert!(matches!(known.get(&there), Some(Some(seconds)) if *seconds > 1.0e9), "{known:?}");
-        assert_eq!(known.get(&gone), Some(&None));
+        assert!(matches!(known.get(&there), Some(Modified::At(seconds)) if *seconds > 1.0e9), "{known:?}");
+        assert_eq!(known.get(&gone), Some(&Modified::Unknown));
         // The same list is not asked about twice; an empty one is never asked about.
         assert_eq!(files.known(&ctx, &recent), known);
         assert!(RecentFiles::default().known(&ctx, &[]).is_empty());
