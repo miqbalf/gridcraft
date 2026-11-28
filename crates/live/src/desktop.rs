@@ -21,7 +21,6 @@
 //! The ticket is never logged: [`SessionFile`]'s `Debug` leaves it out, and no error quotes it.
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use craft_live::Access;
 use serde::Deserialize;
@@ -279,7 +278,10 @@ pub struct SessionWatch {
     access: Access,
     ticket: String,
     saving: bool,
-    modified: Option<SystemTime>,
+    /// The bytes of the last rewrite read whole, so each is told once. Compared by content, not
+    /// by modification time: a rename can keep the time (coarse clocks, or two writes in one
+    /// tick), and a rewrite between the session's start and the watch's would hide behind it.
+    last: Option<Vec<u8>>,
     /// When it was last looked at, on the caller's clock (seconds).
     looked: Option<f64>,
 }
@@ -294,7 +296,7 @@ impl SessionWatch {
             access: file.access(),
             ticket: file.ticket.clone(),
             saving: file.saving(),
-            modified: modified(path),
+            last: None,
             looked: None,
         }
     }
@@ -302,18 +304,27 @@ impl SessionWatch {
     /// Looks at the file when [`WATCH_SECS`] passed since the last look (`now` in seconds, any
     /// monotonic clock), and says what a rewrite means. A file that is gone, unreadable, half
     /// written or unchanged means nothing: the next look tries again.
+    ///
+    /// `now` must be a clock that runs while the window is hidden: a hidden egui window's input
+    /// keeps the time of its last shown frame.
     pub fn poll(&mut self, now: f64) -> Option<Rewrite> {
         if self.looked.is_some_and(|at| now - at < WATCH_SECS) {
             return None;
         }
         self.looked = Some(now);
-        let m = modified(&self.path)?;
-        if self.modified == Some(m) {
+        self.look()
+    }
+
+    /// Reads the file now, whatever the cadence (after the relay refused the ticket, say), and
+    /// says what a rewrite since the last read means.
+    pub fn look(&mut self) -> Option<Rewrite> {
+        let bytes = std::fs::read(&self.path).ok()?;
+        if self.last.as_deref() == Some(bytes.as_slice()) {
             return None;
         }
-        let file = SessionFile::load(&self.path).ok()?;
+        let file = SessionFile::parse(&bytes).ok()?;
         // Taken as seen only once it parsed: a rename caught half way is read again.
-        self.modified = Some(m);
+        self.last = Some(bytes);
         if file.room != self.room {
             return Some(Rewrite::End(RESTARTED_TEXT));
         }
@@ -330,6 +341,12 @@ impl SessionWatch {
 }
 
 impl SessionWatch {
+    /// The newest ticket read: the one the link should be using.
+    #[must_use]
+    pub fn ticket(&self) -> &str {
+        &self.ticket
+    }
+
     /// Whether the room's edits are saved, as of the last rewrite read ([`SessionFile::saving`]).
     #[must_use]
     pub fn saving(&self) -> bool {
@@ -369,8 +386,4 @@ pub fn write_fallback(session_file: &Path, reason: &str) -> std::io::Result<()> 
         f.sync_all()?;
     }
     std::fs::rename(&tmp, &path)
-}
-
-fn modified(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }

@@ -67,6 +67,8 @@ objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std
 [dev-dependencies]
 # The live-session tests hash the launcher's copy as the ticket's base does.
 sha2 = { workspace = true }
+# The renewal test joins an in-memory relay (`craft_live::testing`).
+craft-live = { workspace = true, features = ["test-util"] }
 
 # tests/mac_menu_appkit.rs: reads AppKit's menu bar back. Already in Cargo.lock (muda, winit);
 # pinned exactly to the same versions.

@@ -147,23 +147,53 @@ fn a_rewrite_with_a_fresh_ticket_is_seen_and_other_rewrites_end_the_session() {
         watch.poll(now)
     };
     assert_eq!(look(&mut watch), None, "unchanged");
-    // Some file systems keep whole seconds: wait so the rewrite has a later time.
-    std::thread::sleep(std::time::Duration::from_millis(1100));
     let fresh = ticket("ann", 3, 1);
     write_atomic(&path, &session(json!({"ticket": fresh})));
     assert_eq!(look(&mut watch), Some(Rewrite::Ticket(fresh.clone())));
     assert_eq!(look(&mut watch), None, "seen once");
-    std::thread::sleep(std::time::Duration::from_millis(1100));
     std::fs::write(&path, b"{\"v\":1,").unwrap();
     assert_eq!(look(&mut watch), None, "a half-written file is read again later");
-    std::thread::sleep(std::time::Duration::from_millis(1100));
     write_atomic(&path, &session(json!({"ticket": fresh, "readOnly": true})));
     assert_eq!(look(&mut watch), Some(Rewrite::End(ACCESS_CHANGED_TEXT)));
-    std::thread::sleep(std::time::Duration::from_millis(1100));
     write_atomic(&path, &session(json!({"room": "oc:7:def"})));
     assert_eq!(look(&mut watch), Some(Rewrite::End(RESTARTED_TEXT)));
     std::fs::remove_file(&path).unwrap();
     assert_eq!(look(&mut watch), None, "a deleted file means nothing");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// F5: the launcher's rename can keep the file's modification time, and it can land between the
+/// session's start (which read the file) and the watch's; the watch reads content, so neither
+/// hides the fresh ticket. A refusal looks again at once ([`SessionWatch::look`]).
+#[test]
+fn a_rewrite_with_the_same_modification_time_or_before_the_watch_began_is_seen() {
+    let d = dir("same-mtime");
+    let path = d.join("s.json");
+    write_atomic(&path, &session(json!({})));
+    let file = SessionFile::load(&path).unwrap();
+    let stamp = std::fs::metadata(&path).unwrap().modified().unwrap();
+    // The launcher renews before the watch starts.
+    let early = ticket("ann", 3, 3);
+    write_atomic(&path, &session(json!({"ticket": early})));
+    let set_stamp = |p: &Path| std::fs::File::options().write(true).open(p).unwrap().set_modified(stamp).unwrap();
+    set_stamp(&path);
+    let mut watch = SessionWatch::new(&path, &file);
+    assert_eq!(watch.ticket(), file.ticket);
+    assert_eq!(watch.poll(0.0), Some(Rewrite::Ticket(early.clone())), "renewed before the watch began");
+    assert_eq!(watch.ticket(), early);
+    // Renewed again inside the same tick: the same modification time.
+    let next = ticket("ann", 3, 4);
+    write_atomic(&path, &session(json!({"ticket": next})));
+    set_stamp(&path);
+    assert_eq!(watch.poll(WATCH_SECS), Some(Rewrite::Ticket(next.clone())), "the same time, other content");
+    assert_eq!(watch.poll(2.0 * WATCH_SECS), None, "told once");
+    // Between two looks: `look` reads at once.
+    let last = ticket("ann", 3, 5);
+    write_atomic(&path, &session(json!({"ticket": last})));
+    assert_eq!(watch.poll(2.0 * WATCH_SECS + 0.1), None, "too soon for the cadence");
+    assert_eq!(watch.look(), Some(Rewrite::Ticket(last.clone())));
+    assert_eq!(watch.look(), None);
+    assert_eq!(watch.ticket(), last);
     let _ = std::fs::remove_dir_all(&d);
 }
 
@@ -175,7 +205,6 @@ fn the_file_is_looked_at_no_more_than_every_two_seconds() {
     let file = SessionFile::load(&path).unwrap();
     let mut watch = SessionWatch::new(&path, &file);
     assert_eq!(watch.poll(10.0), None);
-    std::thread::sleep(std::time::Duration::from_millis(1100));
     let fresh = ticket("ann", 3, 2);
     write_atomic(&path, &session(json!({"ticket": fresh})));
     assert_eq!(watch.poll(10.0 + WATCH_SECS / 2.0), None, "too soon");

@@ -89,6 +89,9 @@ pub const ROOM_PENDING_TEXT: &str = "Not saved yet: your latest changes reach th
 pub const ROOM_READ_ONLY_TEXT: &str = "This file is read-only for you. Use Save As to keep a copy.";
 /// The status, and why typing is refused, while a desktop window waits for its first join.
 pub const FIRST_JOIN_TEXT: &str = "Connecting to live session…";
+/// The status while the session is live and its document service saved the room: the service
+/// names the save by its ETag, which means nothing to a person, so no time or id is shown.
+pub const LIVE_SAVED_TEXT: &str = "Live, saved";
 /// Told when the live workbook is closed.
 pub const LIVE_ENDED_TEXT: &str = "Live editing ended because the workbook was closed.";
 /// The info bar's button for a waiting copy of unmerged edits, and the action it runs.
@@ -279,6 +282,10 @@ pub struct LiveUi {
     /// no typing and says it is connecting, because a join that never happens closes it and opens
     /// the copy on its own (nothing typed may be lost then). Cleared at the first join.
     first_join: bool,
+    /// The host's own word on the link, shown instead of the session's status while set (a
+    /// desktop window retrying after the relay refused its ticket, or given up on that). Always
+    /// a problem: the window's edits are not reaching the room.
+    link_note: Option<&'static str>,
 }
 
 impl LiveUi {
@@ -302,7 +309,13 @@ impl LiveUi {
             shown: None,
             queue: VecDeque::new(),
             first_join: false,
+            link_note: None,
         }
+    }
+
+    /// Shows `note` as the status instead of the session's own, until set back to `None`.
+    pub fn set_link_note(&mut self, note: Option<&'static str>) {
+        self.link_note = note;
     }
 
     /// Holds the workbook read-only until the first join (desktop live).
@@ -392,11 +405,14 @@ impl LiveUi {
     /// The link's status in words, and whether it is a problem.
     #[must_use]
     pub fn status_text(&self, lang: Language) -> (String, bool) {
+        if let Some(note) = self.link_note {
+            return (lang.tr(note).to_owned(), true);
+        }
         match self.live.status() {
             LiveStatus::Connecting if self.first_join => (lang.tr(FIRST_JOIN_TEXT).to_owned(), false),
             LiveStatus::Connecting => (lang.tr("Connecting…").to_owned(), false),
             LiveStatus::Live { saved_at: None } => (lang.tr("Live").to_owned(), false),
-            LiveStatus::Live { saved_at: Some(at) } => (lang.tr_fill("Live, saved {time}", &[("time", at)]), false),
+            LiveStatus::Live { saved_at: Some(_) } => (lang.tr(LIVE_SAVED_TEXT).to_owned(), false),
             LiveStatus::ReadOnly => (lang.tr("Viewing only").to_owned(), false),
             LiveStatus::Reconnecting => (lang.tr("Reconnecting…").to_owned(), true),
             LiveStatus::Refused(m) | LiveStatus::Broken(m) => (lang.tr(m).to_owned(), true),

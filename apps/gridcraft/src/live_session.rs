@@ -6,7 +6,13 @@
 //! - The room opens on its pinned base, checked by hash; the window shows it with every change
 //!   since the room opened.
 //! - The launcher rewrites the file with a fresh ticket before the old one expires; the window
-//!   looks every two seconds and hands it to the link, which switches over without a drop.
+//!   looks every two seconds and hands it to the link, which switches over without a drop. The
+//!   looks run on the app's own clock: a hidden or covered window runs only `App::logic`, whose
+//!   egui time stays at the last shown frame (F5: the renewal was never read, and the relay
+//!   dropped the link at the old ticket's expiry).
+//! - When the relay refuses the ticket after the window was live, the window reads the file again
+//!   at once and retries once with the newest ticket, saying "Reconnecting…"; if that is refused
+//!   too it says it is not live, until the launcher hands a fresh ticket.
 //! - Save on the live workbook is the room's (`Services::room_saves`): nothing is written or
 //!   uploaded from here. Save As and the exports write local files.
 //! - When the session can't start (an unusable session file, no or another base, a relay that
@@ -36,12 +42,32 @@ pub const JOIN_GIVE_UP_SECS: f64 = 20.0;
 /// Told when the relay was not reached in time.
 const NOT_REACHED_TEXT: &str = "the live relay could not be reached";
 
+/// The status while the window retries with the newest ticket after the relay refused one.
+pub const RETRYING_TEXT: &str = "Reconnecting…";
+
+/// The status once the retry was refused too.
+pub const REFUSED_TEXT: &str = "Not live: the server did not accept this window's ticket. Changes made here are not shared.";
+
+/// How long the retry may take to join before the window says it is not live: a native link
+/// waits 10 s for the relay's answer.
+pub const RETRY_GIVE_UP_SECS: f64 = 15.0;
+
+/// After the relay refused the ticket of a window that was live.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Rejoin {
+    Idle,
+    /// Retried with the newest ticket, at this time (the app's clock).
+    Retrying(f64),
+    /// The retry was refused too: waiting for the launcher's next ticket.
+    GaveUp,
+}
+
 /// The joined session's host side: the session file's watch, and the runtime the link runs on.
 pub struct DesktopLive {
     watch: SessionWatch,
     session_file: PathBuf,
     working: PathBuf,
-    /// When the first frame ran (egui seconds), and whether the session has been live since.
+    /// When the first frame ran (the app's clock), and whether the session has been live since.
     first_frame: Option<f64>,
     went_live: bool,
     /// The window gave up on the join: the live workbook was closed, and the copy opens next frame
@@ -50,8 +76,18 @@ pub struct DesktopLive {
     done: bool,
     /// Whether "not being saved" was last told (the server's `saver`).
     told_not_saving: bool,
+    rejoin: Rejoin,
+    /// Seconds on a clock that runs while the window is hidden (not egui's input time).
+    clock: Box<dyn FnMut() -> f64>,
     /// Kept for the link's sockets; dropped with the window.
-    _rt: tokio::runtime::Runtime,
+    _rt: Option<tokio::runtime::Runtime>,
+}
+
+/// Seconds since the call, on the monotonic clock.
+fn monotonic() -> Box<dyn FnMut() -> f64> {
+    #[allow(clippy::disallowed_methods)] // the desktop app, never built for wasm
+    let start = std::time::Instant::now();
+    Box::new(move || start.elapsed().as_secs_f64())
 }
 
 /// Starts the session the file at `session_file` names on `session`, opening the room's base
@@ -62,8 +98,6 @@ pub struct DesktopLive {
 pub fn start(session_file: &Path, working: &Path, session: &mut Session) -> Result<(Live, DesktopLive), String> {
     let file = SessionFile::load(session_file).map_err(|e| e.to_string())?;
     let relay = file.relay().map_err(|e| e.to_string())?;
-    let (bytes, hash) = file.base_bytes(working).map_err(|e| e.to_string())?;
-    let name = file.file_name(working);
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .thread_name("gridcraft-live")
@@ -71,16 +105,30 @@ pub fn start(session_file: &Path, working: &Path, session: &mut Session) -> Resu
         .build()
         .map_err(|e| format!("the live link could not start: {e}"))?;
     let link = gridcraft_live::native_link::renewing_link(rt.handle(), &relay, &file.ticket, &schema());
+    start_on(session_file, &file, working, session, DynHub(Box::new(link)), Some(rt))
+}
+
+/// [`start`] on `hub`, the link to the room (`rt` runs it, when it needs a runtime).
+fn start_on(
+    session_file: &Path,
+    file: &SessionFile,
+    working: &Path,
+    session: &mut Session,
+    hub: DynHub,
+    rt: Option<tokio::runtime::Runtime>,
+) -> Result<(Live, DesktopLive), String> {
+    let (bytes, hash) = file.base_bytes(working).map_err(|e| e.to_string())?;
+    let name = file.file_name(working);
     let uid = gridcraft_live::ticket::ticket_uid(&file.ticket).unwrap_or_else(|| "user".to_owned());
     let base = BaseFile { bytes: &bytes, name: &name, expected_sha256: Some(hash) };
-    let mut live = GridLive::start(DynHub(Box::new(link)), &file.room, &base, file.access(), &uid, session).map_err(|e| e.to_string())?;
+    let mut live = GridLive::start(hub, &file.room, &base, file.access(), &uid, session).map_err(|e| e.to_string())?;
     // This computer's date and time, for the name of a copy of unmerged edits.
     live.set_wall_clock(Box::new(|| chrono::Local::now().naive_local()));
     log::info!("live: joining room {} for file {:?}", file.room, file.file_id);
     Ok((
         live,
         DesktopLive {
-            watch: SessionWatch::new(session_file, &file),
+            watch: SessionWatch::new(session_file, file),
             session_file: session_file.to_owned(),
             working: working.to_owned(),
             first_frame: None,
@@ -88,6 +136,8 @@ pub fn start(session_file: &Path, working: &Path, session: &mut Session) -> Resu
             falling_back: None,
             done: false,
             told_not_saving: false,
+            rejoin: Rejoin::Idle,
+            clock: monotonic(),
             _rt: rt,
         },
     ))
@@ -160,7 +210,8 @@ impl DesktopLive {
         if self.done {
             return;
         }
-        let now = ctx.input(|i| i.time);
+        // Not `ctx.input(|i| i.time)`: that stops while the window is hidden or covered.
+        let now = (self.clock)();
         // The copy is open already (`give_up`); said once the live session's own ending is shown.
         if let Some(why) = self.falling_back.as_ref().filter(|_| app.live().is_none()) {
             tell_not_live(app, why);
@@ -168,9 +219,30 @@ impl DesktopLive {
             return;
         }
         self.give_up(app, now);
-        match self.watch.poll(now) {
+        let rewrite = self.watch.poll(now);
+        self.take(app, rewrite, now);
+        self.rejoin_after_refusal(app, now);
+        // The server says the room has no save worker: say so while it lasts (rule 15).
+        let saving = self.watch.saving();
+        if !saving && !self.told_not_saving {
+            let text = app.ui.language.tr(gridcraft_live::desktop::NOT_SAVING_TEXT).to_owned();
+            app.notice = Some(Notice { text, kind: NoticeKind::Warning, action: None });
+        }
+        self.told_not_saving = !saving;
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(gridcraft_live::desktop::WATCH_SECS));
+    }
+}
+
+impl DesktopLive {
+    /// Acts on what the watch read: a fresh ticket goes to the link (a fresh try, too, after a
+    /// refusal), an end ends the session.
+    fn take(&mut self, app: &mut SheetApp, rewrite: Option<Rewrite>, now: f64) {
+        match rewrite {
             Some(Rewrite::Ticket(ticket)) => {
                 if let Some(lu) = app.live_mut() {
+                    if self.went_live && matches!(lu.live().status(), LiveStatus::Refused(_)) {
+                        self.retrying(lu, now);
+                    }
                     lu.live_mut().renew_ticket(ticket);
                 }
             }
@@ -180,14 +252,52 @@ impl DesktopLive {
             }
             None => {}
         }
-        // The server says the room has no save worker: say so while it lasts (rule 15).
-        let saving = self.watch.saving();
-        if !saving && !self.told_not_saving {
-            let text = app.ui.language.tr(gridcraft_live::desktop::NOT_SAVING_TEXT).to_owned();
-            app.notice = Some(Notice { text, kind: NoticeKind::Warning, action: None });
+    }
+
+    fn retrying(&mut self, lu: &mut gridcraft_ui_egui::live::LiveUi, now: f64) {
+        self.rejoin = Rejoin::Retrying(now);
+        lu.set_link_note(Some(RETRYING_TEXT));
+    }
+
+    /// After the relay refused the ticket of a window that was live (an expired ticket, say):
+    /// reads the session file at once and retries once with the newest ticket; when the retry
+    /// does not join in [`RETRY_GIVE_UP_SECS`], says the window is not live. A join clears it.
+    fn rejoin_after_refusal(&mut self, app: &mut SheetApp, now: f64) {
+        if !self.went_live {
+            return;
         }
-        self.told_not_saving = !saving;
-        ctx.request_repaint_after(std::time::Duration::from_secs_f64(gridcraft_live::desktop::WATCH_SECS));
+        let Some(lu) = app.live_mut() else { return };
+        if !matches!(lu.live().status(), LiveStatus::Refused(_)) {
+            if self.rejoin != Rejoin::Idle {
+                log::info!("live: joined again after the refusal");
+                self.rejoin = Rejoin::Idle;
+                lu.set_link_note(None);
+            }
+            return;
+        }
+        match self.rejoin {
+            Rejoin::Idle => {
+                log::warn!("live: the relay refused this window's ticket; reading the session file again and retrying once");
+                let rewrite = self.watch.look();
+                if matches!(rewrite, Some(Rewrite::End(_))) {
+                    self.take(app, rewrite, now);
+                    return;
+                }
+                // The newest ticket, fresh from the file or the one already handed.
+                let ticket = match rewrite {
+                    Some(Rewrite::Ticket(t)) => t,
+                    _ => self.watch.ticket().to_owned(),
+                };
+                self.retrying(lu, now);
+                lu.live_mut().renew_ticket(ticket);
+            }
+            Rejoin::Retrying(since) if now - since >= RETRY_GIVE_UP_SECS => {
+                log::warn!("live: the retry was refused too; not live until the launcher hands a fresh ticket");
+                self.rejoin = Rejoin::GaveUp;
+                lu.set_link_note(Some(REFUSED_TEXT));
+            }
+            Rejoin::Retrying(_) | Rejoin::GaveUp => {}
+        }
     }
 }
 
@@ -201,6 +311,7 @@ pub fn tell_not_live(app: &mut SheetApp, error: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gridcraft_live::desktop::WATCH_SECS;
 
     fn dir(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("gridcraft-live-session-{name}-{}", std::process::id()));
@@ -250,7 +361,14 @@ mod tests {
 
     /// One window frame at `t` seconds: the launcher's side, then the window's logic.
     fn frame(ctx: &egui::Context, app: &mut SheetApp, desk: &mut DesktopLive, t: f64) {
-        let mut out = ctx.run_ui(egui::RawInput { time: Some(t), ..Default::default() }, |ui| {
+        frame_at(ctx, app, desk, t, t);
+    }
+
+    /// A frame whose egui time is `shown` (a hidden window's stays at its last shown frame) while
+    /// the app's clock says `t`.
+    fn frame_at(ctx: &egui::Context, app: &mut SheetApp, desk: &mut DesktopLive, shown: f64, t: f64) {
+        desk.clock = Box::new(move || t);
+        let mut out = ctx.run_ui(egui::RawInput { time: Some(shown), ..Default::default() }, |ui| {
             let ctx = ui.ctx().clone();
             desk.frame(app, &ctx);
             app.logic(&ctx);
@@ -327,6 +445,98 @@ mod tests {
         let path = d.join("gone.json");
         assert!(open(&path, Some(&d.join("Plan.xlsx")), &mut Session::new()).is_err());
         assert!(!reason(&path).is_empty(), "the launcher still hears of it");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The launcher's rewrite: a temporary file renamed over the session file, with `ticket`.
+    fn rewrite(path: &Path, ticket: &str) {
+        let mut j: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        j["ticket"] = serde_json::json!(ticket);
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, j.to_string()).unwrap();
+        std::fs::rename(&tmp, path).unwrap();
+    }
+
+    fn status(app: &SheetApp) -> (String, bool) {
+        app.live().expect("live").status_text(app.ui.language)
+    }
+
+    /// F5: a window covered by another runs only `App::logic`, and egui's time stays at its last
+    /// shown frame, so a watch on egui's time never looked again and the launcher's renewal was
+    /// missed until the relay dropped the link at the old ticket's expiry; the window still said
+    /// "Live". Here the window is covered and busy (a frame every 16 ms) while the launcher
+    /// renames fresh tickets over the session file, the relay refuses, and then takes it back.
+    #[test]
+    fn a_renewal_while_covered_is_handed_over_and_a_refusal_retries_once_with_the_newest_ticket() {
+        use craft_live::testing::{MemRelay, ROOM};
+        let d = dir("renewal");
+        let (path, working, _) = unreachable(&d);
+        let mut j: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        j["room"] = serde_json::json!(ROOM);
+        std::fs::write(&path, j.to_string()).unwrap();
+        rewrite(&path, "e30.first");
+        let relay = MemRelay::new();
+        let hub = relay.connect("alice", "Alice", true);
+        let link = hub.clone();
+        let file = SessionFile::load(&path).unwrap();
+        let mut session = Session::new();
+        let (live, mut desk) = start_on(&path, &file, &working, &mut session, DynHub(Box::new(hub)), None).expect("starts");
+        let services = gridcraft_ui_egui::Services { live: Some(live), room_saves: true, ..Default::default() };
+        let mut app = SheetApp::new(session, services);
+        let ctx = egui::Context::default();
+        let newest = |relay: &MemRelay| relay.tokens(&link).last().cloned();
+        let mut t = 0.0;
+        for _ in 0..5 {
+            t += 0.1;
+            frame(&ctx, &mut app, &mut desk, t);
+        }
+        assert_eq!(status(&app), ("Live".to_owned(), false), "joined while shown");
+        // Covered from here on: egui's time stays where it was, the app's clock runs.
+        let shown = t;
+        let mut busy = |app: &mut SheetApp, desk: &mut DesktopLive, secs: f64, step: f64| {
+            let end = t + secs;
+            while t < end {
+                t += step;
+                frame_at(&ctx, app, desk, shown, t);
+            }
+        };
+        rewrite(&path, "e30.second");
+        busy(&mut app, &mut desk, WATCH_SECS + 0.5, 0.016);
+        assert_eq!(newest(&relay).as_deref(), Some("e30.second"), "the renewal reached the link while covered");
+        assert_eq!(status(&app).0, "Live");
+
+        // Renewed again, and the relay refuses the link before the next look.
+        rewrite(&path, "e30.third");
+        relay.refuse(&link, "auth", "token rejected");
+        busy(&mut app, &mut desk, 0.1, 0.016);
+        assert_eq!(newest(&relay).as_deref(), Some("e30.third"), "read again at once, and retried with the newest ticket");
+        assert_eq!(status(&app), (RETRYING_TEXT.to_owned(), true), "not \"Live\" while refused");
+        relay.drop_link(&link);
+        relay.restore_link(&link);
+        busy(&mut app, &mut desk, 0.5, 0.016);
+        assert_eq!(status(&app), ("Live".to_owned(), false), "live again once the relay took it");
+
+        // Refused again, and the retry with the same newest ticket too: honestly not live.
+        relay.refuse(&link, "auth", "token rejected");
+        busy(&mut app, &mut desk, 0.1, 0.016);
+        assert_eq!(status(&app).0, RETRYING_TEXT);
+        let handed = relay.tokens(&link).len();
+        assert_eq!(newest(&relay).as_deref(), Some("e30.third"));
+        busy(&mut app, &mut desk, RETRY_GIVE_UP_SECS + 0.5, 0.05);
+        assert_eq!(status(&app), (REFUSED_TEXT.to_owned(), true));
+        assert_eq!(relay.tokens(&link).len(), handed, "retried once only");
+        assert!(app.run("cell.set", serde_json::json!({"cell": "A2", "input": "7"})).is_err(), "and takes no edits");
+
+        // The launcher's next ticket is a fresh try, and it joins.
+        rewrite(&path, "e30.fourth");
+        busy(&mut app, &mut desk, WATCH_SECS + 0.5, 0.016);
+        assert_eq!(newest(&relay).as_deref(), Some("e30.fourth"));
+        assert_eq!(status(&app).0, RETRYING_TEXT);
+        relay.drop_link(&link);
+        relay.restore_link(&link);
+        busy(&mut app, &mut desk, 0.5, 0.016);
+        assert_eq!(status(&app), ("Live".to_owned(), false));
+        app.run("cell.set", serde_json::json!({"cell": "A2", "input": "7"})).expect("edits go to the room again");
         let _ = std::fs::remove_dir_all(&d);
     }
 }
